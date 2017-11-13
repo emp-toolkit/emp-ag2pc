@@ -46,6 +46,7 @@ before_install:
   - bash ./emp-readme/scripts/install_packages.sh
   - bash ./emp-readme/scripts/install_relic.sh
   - bash ./emp-readme/scripts/install_emp-tool.sh
+  - bash ./emp-readme/scripts/install_emp-ot.sh
 
 script:
   - cmake -DUSE_RANDOM_DEVICE=ON -DCMAKE_BUILD_TYPE=$TYPE . && make
