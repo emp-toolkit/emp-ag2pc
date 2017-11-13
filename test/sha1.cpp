@@ -1,19 +1,14 @@
 #include <emp-tool/emp-tool.h>
-#include "fpre.h"
-#include "c2pc_config.h"
+#include "test/single_execution.h"
 using namespace std;
 using namespace emp;
 
 int main(int argc, char** argv) {
-	int port, party;
+	int party, port;
 	parse_party_and_port(argv, &party, &port);
-
 	NetIO* io = new NetIO(party==ALICE ? nullptr:IP, port);
-	int size = atoi(argv[3]);
-	Fpre fpre(io, party, size);
-	auto t1 = clock_start();
-	fpre.refill();
-	cout << size<<"\t"<<time_from(t1)<<endl;
+	io->set_nodelay();
+	test(party, io, "sha-1.txt", string("92b404e556588ced6c1acd4ebf053f6809f73a93"));
 	delete io;
 	return 0;
 }
