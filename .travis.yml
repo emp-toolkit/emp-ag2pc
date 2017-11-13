@@ -49,6 +49,7 @@ before_install:
   - bash ./emp-readme/scripts/install_emp-ot.sh
 
 script:
+  - cat /proc/cpuinfo
   - cmake -DUSE_RANDOM_DEVICE=ON -DCMAKE_BUILD_TYPE=$TYPE . && make
   - ./run ./bin/aes 12345  
   - ./run ./bin/sha1 12345  
