@@ -62,7 +62,8 @@ class Fpre {public:
 		res.push_back(pool->enqueue([this](){
 			io2[0]->flush();
 			if(party == ALICE) abit2[0]->setup_recv();
-			else abit2[0]->setup_send(); io2[0]->flush();
+			else abit2[0]->setup_send(); 
+			io2[0]->flush();
 		}));
 		res[0].get();
 		res[1].get();
@@ -116,17 +117,16 @@ class Fpre {public:
 		for(int i = 0; i < THDS; ++i) {
 			int start = i*batch_size/THDS;
 			int length = batch_size/THDS;
-			int I = i;
-			res.push_back(pool->enqueue([this, start, length, I](){
-				io[I]->flush();
-				io2[I]->flush();
-				generate(MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, length * bucket_size, I);
-				io[I]->flush();
-				io2[I]->flush();
-				check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == ALICE, length * bucket_size, io[I], I);
-				io[I]->flush();
-				check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == BOB, length * bucket_size, io2[I], I);
-				io2[I]->flush();
+			res.push_back(pool->enqueue([this, start, length, i](){
+				io[i]->flush();
+				io2[i]->flush();
+				generate(MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, length * bucket_size, i);
+				io[i]->flush();
+				io2[i]->flush();
+				check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == ALICE, length * bucket_size, io[i], i);
+				io[i]->flush();
+				check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == BOB, length * bucket_size, io2[i], i);
+				io2[i]->flush();
 			}));
 		}
 		for(int i = 0; i < THDS; ++i)
@@ -143,7 +143,10 @@ class Fpre {public:
 		cout << "\t Fpre: Permute N Combine:\t"<< t2-t1<<endl;
 		check_correctness(MAC, KEY, r, batch_size);
 #endif
-		//		cout << eq->compare()<<endl<<flush;
+		for(int i = 0; i < THDS; ++i)
+			if(!eq[i]->compare()) {
+				error("FEQ error\n");
+			}
 	}
 	void generate(block * MAC, block * KEY, bool * r, int length, int I) {
 		if (party == ALICE) {
@@ -185,7 +188,7 @@ class Fpre {public:
 
 				io[I]->send_data(&data[i], 1);
 			}
-			bool * bb = new bool[length];
+			bool *bb = new bool[length];
 			recv_bool(io[I], bb, length);
 			for(int i = 0; i < length; ++i) {
 				if(bb[i]) KEY[3*i+2] = xorBlocks(KEY[3*i+2], Delta);

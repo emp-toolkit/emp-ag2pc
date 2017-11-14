@@ -30,9 +30,6 @@ Please send email to wangxiao1254@gmail.com
 
 
 ##TODOs
-
-1. use SSE for send_bool()
-
 2. clean up code
 
 3. use delta_ot instead of Abit

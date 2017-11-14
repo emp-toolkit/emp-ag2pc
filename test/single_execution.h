@@ -33,7 +33,7 @@ void test(int party, NetIO* io, string name, string check_output = "") {
 		string res = "";
 		for(int i = 0; i < cf.n3; ++i)
 			res += (out[i]?"1":"0");
-			cout << (res == hex_to_binary(check_output)? "GOOD!":"BAD!")<<endl;
+		cout << (res == hex_to_binary(check_output)? "GOOD!":"BAD!")<<endl;
 	}
 	delete[] in;
 	delete[] out;
