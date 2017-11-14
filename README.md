@@ -32,8 +32,6 @@ Please send email to wangxiao1254@gmail.com
 ##TODOs
 2. clean up code
 
-3. use delta_ot instead of Abit
-
 4. improve multithreading code using lambda function
 
 5. improve testing code

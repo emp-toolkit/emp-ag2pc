@@ -2,6 +2,8 @@
 #define __HELPER
 #include <emp-tool/emp-tool.h>
 #include "c2pc_config.h"
+#include <immintrin.h>
+
 using std::future;
 using std::cout;
 using std::endl;

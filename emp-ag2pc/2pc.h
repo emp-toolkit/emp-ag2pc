@@ -1,7 +1,6 @@
 #ifndef C2PC_H__
 #define C2PC_H__
 #include "fpre.h"
-#include "abit.h"
 #include <emp-tool/emp-tool.h>
 using std::flush;
 using std::cout;

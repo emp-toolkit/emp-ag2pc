@@ -1,15 +1,15 @@
 #ifndef FPRE_H__
 #define FPRE_H__
 #include <emp-tool/emp-tool.h>
-#include <bitset>
+#include <emp-ot/emp-ot.h>
 #include <thread>
-#include "abit.h"
 #include "feq.h"
+#include "emp-ag2pc/helper.h"
 #include "c2pc_config.h"
 
 namespace emp {
 //#define __debug
-void abit_run(ABit * abit, NetIO * io, bool send, block * blocks, bool * bools, int length) {
+void abit_run(DeltaOT * abit, NetIO * io, bool send, block * blocks, bool * bools, int length) {
 	io->flush();
 	if(send) {
 		abit->send(blocks, length);
@@ -35,12 +35,14 @@ class Fpre {public:
 	PRP *prps;
 	NetIO *io[THDS];
 	NetIO *io2[THDS];
-	ABit *abit1[THDS], *abit2[THDS];
+	DeltaOT *abit1[THDS], *abit2[THDS];
 	block Delta;
 	Feq *eq[THDS];
 	block * MAC = nullptr, *KEY = nullptr;
 	bool * r = nullptr;
+	block * pretable = nullptr;
 	Fpre(NetIO * in_io, int in_party, int bsize = 1000) {
+		pretable = DeltaOT::preTable(40);
 		pool = new ThreadPool(THDS*2);
 		prps = new PRP[THDS];
 		this->party = in_party;
@@ -49,28 +51,36 @@ class Fpre {public:
 			io2[i] = new NetIO(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port+2*i+2, true);
 			eq[i] = new Feq(io[i], party);
 		}
-		abit1[0] = new ABit(io[0]);
-		abit2[0] = new ABit(io2[0]);
+		abit1[0] = new DeltaOT(io[0], pretable, 40);
+		abit2[0] = new DeltaOT(io2[0], pretable, 40);
 
 		vector<future<void>> res;
-		res.push_back(pool->enqueue([this](){
+		bool tmp[256];prg.random_bool(tmp, 256);
+		res.push_back(pool->enqueue([this, tmp](){
 			io[0]->flush();
-			if(party == ALICE) abit1[0]->setup_send();
+			if(party == ALICE) abit1[0]->setup_send(tmp);
 			else abit1[0]->setup_recv();
 			io[0]->flush();
 		}));
-		res.push_back(pool->enqueue([this](){
+		res.push_back(pool->enqueue([this, tmp](){
 			io2[0]->flush();
 			if(party == ALICE) abit2[0]->setup_recv();
-			else abit2[0]->setup_send(); 
+			else abit2[0]->setup_send(tmp); 
 			io2[0]->flush();
 		}));
 		res[0].get();
 		res[1].get();
-			for(int i = 1; i < THDS; ++i) {
-				abit1[i] = abit1[0]->clone(io[i], party == ALICE);
-				abit2[i] = abit2[0]->clone(io2[i], party == BOB);
+		for(int i = 1; i < THDS; ++i) {
+			abit1[i] = new DeltaOT(io[i], pretable, 40);
+			abit2[i] = new DeltaOT(io2[i], pretable, 40);
+			if (party == ALICE) {
+				abit1[i]->setup_send(abit1[0]->s, abit1[0]->k0);
+				abit2[i]->setup_recv(abit2[0]->k0, abit2[0]->k1);
+			} else {
+				abit1[i]->setup_recv(abit1[0]->k0, abit1[0]->k1);
+				abit2[i]->setup_send(abit2[0]->s, abit2[0]->k0);
 			}
+		}
 		if(party == ALICE) Delta = abit1[0]->Delta;
 		else Delta = abit2[0]->Delta;
 		set_batch_size(bsize);

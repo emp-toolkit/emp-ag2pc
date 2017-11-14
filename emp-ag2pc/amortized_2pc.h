@@ -1,8 +1,8 @@
 #ifndef AMORTIZED_C2PC_H_e_
 #define AMORTIZED_C2PC_H__
 #include "fpre.h"
-#include "abit.h"
 #include <emp-tool/emp-tool.h>
+#include <emp-ot/emp-ot.h>
 
 //#define __debug
 namespace emp {
