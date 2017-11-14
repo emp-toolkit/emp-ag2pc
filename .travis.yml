@@ -5,12 +5,28 @@ matrix:
     - os: linux
       dist: trusty
       sudo: required
-      env: TYPE=Debug
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-7
+      env: 
+        TYPE=Debug
+        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
 
     - os: linux
       dist: trusty
       sudo: required
-      env: TYPE=Release
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-7
+      env: 
+        TYPE=Release
+        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
       
     - os: linux
       dist: trusty
@@ -18,11 +34,11 @@ matrix:
       addons:
         apt:
           sources:
-            - llvm-toolchain-trusty-3.9
+            - llvm-toolchain-trusty-5.0
           packages:
-            - clang-3.9
+            - clang-5.0
       env:
-        - MATRIX_EVAL="CC=clang-3.9 && CXX=clang++-3.9"
+        - MATRIX_EVAL="CC=clang-5.0 && CXX=clang++-5.0"
         - TYPE=Release
 
     - os: linux
@@ -31,11 +47,11 @@ matrix:
       addons:
         apt:
           sources:
-            - llvm-toolchain-trusty-3.9
+            - llvm-toolchain-trusty-5.0
           packages:
-            - clang-3.9
+            - clang-5.0
       env:
-        - MATRIX_EVAL="CC=clang-3.9 && CXX=clang++-3.9"
+        - MATRIX_EVAL="CC=clang-5.0 && CXX=clang++-5.0"
         - TYPE=Debug
 
 
