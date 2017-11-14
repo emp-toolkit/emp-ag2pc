@@ -10,10 +10,10 @@ matrix:
           sources:
             - ubuntu-toolchain-r-test
           packages:
-            - g++-7
+            - g++-6
       env: 
         TYPE=Debug
-        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
+        MATRIX_EVAL="CC=gcc-6 && CXX=g++-6"
 
     - os: linux
       dist: trusty
@@ -23,10 +23,10 @@ matrix:
           sources:
             - ubuntu-toolchain-r-test
           packages:
-            - g++-7
+            - g++-6
       env: 
         TYPE=Release
-        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
+        MATRIX_EVAL="CC=gcc-6 && CXX=g++-6"
       
     - os: linux
       dist: trusty
@@ -34,11 +34,11 @@ matrix:
       addons:
         apt:
           sources:
-            - llvm-toolchain-trusty-3.9
+            - llvm-toolchain-trusty-4.0
           packages:
-            - clang-3.9
+            - clang-4.0
       env:
-        - MATRIX_EVAL="CC=clang-3.9 && CXX=clang++-3.9"
+        - MATRIX_EVAL="CC=clang-4.0 && CXX=clang++-4.0"
         - TYPE=Release
 
     - os: linux
@@ -47,11 +47,11 @@ matrix:
       addons:
         apt:
           sources:
-            - llvm-toolchain-trusty-3.9
+            - llvm-toolchain-trusty-4.0
           packages:
-            - clang-3.9
+            - clang-4.0
       env:
-        - MATRIX_EVAL="CC=clang-3.9 && CXX=clang++-3.9"
+        - MATRIX_EVAL="CC=clang-4.0 && CXX=clang++-4.0"
         - TYPE=Debug
 
 
