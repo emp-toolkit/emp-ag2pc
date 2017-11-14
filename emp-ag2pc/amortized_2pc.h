@@ -1,4 +1,4 @@
-#ifndef AMORTIZED_C2PC_H_e_
+#ifndef AMORTIZED_C2PC_H__
 #define AMORTIZED_C2PC_H__
 #include "fpre.h"
 #include "abit.h"

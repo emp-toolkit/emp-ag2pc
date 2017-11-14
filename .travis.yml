@@ -5,12 +5,28 @@ matrix:
     - os: linux
       dist: trusty
       sudo: required
-      env: TYPE=Debug
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-7
+      env: 
+        TYPE=Debug
+        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
 
     - os: linux
       dist: trusty
       sudo: required
-      env: TYPE=Release
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-7
+      env: 
+        TYPE=Release
+        MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
       
     - os: linux
       dist: trusty
