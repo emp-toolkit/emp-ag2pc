@@ -27,33 +27,6 @@ matrix:
       env: 
         TYPE=Release
         MATRIX_EVAL="CC=gcc-7 && CXX=g++-7"
-      
-    - os: linux
-      dist: trusty
-      sudo: required
-      addons:
-        apt:
-          sources:
-            - llvm-toolchain-trusty-5.0
-          packages:
-            - clang-5.0
-      env:
-        - MATRIX_EVAL="CC=clang-5.0 && CXX=clang++-5.0"
-        - TYPE=Release
-
-    - os: linux
-      dist: trusty
-      sudo: required
-      addons:
-        apt:
-          sources:
-            - llvm-toolchain-trusty-5.0
-          packages:
-            - clang-5.0
-      env:
-        - MATRIX_EVAL="CC=clang-5.0 && CXX=clang++-5.0"
-        - TYPE=Debug
-
 
 
 before_install:
