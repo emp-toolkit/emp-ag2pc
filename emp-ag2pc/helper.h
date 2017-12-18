@@ -13,22 +13,48 @@ using std::flush;
 namespace emp {
 
 void send_bool_aligned(NetIO* io, const bool * data, int length) {
-	uint64_t * data64 = (uint64_t * )data;
+	unsigned long long * data64 = (unsigned long long * )data;
 	int i = 0;
+#if !defined(__BMI2__)
+	unsigned long long mask;
+#endif
 	for(; i < length/8; ++i) {
-		uint64_t tmp = _pext_u64(data64[i], 0x0101010101010101ULL);
+		unsigned long long tmp;
+#if defined(__BMI2__)
+		tmp = _pext_u64(data64[i], 0x0101010101010101ULL);
+#else
+		// https://github.com/Forceflow/libmorton/issues/6
+		tmp = 0;
+		mask = 0x0101010101010101ULL;
+		for (unsigned long long bb = 1; mask != 0; bb += bb) {
+			if (data64[i] & mask & -mask) { tmp |= bb; }
+			mask &= (mask - 1);
+		}
+#endif
 		io->send_data(&tmp, 1);
 	}
 	if (8*i != length)
 		io->send_data(data + 8*i, length - 8*i);
 }
 void recv_bool_aligned(NetIO* io, bool * data, int length) {
-	uint64_t * data64 = (uint64_t *) data;
+	unsigned long long * data64 = (unsigned long long *) data;
 	int i = 0;
+#if !defined(__BMI2__)
+	unsigned long long mask;
+#endif
 	for(; i < length/8; ++i) {
-		uint64_t tmp = 0;
+		unsigned long long tmp = 0;
 		io->recv_data(&tmp, 1);
-		data64[i] = _pdep_u64(tmp, 0x0101010101010101ULL);
+#if defined(__BMI2__)
+		data64[i] = _pdep_u64(tmp, (unsigned long long) 0x0101010101010101ULL);
+#else
+		data64[i] = 0;
+		mask = 0x0101010101010101ULL;
+                for (unsigned long long bb = 1; mask != 0; bb += bb) {
+                        if (tmp & bb) {data64[i] |= mask & (-mask); }
+                        mask &= (mask - 1);
+                }
+#endif
 	}
 	if (8*i != length)
 		io->recv_data(data + 8*i, length - 8*i);
