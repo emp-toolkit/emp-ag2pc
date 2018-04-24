@@ -35,3 +35,6 @@ Please send email to wangxiao1254@gmail.com
 4. improve multithreading code using lambda function
 
 5. improve testing code
+
+## Acknowledgement
+This work was supported in part by the National Science Foundation under Awards #1111599 and #1563722.
