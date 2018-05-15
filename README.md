@@ -1,4 +1,4 @@
-# emp-ag2pc[![Build Status](https://travis-ci.org/emp-toolkit/emp-ag2pc.svg?branch=master)](https://travis-ci.org/emp-toolkit/emp-m2pc)
+# emp-ag2pc[![Build Status](https://travis-ci.org/emp-toolkit/emp-ag2pc.svg?branch=master)](https://travis-ci.org/emp-toolkit/emp-ag2pc)
 Authenticated Garbling and Efficient Maliciously Secure Two-Party Computation
 
 <img src="https://raw.githubusercontent.com/emp-toolkit/emp-readme/master/art/logo-full.jpg" width=300px/>
@@ -35,3 +35,6 @@ Please send email to wangxiao1254@gmail.com
 4. improve multithreading code using lambda function
 
 5. improve testing code
+
+## Acknowledgement
+This work was supported in part by the National Science Foundation under Awards #1111599 and #1563722.
