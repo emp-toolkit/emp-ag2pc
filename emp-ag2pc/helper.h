@@ -64,18 +64,26 @@ void send_bool(NetIO * io, bool * data, int length) {
 	void * ptr = (void *)data;
 	size_t space = length;
 	void * aligned = boost::alignment::align(alignof(uint64_t), sizeof(uint64_t), ptr, space);
-	int diff = length - space;
-	io->send_data(data, diff);
-	send_bool_aligned(io, (const bool*)aligned, length - diff);
+    if(aligned == nullptr)
+        io->send_data(data, length);
+    else{
+        int diff = length - space;
+        io->send_data(data, diff);
+        send_bool_aligned(io, (const bool*)aligned, length - diff);
+    }
 }
 
 void recv_bool(NetIO * io, bool * data, int length) {
 	void * ptr = (void *)data;
 	size_t space = length;
 	void * aligned = boost::alignment::align(alignof(uint64_t), sizeof(uint64_t), ptr, space);
-	int diff = length - space;
-	io->recv_data(data, diff);
-	recv_bool_aligned(io, (bool*)aligned, length - diff);
+    if(aligned == nullptr)
+        io->recv_data(data, length);
+    else{
+        int diff = length - space;
+        io->recv_data(data, diff);
+        recv_bool_aligned(io, (bool*)aligned, length - diff);
+    }
 }
 
 template<int B>
