@@ -16,25 +16,25 @@ public:
 		h.put(data, length);
 	}
 	bool compare() {
-		char dgst[21];
-		char dgst2[20];
-		char dgst3[20];
-		char dgst4[20];
-		dgst[20] = 0x0;
+		char dgst[Hash::DIGEST_SIZE + 1];
+		char dgst2[Hash::DIGEST_SIZE];
+		char dgst3[Hash::DIGEST_SIZE];
+		char dgst4[Hash::DIGEST_SIZE];
+		dgst[Hash::DIGEST_SIZE] = 0x0;
 		h.digest(dgst);
-		dgst[20] = party&0xF;
-		Hash::hash_once(dgst2, dgst, 21);
-		dgst[20] = (ALICE+BOB-party)&0xF;
-		Hash::hash_once(dgst3, dgst, 21);
+		dgst[Hash::DIGEST_SIZE] = party & 0xF;
+		Hash::hash_once(dgst2, dgst, sizeof(dgst));
+		dgst[Hash::DIGEST_SIZE] = (ALICE + BOB - party) & 0xF;
+		Hash::hash_once(dgst3, dgst, sizeof(dgst));
 		if (party == ALICE) {
-			io->send_data(dgst2, 20);
-			io->recv_data(dgst4, 20);
+			io->send_data(dgst2, Hash::DIGEST_SIZE);
+			io->recv_data(dgst4, Hash::DIGEST_SIZE);
 		} else {
-			io->recv_data(dgst4, 20);
-			io->send_data(dgst2, 20);
+			io->recv_data(dgst4, Hash::DIGEST_SIZE);
+			io->send_data(dgst2, Hash::DIGEST_SIZE);
 			io->flush();
 		}
-		return strncmp(dgst3, dgst4, 20) == 0;
+		return strncmp(dgst3, dgst4, Hash::DIGEST_SIZE) == 0;
 	}
 };
 
