@@ -8,7 +8,7 @@ int main(int argc, char** argv) {
 	parse_party_and_port(argv, &party, &port);
 	NetIO* io = new NetIO(party==ALICE ? nullptr:IP, port);
 	io->set_nodelay();
-	test(party, io, "AES-non-expanded.txt");
+	test(party, io, circuit_file_location+"AES-non-expanded.txt");
 	delete io;
 	return 0;
 }

@@ -5,7 +5,7 @@ using namespace emp;
 
 const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH);
 void test(int party, NetIO* io, string name, string check_output = "") {
-	string file = circuit_file_location + name;
+	string file = name;//circuit_file_location + name;
 	CircuitFile cf(file.c_str());
 	auto t1 = clock_start();
 	C2PC twopc(io, party, &cf);
