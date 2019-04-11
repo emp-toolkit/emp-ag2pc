@@ -93,7 +93,7 @@ class C2PC { public:
 	bool * ANDS_value = nullptr;
 	void function_independent() {
 		if(party == ALICE)
-			prg.random_block(labels, total_pre);
+			prg.random_block(labels, cf->num_wire);
 
 		fpre->refill();
 		ANDS_mac = fpre->MAC;
