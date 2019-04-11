@@ -33,7 +33,7 @@ before_install:
   - bash ./emp-readme/scripts/install_emp-ot.sh
 
 script:
-  - cat /proc/cpuinfo
+  - cat /proc/cpuinfo || true
   - cmake -DCMAKE_BUILD_TYPE=$TYPE . && make
   - ./run ./bin/simple_circuit 12345  
   - ./run ./bin/aes 12345  
