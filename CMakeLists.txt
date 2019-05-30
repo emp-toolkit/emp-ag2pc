@@ -3,12 +3,16 @@ project (emp-ag2pc)
 set(NAME "emp-ag2pc")
 
 find_path(CMAKE_FOLDER NAMES cmake/emp-tool-config.cmake)
+
 include(${CMAKE_FOLDER}/cmake/common.cmake)
 include(${CMAKE_FOLDER}/cmake/source_of_randomness.cmake)
 include(${CMAKE_FOLDER}/cmake/threading.cmake)
 
 FIND_PACKAGE(emp-ot REQUIRED)
 INCLUDE_DIRECTORIES(${EMP-OT_INCLUDE_DIRS})
+
+install(DIRECTORY emp-ag2pc DESTINATION include)
+install(DIRECTORY cmake/ DESTINATION cmake)
 
 # Test cases
 macro (add_test _name)
