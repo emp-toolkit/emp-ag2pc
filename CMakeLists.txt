@@ -19,10 +19,11 @@ macro (add_test _name)
 	add_test_with_lib(${_name} ${EMP-OT_LIBRARIES})
 endmacro()
 
-add_test(aes)
-add_test(sha1)
-add_test(sha256)
-add_test (simple_circuit)
-#add_test (abit)
-#add_test (amortized_2pc)
+# add_test(aes)
+# add_test(sha1)
+# add_test(sha256)
+# add_test (simple_circuit)
+# add_test (gr)
+add_test (add_2)
+
 
