@@ -24,6 +24,6 @@ endmacro()
 # add_test(sha256)
 # add_test (simple_circuit)
 # add_test (gr)
-add_test (add_2)
-
+# add_test (add_2)
+add_test (sha256-impl)
 
