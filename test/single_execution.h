@@ -4,9 +4,7 @@ using namespace std;
 using namespace emp;
 
 const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH);
-void test(int party, NetIO* io, string name, string check_output = "") {
-	string file = name;//circuit_file_location + name;
-	CircuitFile cf(file.c_str());
+void test_with_in(int party, NetIO* io, bool *in, CircuitFile cf, string check_output = "") {
 	auto t1 = clock_start();
 	C2PC twopc(io, party, &cf);
 	io->flush();
@@ -22,9 +20,7 @@ void test(int party, NetIO* io, string name, string check_output = "") {
 	io->flush();
 	cout << "dep:\t"<<party<<"\t"<<time_from(t1)<<endl;
 
-	bool *in = new bool[max(cf.n1, cf.n2)];
 	bool * out = new bool[cf.n3];
-	memset(in, false, max(cf.n1, cf.n2));
 	memset(out, false, cf.n3);
 	t1 = clock_start();
 	twopc.online(in, out);
@@ -35,7 +31,14 @@ void test(int party, NetIO* io, string name, string check_output = "") {
 			res += (out[i]?"1":"0");
 		cout << (res == hex_to_binary(check_output)? "GOOD!":"BAD!")<<endl;
 	}
-	delete[] in;
 	delete[] out;
 }
 
+void test(int party, NetIO* io, string name, string check_output = "") {
+	string file = name;//circuit_file_location + name;
+	CircuitFile cf(file.c_str());
+	bool *in = new bool[max(cf.n1, cf.n2)];
+	memset(in, false, max(cf.n1, cf.n2));
+	test_with_in(party, io, in, cf, check_output);
+	delete[] in;
+}

@@ -23,6 +23,7 @@ add_test(aes)
 add_test(sha1)
 add_test(sha256)
 add_test (simple_circuit)
+add_test(addition)
 #add_test (abit)
 #add_test (amortized_2pc)
 
