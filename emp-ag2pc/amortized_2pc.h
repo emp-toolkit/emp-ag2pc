@@ -291,9 +291,9 @@ class AmortizedC2PC { public:
 				for(int i = cf->n1; i < cf->n1+cf->n2; ++i) {
 					recv_partial_block<T, SSP>(io, &tmp, 1);
 					block ttt = key[e][i] ^ fpre->Delta;
-					ttt =  _mm_and_si128(ttt, MASK);
-					block mask_key = _mm_and_si128(key[e][i], MASK);
-					tmp =  _mm_and_si128(tmp, MASK);
+					ttt =  ttt & MASK;
+					block mask_key = key[e][i] & MASK;
+					tmp =  tmp & MASK;
 
 					if(cmpBlock(&tmp, &mask_key, 1))
 						mask[e][i] = false;
@@ -306,9 +306,9 @@ class AmortizedC2PC { public:
 				for(int i = 0; i < cf->n1; ++i) {
 					recv_partial_block<T, SSP>(io, &tmp, 1);
 					block ttt = key[e][i] ^ fpre->Delta;
-					ttt =  _mm_and_si128(ttt, MASK);
-					tmp =  _mm_and_si128(tmp, MASK);
-					block mask_key = _mm_and_si128(key[e][i], MASK);
+					ttt =  ttt & MASK;
+					tmp =  tmp & MASK;
+					block mask_key = key[e][i] & MASK;
 
 					if(cmpBlock(&tmp, &mask_key, 1)) {
 						mask[e][i] = false;
@@ -480,9 +480,9 @@ class AmortizedC2PC { public:
 			for(int i = cf->n1; i < cf->n1+cf->n2; ++i) {
 				recv_partial_block<T, SSP>(fpre->io2[I], &tmp, 1);
 				block ttt = key[e][i] ^ fpre->Delta;
-				ttt =  _mm_and_si128(ttt, MASK);
-				block mask_key = _mm_and_si128(key[e][i], MASK);
-				tmp =  _mm_and_si128(tmp, MASK);
+				ttt =  ttt & MASK;
+				block mask_key = key[e][i] & MASK;
+				tmp =  tmp & MASK;
 				if(cmpBlock(&tmp, &mask_key, 1))
 					mask[e][i] = false;
 				else if(cmpBlock(&tmp, &ttt, 1))
@@ -493,9 +493,9 @@ class AmortizedC2PC { public:
 			for(int i = 0; i < cf->n1; ++i) {
 				recv_partial_block<T, SSP>(fpre->io2[I], &tmp, 1);
 				block ttt = key[e][i] ^ fpre->Delta;
-				ttt =  _mm_and_si128(ttt, MASK);
-				tmp =  _mm_and_si128(tmp, MASK);
-				block mask_key = _mm_and_si128(key[e][i], MASK);
+				ttt =  ttt & MASK;
+				tmp =  tmp & MASK;
+				block mask_key = key[e][i] & MASK;
 				if(cmpBlock(&tmp, &mask_key, 1)) {
 					mask[e][i] = false;
 				} else if(cmpBlock(&tmp, &ttt, 1)) {
@@ -555,9 +555,9 @@ class AmortizedC2PC { public:
 					GT[exec_times][ands][index][1] = GT[exec_times][ands][index][1] ^ H[1];
 
 					block ttt = GTK[exec_times][ands][index] ^ fpre->Delta;
-					ttt =  _mm_and_si128(ttt, MASK);
-					GTK[exec_times][ands][index] =  _mm_and_si128(GTK[exec_times][ands][index], MASK);
-					GT[exec_times][ands][index][0] =  _mm_and_si128(GT[exec_times][ands][index][0], MASK);
+					ttt =  ttt & MASK;
+					GTK[exec_times][ands][index] =  GTK[exec_times][ands][index] & MASK;
+					GT[exec_times][ands][index][0] =  GT[exec_times][ands][index][0] & MASK;
 
 					if(cmpBlock(&GT[exec_times][ands][index][0], &GTK[exec_times][ands][index], 1))
 						mask_input[cf->gates[4*i+2]] = false;
@@ -579,11 +579,11 @@ class AmortizedC2PC { public:
 			for(int i = 0; i < cf->n3; ++i) {
 				block tmp;
 				recv_partial_block<T, SSP>(io, &tmp, 1);
-				tmp =  _mm_and_si128(tmp, MASK);
+				tmp =  tmp & MASK;
 
 				block ttt = key[exec_times][cf->num_wire - cf-> n3 + i] ^ fpre->Delta;
-				ttt =  _mm_and_si128(ttt, MASK);
-				key[exec_times][cf->num_wire - cf-> n3 + i] =  _mm_and_si128(key[exec_times][cf->num_wire - cf-> n3 + i], MASK);
+				ttt =  ttt & MASK;
+				key[exec_times][cf->num_wire - cf-> n3 + i] =  key[exec_times][cf->num_wire - cf-> n3 + i] & MASK;
 
 				if(cmpBlock(&tmp, &key[exec_times][cf->num_wire - cf-> n3 + i], 1))
 					o[i] = false;

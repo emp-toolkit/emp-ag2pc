@@ -242,9 +242,9 @@ class C2PC { public:
 			for(int i = cf->n1; i < cf->n1+cf->n2; ++i) {
 				recv_partial_block<T, SSP>(io, &tmp, 1);
 				block ttt = key[i] ^ fpre->Delta;
-				ttt =  _mm_and_si128(ttt, MASK);
-				block mask_key = _mm_and_si128(key[i], MASK);
-				tmp =  _mm_and_si128(tmp, MASK);
+				ttt =  ttt & MASK;
+				block mask_key = key[i] & MASK;
+				tmp =  tmp & MASK;
 				if(cmpBlock(&tmp, &mask_key, 1))
 					mask[i] = false;
 				else if(cmpBlock(&tmp, &ttt, 1))
@@ -255,9 +255,9 @@ class C2PC { public:
 			for(int i = 0; i < cf->n1; ++i) {
 				recv_partial_block<T, SSP>(io, &tmp, 1);
 				block ttt = key[i] ^ fpre->Delta;
-				ttt =  _mm_and_si128(ttt, MASK);
-				tmp =  _mm_and_si128(tmp, MASK);
-				block mask_key = _mm_and_si128(key[i], MASK);
+				ttt =  ttt & MASK;
+				tmp =  tmp & MASK;
+				block mask_key = key[i] & MASK;
 				if(cmpBlock(&tmp, &mask_key, 1)) {
 					mask[i] = false;
 				} else if(cmpBlock(&tmp, &ttt, 1)) {
@@ -316,9 +316,9 @@ class C2PC { public:
 					GT[ands][index][1] = GT[ands][index][1] ^ H[1];
 
 					block ttt = GTK[ands][index] ^ fpre->Delta;
-					ttt =  _mm_and_si128(ttt, MASK);
-					GTK[ands][index] =  _mm_and_si128(GTK[ands][index], MASK);
-					GT[ands][index][0] =  _mm_and_si128(GT[ands][index][0], MASK);
+					ttt =  ttt & MASK;
+					GTK[ands][index] =  GTK[ands][index] & MASK;
+					GT[ands][index][0] =  GT[ands][index][0] & MASK;
 
 					if(cmpBlock(&GT[ands][index][0], &GTK[ands][index], 1))
 						mask_input[cf->gates[4*i+2]] = false;
