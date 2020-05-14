@@ -3,12 +3,44 @@
 using namespace std;
 using namespace emp;
 
+inline const char* hex_char_to_bin(char c) {
+	switch(toupper(c)) {
+		case '0': return "0000";
+		case '1': return "0001";
+		case '2': return "0010";
+		case '3': return "0011";
+		case '4': return "0100";
+		case '5': return "0101";
+		case '6': return "0110";
+		case '7': return "0111";
+		case '8': return "1000";
+		case '9': return "1001";
+		case 'A': return "1010";
+		case 'B': return "1011";
+		case 'C': return "1100";
+		case 'D': return "1101";
+		case 'E': return "1110";
+		case 'F': return "1111";
+		default: return "0";
+	}
+}
+
+
+inline std::string hex_to_binary(std::string hex) {
+	std::string bin;
+	for(unsigned i = 0; i != hex.length(); ++i)
+		bin += hex_char_to_bin(hex[i]);
+	return bin;
+}
+
 const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH);
-void test(int party, NetIO* io, string name, string check_output = "") {
+
+template<typename T>
+void test(int party, T* io, string name, string check_output = "") {
 	string file = name;//circuit_file_location + name;
 	CircuitFile cf(file.c_str());
 	auto t1 = clock_start();
-	C2PC twopc(io, party, &cf);
+	C2PC<T> twopc(io, party, &cf);
 	io->flush();
 	cout << "one time:\t"<<party<<"\t" <<time_from(t1)<<endl;
 

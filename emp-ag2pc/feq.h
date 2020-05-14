@@ -1,40 +1,48 @@
-#ifndef FEQ_H__
-#define FEQ_H__
+#ifndef EMP_AG2PC_FEQ_H__
+#define EMP_AG2PC_FEQ_H__
 #include <emp-tool/emp-tool.h>
 
 namespace emp {
-class Feq { 
-public:
+
+template<typename T>
+class Feq { public:
 	Hash h;
-	NetIO* io = nullptr;
+	T* io = nullptr;
 	int party;
-	Feq(NetIO* io, int party) {
+	Feq(T* io, int party) {
 		this->io = io;
 		this->party = party;
 	}
-	void add(void * data, int length) {
-		h.put(data, length);
+	void add_block(const block & in) {
+		h.put(&in, sizeof(block));
+	}
+
+	void add_data(const void * data, int len) {
+		h.put(data, len);
+	}
+
+	void dgst(char * dgst) {
+		h.digest(dgst);
 	}
 	bool compare() {
-		char dgst[Hash::DIGEST_SIZE + 1];
-		char dgst2[Hash::DIGEST_SIZE];
-		char dgst3[Hash::DIGEST_SIZE];
-		char dgst4[Hash::DIGEST_SIZE];
-		dgst[Hash::DIGEST_SIZE] = 0x0;
-		h.digest(dgst);
-		dgst[Hash::DIGEST_SIZE] = party & 0xF;
-		Hash::hash_once(dgst2, dgst, sizeof(dgst));
-		dgst[Hash::DIGEST_SIZE] = (ALICE + BOB - party) & 0xF;
-		Hash::hash_once(dgst3, dgst, sizeof(dgst));
-		if (party == ALICE) {
-			io->send_data(dgst2, Hash::DIGEST_SIZE);
-			io->recv_data(dgst4, Hash::DIGEST_SIZE);
+		char AR[Hash::DIGEST_SIZE+16];
+		char dgst[Hash::DIGEST_SIZE];
+		h.digest(AR);
+		if(party == ALICE) {
+			PRG prg;
+			prg.random_data(AR+Hash::DIGEST_SIZE, 16);
+			Hash::hash_once(dgst, AR, Hash::DIGEST_SIZE+16);
+			io->send_data(dgst, Hash::DIGEST_SIZE);
+			io->recv_data(dgst, Hash::DIGEST_SIZE);
+			io->send_data(AR+Hash::DIGEST_SIZE, 16);
 		} else {
-			io->recv_data(dgst4, Hash::DIGEST_SIZE);
-			io->send_data(dgst2, Hash::DIGEST_SIZE);
-			io->flush();
+			io->recv_data(dgst, Hash::DIGEST_SIZE);
+			io->send_data(AR, Hash::DIGEST_SIZE);
+			io->recv_data(AR+Hash::DIGEST_SIZE, 16);
+			Hash::hash_once(AR, AR, Hash::DIGEST_SIZE+16);
 		}
-		return strncmp(dgst3, dgst4, Hash::DIGEST_SIZE) == 0;
+		io->flush();
+		return memcmp(dgst, AR, Hash::DIGEST_SIZE)==0;
 	}
 };
 

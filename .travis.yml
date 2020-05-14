@@ -3,39 +3,51 @@ language: cpp
 matrix:
   include:
     - os: linux
-      dist: xenial
+      dist: bionic
       sudo: required
-      env: TYPE=Debug
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-8
+      env:
+         - MATRIX_EVAL="CC=gcc-8 && CXX=g++-8"
+         - TYPE=Debug
 
     - os: linux
-      dist: xenial
+      dist: bionic
       sudo: required
-      env: TYPE=Release
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-8
+      env:
+         - MATRIX_EVAL="CC=gcc-8 && CXX=g++-8"
+         - TYPE=Release
 
     - os: osx
       sudo: required
       env: 
         - TYPE=Release
-        - OPENSSL_ROOT_DIR=/usr/local/opt/openssl/
 
     - os: osx
       sudo: required
       env: 
         - TYPE=Debug
-        - OPENSSL_ROOT_DIR=/usr/local/opt/openssl/
-    
+      
 before_install:
   - eval "${MATRIX_EVAL}"
-  - git clone https://github.com/emp-toolkit/emp-readme.git
+  - git clone -brelease-2 https://github.com/emp-toolkit/emp-readme.git
   - bash ./emp-readme/scripts/install_packages.sh
-  - bash ./emp-readme/scripts/install_relic.sh
   - bash ./emp-readme/scripts/install_emp-tool.sh
   - bash ./emp-readme/scripts/install_emp-ot.sh
 
 script:
-  - cat /proc/cpuinfo || true
   - cmake -DCMAKE_BUILD_TYPE=$TYPE . && make
-  - ./run ./bin/simple_circuit 12345  
-  - ./run ./bin/aes 12345  
-  - ./run ./bin/sha1 12345  
-  - ./run ./bin/sha256 12345  
+  - ./run ./bin/triple
+  - ./run ./bin/aes 
+  - ./run ./bin/sha1 
+  - ./run ./bin/sha256 

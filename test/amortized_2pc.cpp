@@ -1,9 +1,9 @@
 #include <emp-tool/emp-tool.h>
-#include "amortized_2pc.h"
+#include "emp-ag2pc/amortized_2pc.h"
+#include "test/single_execution.h"
 using namespace std;
 using namespace emp;
 
-const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH);
 static char out3[] = "92b404e556588ced6c1acd4ebf053f6809f73a93";//bafbc2c87c33322603f38e06c3e0f79c1f1b1475";
 const static int runs = 4;
 int main(int argc, char** argv) {
@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
 	parse_party_and_port(argv, &party, &port);
 
 	NetIO* io = new NetIO(party==ALICE ? nullptr:IP, port);
-	io->set_nodelay();
+//	io->set_nodelay();
 	string file = "ands.txt";//circuit_file_location+"/AES-non-expanded.txt";//adder_32bit.txt";
 	file = circuit_file_location+"/AES-non-expanded.txt";//adder_32bit.txt";
 	file = circuit_file_location+"/sha-1.txt";
@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
 	CircuitFile cf(file.c_str());
 
 	auto t1 = clock_start();
-	AmortizedC2PC<runs> twopc(io, party, &cf);
+	AmortizedC2PC<NetIO, runs> twopc(io, party, &cf);
 	io->flush();
 	cout << "one time:\t"<<party<<"\t" <<time_from(t1)<<endl;
 	t1 = clock_start();

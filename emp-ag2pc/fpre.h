@@ -1,27 +1,17 @@
-#ifndef FPRE_H__
-#define FPRE_H__
+#ifndef EMP_AG2PC_FPRE_H__
+#define EMP_AG2PC_FPRE_H__
 #include <emp-tool/emp-tool.h>
 #include <emp-ot/emp-ot.h>
 #include <thread>
-#include "feq.h"
+#include "emp-ag2pc/feq.h"
 #include "emp-ag2pc/helper.h"
-#include "c2pc_config.h"
+#include "emp-ag2pc/leaky_deltaot.h"
+#include "emp-ag2pc/config.h"
 
 namespace emp {
 //#define __debug
-void abit_run(DeltaOT * abit, NetIO * io, bool send, block * blocks, bool * bools, int length) {
-	io->flush();
-	if(send) {
-		abit->send(blocks, length);
-	} else {
-		abit->recv(blocks, bools, length);
-	}
-	io->flush();
-}
 
-class Fpre;
-void combine_merge(Fpre * fpre, int start, int length, int I, bool * data, bool* data2, block * MAC2, block * KEY2, bool *r2, int * location);
-
+template<typename T>
 class Fpre {
 	public:
 		ThreadPool *pool;
@@ -33,85 +23,98 @@ class Fpre {
 		PRG prg;
 		PRP prp;
 		PRP *prps;
-		NetIO *io[THDS];
-		NetIO *io2[THDS];
-		DeltaOT *abit1[THDS], *abit2[THDS];
+		T *io[THDS];
+		T *io2[THDS];
+		int bandwidth() {
+			int sum = 0;
+			for(int i = 0; i < THDS; ++i) {
+				sum+=io[i]->counter;
+				sum+=io2[i]->counter;
+			}
+			return sum;
+		}
+		LeakyDeltaOT<T> *abit1[THDS], *abit2[THDS];
 		block Delta;
-		Feq *eq[THDS];
+		block ZDelta;
+		block one;
+		Feq<T> *eq[THDS*2];
 		block * MAC = nullptr, *KEY = nullptr;
-		bool * r = nullptr;
+		block * MAC_res = nullptr, *KEY_res = nullptr;
 		block * pretable = nullptr;
-		Fpre(NetIO * in_io, int in_party, int bsize = 1000) {
-			pretable = DeltaOT::preTable(40);
+		Fpre(T * in_io, int in_party, int bsize = 1000) {
 			pool = new ThreadPool(THDS*2);
-			prps = new PRP[THDS];
+			prps = new PRP[THDS*2];
 			this->party = in_party;
 			for(int i = 0; i < THDS; ++i) {
-				io[i] = new NetIO(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port+2*i+1, true);
-				io2[i] = new NetIO(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port+2*i+2, true);
-				eq[i] = new Feq(io[i], party);
+				io[i] = new T(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port, true);
+				io2[i] = new T(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port, true);
+				eq[i] = new Feq<T>(io[i], party);
+				eq[THDS+i] = new Feq<T>(io2[i], party);
 			}
-			abit1[0] = new DeltaOT(io[0], pretable, 40);
-			abit2[0] = new DeltaOT(io2[0], pretable, 40);
 
-			MOTExtension<NetIO> ote(io[0]);
-			block tmp_k0[128*2], tmp_k1[128*2];
-			bool tmp_s[128*2];
-			int l = 128+40;
+			abit1[0] = new LeakyDeltaOT<T>(io[0]);
+			abit2[0] = new LeakyDeltaOT<T>(io2[0]);
+
+			bool tmp_s[128];
+			prg.random_bool(tmp_s, 128);
+			tmp_s[0] = true;
 			if(party == ALICE) {
-				prg.random_bool(tmp_s, l);
-				ote.recv_rot(tmp_k0, tmp_s, l);
-				abit1[0]->setup_send(tmp_s, tmp_k0);
-				abit1[0]->send(tmp_k0, l);
-				for(int i = 0; i < l; ++i)
-					tmp_k1[i] = xorBlocks(abit1[0]->Delta, tmp_k0[i]);
-				abit2[0]->setup_recv(tmp_k0, tmp_k1);
+				tmp_s[1] = true;
+				abit1[0]->setup_send(tmp_s);
+				io[0]->flush();
+				abit2[0]->setup_recv();
+			} else {
+				tmp_s[1] = false;
+				abit1[0]->setup_recv();
+				io[0]->flush();
+				abit2[0]->setup_send(tmp_s);
 			}
-			else {
-				ote.send_rot(tmp_k0, tmp_k1, l);
-				abit1[0]->setup_recv(tmp_k0, tmp_k1);
-				prg.random_bool(tmp_s, l);
-				abit1[0]->recv(tmp_k0, tmp_s, l);
-				abit2[0]->setup_send(tmp_s, tmp_k0);
-			}
-
+			io2[0]->flush();
 			for(int i = 1; i < THDS; ++i) {
-				abit1[i] = new DeltaOT(io[i], pretable, 40);
-				abit2[i] = new DeltaOT(io2[i], pretable, 40);
-				if (party == ALICE) {
-					abit1[i]->setup_send(abit1[0]->s, abit1[0]->k0);
+				abit1[i] = new LeakyDeltaOT<T>(io[i]);
+				abit2[i] = new LeakyDeltaOT<T>(io2[i]);
+				if(party == ALICE) { 
+					abit1[i]->setup_send(tmp_s, abit1[0]->k0);
 					abit2[i]->setup_recv(abit2[0]->k0, abit2[0]->k1);
 				} else {
+					abit2[i]->setup_send(tmp_s, abit2[0]->k0);
 					abit1[i]->setup_recv(abit1[0]->k0, abit1[0]->k1);
-					abit2[i]->setup_send(abit2[0]->s, abit2[0]->k0);
 				}
 			}
+
 			if(party == ALICE) Delta = abit1[0]->Delta;
 			else Delta = abit2[0]->Delta;
+			one = makeBlock(0, 1);
+			ZDelta =  Delta  & makeBlock(0xFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFE);
 			set_batch_size(bsize);
 		}
+		int permute_batch_size;
 		void set_batch_size(int size) {
 			size = std::max(size, 320);
-			batch_size = ((size+THDS-1)/THDS)*THDS;
-			if(batch_size >= 280*1000)
+			batch_size = ((size+THDS*2-1)/(2*THDS))*THDS*2;
+			if(batch_size >= 280*1000) {
 				bucket_size = 3;
-			else if(batch_size >= 3100)
+				permute_batch_size = 280000;
+			}
+			else if(batch_size >= 3100) {
 				bucket_size = 4;
+				permute_batch_size = 3100;
+			}
 			else bucket_size = 5;
 			if (MAC != nullptr) {
 				delete[] MAC;
 				delete[] KEY;
-				delete[] r;
 			}
-			MAC = aalloc<block>(batch_size * bucket_size * 3);
-			KEY = aalloc<block>(batch_size * bucket_size * 3);
-			r = new bool[batch_size * bucket_size * 3];
+			MAC = new block[batch_size * bucket_size * 3];
+			KEY = new block[batch_size * bucket_size * 3];
+			MAC_res = new block[batch_size * 3];
+			KEY_res = new block[batch_size * 3];
+//			cout << size<<"\t"<<batch_size<<"\n";
 		}
 		~Fpre() {
 			if(MAC != nullptr) {
-				free(MAC);
-				free(KEY);
-				delete[]r;
+				delete[] MAC;
+				delete[] KEY;
 			}
 			delete[] prps;
 			delete pool;
@@ -124,244 +127,173 @@ class Fpre {
 			}
 		}
 		void refill() {
-			prg.random_bool(r, batch_size * 3 * bucket_size);
-#ifdef __debug
-			double t1 = timeStamp();
-#endif
+			auto start_time = clock_start();
 			vector<future<void>> res;
 			for(int i = 0; i < THDS; ++i) {
-				int start = i*batch_size/THDS;
+				int start = i*(batch_size/THDS);
 				int length = batch_size/THDS;
 				res.push_back(pool->enqueue([this, start, length, i](){
-							io[i]->flush();
-							io2[i]->flush();
-							generate(MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, length * bucket_size, i);
-							io[i]->flush();
-							io2[i]->flush();
-							check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == ALICE, length * bucket_size, io[i], i);
-							io[i]->flush();
-							check(   MAC + start * bucket_size*3, KEY + start * bucket_size*3, r + start * bucket_size*3, party == BOB, length * bucket_size, io2[i], i);
-							io2[i]->flush();
-							}));
+					generate(MAC + start * bucket_size*3, KEY + start * bucket_size*3, length * bucket_size, i);
+				}));
 			}
-			for(int i = 0; i < THDS; ++i)
-				res[i].get();
+			joinNclean(res);
+
+			if(party == 1) {
+				cout <<"ABIT\t"<<time_from(start_time)<<"\n";
+				start_time = clock_start();
+			}
+
+		int T2U = THDS*2;
+			for(int i = 0; i < T2U; ++i) {
+				int start = i*(batch_size/T2U);
+				int length = batch_size/T2U;
+				res.push_back(pool->enqueue([this, start, length, i](){
+					check(MAC + start * bucket_size*3, KEY + start * bucket_size*3, length * bucket_size, i);
+				}));
+			}
+			joinNclean(res);
+			if(party == 1) {
+				cout <<"check\t"<<time_from(start_time)<<"\n";
+				start_time = clock_start();
+			}
+
 #ifdef __debug
-			double t2 = timeStamp();
-			cout << "\t Fpre: Generate N Check:\t"<< t2-t1<<endl;
-			check_correctness(MAC, KEY, r, batch_size*bucket_size);
-			t1 = timeStamp();
+			check_correctness(MAC, KEY, batch_size);
 #endif
-			combine(MAC, KEY, r, batch_size, bucket_size);
-#ifdef __debug
-			t2 = timeStamp();
-			cout << "\t Fpre: Permute N Combine:\t"<< t2-t1<<endl;
-			check_correctness(MAC, KEY, r, batch_size);
-#endif
-			for(int i = 0; i < THDS; ++i)
-				if(!eq[i]->compare()) {
-					error("FEQ error\n");
+			block S = coin_tossing(prg, io[0], party);
+			if(bucket_size > 4) {
+				combine(S, 0, MAC, KEY, batch_size, bucket_size, MAC_res, KEY_res);
+			} else {
+				int width = min((batch_size+THDS-1)/THDS, permute_batch_size);
+				for(int i = 0; i < THDS; ++i) {
+					int start = i*width;
+					int length = min( (i+1)*width, batch_size) - i*width;
+					res.push_back(pool->enqueue([this, start, length, i, S](){
+						combine(S, i, MAC+start*bucket_size*3, KEY+start*bucket_size*3, length, bucket_size, MAC_res+start*3, KEY_res+start*3);
+					}));
 				}
+				joinNclean(res);
+			}
+			if(party == 1) {
+				cout <<"permute\t"<<time_from(start_time)<<"\n";
+				start_time = clock_start();
+			}
+
+#ifdef __debug
+			check_correctness(MAC, KEY, batch_size);
+#endif
+			char dgst[Hash::DIGEST_SIZE];
+			for(int i = 1; i < 2*THDS; ++i) {
+				eq[i]->dgst(dgst);
+				eq[0]->add_data(dgst, Hash::DIGEST_SIZE);
+			}
+			if(!eq[0]->compare()) {
+				error("FEQ error\n");
+			}
 		}
-		void generate(block * MAC, block * KEY, bool * r, int length, int I) {
+
+		void generate(block * MAC, block * KEY, int length, int I) {
 			if (party == ALICE) {
-				if(I%2 == 1) {
-					future<void> res = pool->enqueue(abit_run, abit1[I], io[I], true, KEY, nullptr, length*3);
-					abit_run(abit2[I], io2[I], false, MAC, r, length*3);
-					res.get();
-				} else {
-					future<void> res = pool->enqueue(abit_run, abit1[I], io[I], true, KEY, nullptr, length*3);
-					abit_run(abit2[I], io2[I], false, MAC, r, length*3);
-					res.get();
-				}
-				uint8_t * data = new uint8_t[length];
-				for(int i = 0; i < length; ++i) {
-					block tmp[4], tmp2[4];
-					tmp[0] = KEY[3*i];
-					tmp[1] = xorBlocks(tmp[0], Delta);
-					tmp[2] = KEY[3*i+1];
-					tmp[3] = xorBlocks(tmp[2], Delta);
-					prps[I].H<4>(tmp, tmp, 4*i);
-
-					tmp2[0] = xorBlocks(tmp[0], tmp[2]);
-					tmp2[1] = xorBlocks(tmp[1], tmp[2]);
-					tmp2[2] = xorBlocks(tmp[0], tmp[3]);
-					tmp2[3] = xorBlocks(tmp[1], tmp[3]);
-
-					data[i] = getLSB(tmp2[0]);
-					data[i] |= (getLSB(tmp2[1])<<1);
-					data[i] |= (getLSB(tmp2[2])<<2);
-					data[i] |= (getLSB(tmp2[3])<<3);
-					if ( ((false != r[3*i] ) && (false != r[3*i+1])) != r[3*i+2] )
-						data[i] = data[i] ^ 0x1;
-					if ( ((true != r[3*i] ) && (false != r[3*i+1])) != r[3*i+2] )
-						data[i] = data[i] ^ 0x2;
-					if ( ((false != r[3*i] ) && (true != r[3*i+1])) != r[3*i+2] )
-						data[i] = data[i] ^ 0x4;
-					if ( ((true != r[3*i] ) && (true != r[3*i+1])) != r[3*i+2] )
-						data[i] = data[i] ^ 0x8;
-
-					io[I]->send_data(&data[i], 1);
-				}
-				bool *bb = new bool[length];
-				recv_bool(io[I], bb, length);
-				for(int i = 0; i < length; ++i) {
-					if(bb[i]) KEY[3*i+2] = xorBlocks(KEY[3*i+2], Delta);
-				}
-				delete[] bb;
-				delete[] data;
+				future<void> fut = pool->enqueue([this, length, KEY, I](){
+					abit1[I]->send_dot(KEY, length*3);
+				});
+				abit2[I]->recv_dot(MAC, length*3);
+				fut.get();
 			} else {
-				if(I%2 == 1) {
-					future<void> res = pool->enqueue(abit_run, abit1[I], io2[I], false, MAC, r, length*3);
-					abit_run(abit2[I], io[I], true, KEY, nullptr, length*3);
-					res.get();
-				} else {
-					future<void> res = pool->enqueue(abit_run, abit1[I], io2[I], false, MAC, r, length*3);
-					abit_run( abit2[I], io[I], true, KEY, nullptr, length*3);
-					res.get();
-				}
-				uint8_t tmp;
-				bool *d = new bool[length];
-				for(int i = 0; i < length; ++i) {
-					io[I]->recv_data(&tmp, 1);
-					block H = xorBlocks(prps[I].H(MAC[3*i], 4*i + r[3*i]), prps[I].H(MAC[3*i+1], 4*i + 2 + r[3*i+1]));
-
-					uint8_t res = getLSB(H);
-					tmp >>= (r[3*i+1]*2+r[3*i]);
-					d[i] = r[3*i+2] != ((tmp&0x1) != (res&0x1));
-					r[3*i+2] = (!(tmp&0x1) != !(res&0x1));
-				}
-				send_bool(io[I], d, length);
-				delete[] d;
+				future<void> fut = pool->enqueue([this, length, KEY, I](){
+					abit2[I]->send_dot(KEY, length*3);
+				});
+				abit1[I]->recv_dot(MAC, length*3);
+				fut.get();
 			}
 		}
-		void check(const block * MAC, const block * KEY, const bool * r, bool checker, int length, NetIO * local_io, int I) {
-			local_io->flush();
-			block * T = new block[length]; 
-			if(checker) {
-				for(int i = 0; i < length; ++i) {
-					block tmp[2], tmp2[2], tmp3[2];
-					tmp[0] = double_block(KEY[3*i]);
-					tmp[1] = double_block(xorBlocks(KEY[3*i], Delta));
+		
+		void check(block * MAC, block * KEY, int length, int I) {
+			T * local_io = (I%2==0) ? io[I/2]: io2[I/2];
 
-					tmp2[0] = KEY[3*i+2];
-					if(r[3*i+2]) tmp2[0] = xorBlocks(tmp2[0], Delta);
-
-					tmp2[1] = xorBlocks(KEY[3*i+1], KEY[3*i+2]);
-					if(r[3*i+2] != r[3*i+1]) tmp2[1] = xorBlocks(tmp2[1], Delta);
-
-					tmp2[0] = double_block( double_block (tmp2[0]));
-					tmp2[1] = double_block( double_block (tmp2[1]));
-
-					tmp3[0] = xorBlocks(tmp[r[3*i]], tmp2[0]);
-					tmp3[1] = xorBlocks(tmp[!r[3*i]], tmp2[1]);
-
-					prps[I].H<2>(tmp, tmp3, 2*i);
-
-					T[i] = tmp[r[3*i]];
-					tmp[1] = xorBlocks(tmp[0], tmp[1]);
-					local_io->send_block(&tmp[1], 1);
-				}
-				for(int i = 0; i < length; ++i) {
-					block W = xorBlocks(T[i], prps[I].H(MAC[3*i], 2*i+r[3*i])), tmp;
-
-					local_io->recv_block(&tmp, 1);
-					if(r[3*i]) W = xorBlocks(W, tmp);
-
-					eq[I]->add(&W, sizeof(block));
-				}
+			block * G = new block[length];
+			block * C = new block[length];
+			block * GR = new block[length];
+			bool * d = new bool[length];
+			bool * dR = new bool[length];
+	
+			for (int i = 0; i < length; ++i) {
+				C[i] = KEY[3*i+1] ^ MAC[3*i+1];
+				C[i] = C[i] ^ (select_mask[getLSB(MAC[3*i+1])] & Delta);
+				G[i] = H2D(KEY[3*i], Delta, I);
+				G[i] = G[i] ^ C[i];
+			}
+			if(party == ALICE) {
+				local_io->send_data(G, sizeof(block)*length);
+				local_io->recv_data(GR, sizeof(block)*length);
 			} else {
-				for(int i = 0; i < length; ++i) {
-					block V[2], tmp2[2];
-					V[0] = double_block(MAC[3*i]);
-					V[1] = double_block(MAC[3*i]);
-					tmp2[0] = double_block(double_block(MAC[3*i+2]));
-					tmp2[1] = double_block(double_block(xorBlocks(MAC[3*i+2], MAC[3*i+1])));
-					xorBlocks_arr(V, V, tmp2, 2);
-					prps[I].H<2>(V, V, 2*i);
-
-					block U;
-					local_io->recv_block(&U, 1);
-
-					tmp2[0] = KEY[3*i];
-					tmp2[1] = xorBlocks(KEY[3*i], Delta);
-					prps[I].H<2>(tmp2, tmp2, 2*i);
-					T[i] = xorBlocks(tmp2[0], tmp2[1]);
-					T[i] = xorBlocks(T[i], V[0]);
-					T[i] = xorBlocks(T[i], V[1]);
-
-					block T2 = xorBlocks(tmp2[0], V[r[3*i]]);
-					if(r[3*i])
-						T2 = xorBlocks(T2, U);
-					eq[I]->add(&T2, sizeof(block));
-				}
-				local_io->send_block(T, length);
+				local_io->recv_data(GR, sizeof(block)*length);
+				local_io->send_data(G, sizeof(block)*length);
 			}
 			local_io->flush();
-			delete[] T;
-		}
-		void check_correctness(block * MAC, block * KEY, bool * r, int length) {
-			if (party == ALICE) {
-				io[0]->send_data(r, length*3);
-				io[0]->send_block(&Delta, 1);
-				io[0]->send_block(KEY, length*3);
-				block DD;io[0]->recv_block(&DD, 1);
+			for(int i = 0; i < length; ++i) {
+				block S = H2(MAC[3*i], KEY[3*i], I);
+				S = S ^ MAC[3*i+2] ^ KEY[3*i+2];
+				S = S ^ (select_mask[getLSB(MAC[3*i])] & (GR[i] ^ C[i]));
+				G[i] = S ^ (select_mask[getLSB(MAC[3*i+2])] & Delta);
+				d[i] = getL2SB(G[i]);
+			}
 
-				for(int i = 0; i < length*3; ++i) {
-					block tmp;io[0]->recv_block(&tmp, 1);
-					if(r[i]) tmp = xorBlocks(tmp, DD);
-					if (!block_cmp(&tmp, &MAC[i], 1))
-						cout <<i<<"\tWRONG ABIT!"<<endl<<flush;
-				}
-
+			if(party == ALICE) {
+				local_io->send_bool(d, length);
+				local_io->recv_bool(dR,length);
 			} else {
-				bool tmp[3];
-				for(int i = 0; i < length; ++i) {
-					io[0]->recv_data(tmp, 3);
-					bool res = ((tmp[0] != r[3*i] ) && (tmp[1] != r[3*i+1]));
-					if(res != (tmp[2] != r[3*i+2]) ) {
-						cout <<i<<"\tWRONG!"<<endl<<flush;
-					}
-				}
-				block DD;io[0]->recv_block(&DD, 1);
-
-				for(int i = 0; i < length*3; ++i) {
-					block tmp;io[0]->recv_block(&tmp, 1);
-					if(r[i]) tmp = xorBlocks(tmp, DD);
-					if (!block_cmp(&tmp, &MAC[i], 1))
-						cout <<i<<"\tWRONG ABIT!"<<endl<<flush;
-				}
-
-				io[0]->send_block(&Delta, 1);
-				io[0]->send_block(KEY, length*3);
+				local_io->recv_bool(dR, length);
+				local_io->send_bool(d, length);
 			}
+			local_io->flush();
+			for(int i = 0; i < length; ++i) {
+				d[i] = d[i] != dR[i];
+				if (d[i]) {
+					if(party == ALICE) 
+						MAC[3*i+2] = MAC[3*i+2] ^ one;
+					else 
+						KEY[3*i+2] = KEY[3*i+2] ^ ZDelta;
+					
+					G[i] = G[i] ^ Delta;
+				}
+				eq[I]->add_block(G[i]);
+			}
+			delete[] G;
+			delete[] GR;
+			delete[] C;
+			delete[] d;
+			delete[] dR;
+		}
+		block H2D(block a, block b, int I) {
+			block d[2];
+			d[0] = a;
+			d[1] = a ^ b;
+			prps[I].permute_block(d, 2);
+			d[0] = d[0] ^ d[1];
+			return d[0] ^ b;
 		}
 
-		void combine(block * MAC, block * KEY, bool * r, int length, int bucket_size) {
-			block S, HS, S2, HS2; prg.random_block(&S, 1);
-			HS = S;
-			prp.permute_block(&HS, 1);
-			if (party == ALICE) {
-				io[0]->send_block(&HS, 1);
-				io[0]->recv_block(&HS2, 1);
-				io[0]->recv_block(&S2, 1);
-				io[0]->send_block(&S, 1);
-			} else {
-				io[0]->recv_block(&HS2, 1);
-				io[0]->send_block(&HS, 1);
-				io[0]->send_block(&S, 1);
-				io[0]->recv_block(&S2, 1);
-			}
-			S = xorBlocks(S, S2);
-			HS = S2;
-			prp.permute_block(&HS, 1);
-			if (!block_cmp(&HS, &HS2, 1)) {
-				cout <<"cheat!"<<endl;
-			}
-			int * ind = new int[length*bucket_size];
+		block H2(block a, block b, int I) {
+			block d[2];
+			d[0] = a;
+			d[1] = b;
+			prps[I].permute_block(d, 2);
+			d[0] = d[0] ^ d[1];
+			d[0] = d[0] ^ a;
+			return d[0] ^ b;
+		}
+
+		bool getL2SB(block b) {
+			unsigned char x = *((unsigned char*)&b);
+			return ((x >> 1) & 0x1) == 1;
+		}
+
+		void combine(block S, int I, block * MAC, block * KEY, int length, int bucket_size, block * MAC_res, block * KEY_res) {
 			int *location = new int[length*bucket_size];
 			for(int i = 0; i < length*bucket_size; ++i) location[i] = i;
-			PRG prg(&S);
+			PRG prg(&S, I); 
+			int * ind = new int[length*bucket_size];
 			prg.random_data(ind, length*bucket_size*4);
 			for(int i = length*bucket_size-1; i>=0; --i) {
 				int index = ind[i]%(i+1);
@@ -374,68 +306,89 @@ class Fpre {
 
 			bool *data = new bool[length*bucket_size];	
 			bool *data2 = new bool[length*bucket_size];
-			block * MAC2 = new block[length*3];
-			block * KEY2 = new block[length*3];
-			bool * r2 = new bool[length*3];
-			vector<future<void>> res;
-			for(int i = 0; i < THDS; ++i)
-				res.push_back(pool->enqueue(combine_merge, this, length/THDS*i, length/THDS, i, data, data2, MAC2, KEY2, r2, location));
-			for(int i = 0; i < THDS; ++i)
-				res[i].get();
-			memcpy(MAC, MAC2, sizeof(block)*3*length);
-			memcpy(KEY, KEY2, sizeof(block)*3*length);
-			memcpy(r, r2, sizeof(bool)*3*length);
+			for(int i = 0; i < length; ++i) {
+				for(int j = 1; j < bucket_size; ++j) {
+					data[i*bucket_size+j] = getLSB(MAC[location[i*bucket_size]*3+1] ^ MAC[location[i*bucket_size+j]*3+1]);
+				}
+			}
+			if(party == ALICE) {
+				io[I]->send_bool(data, length*bucket_size);
+				io[I]->recv_bool(data2, length*bucket_size);
+			} else {
+				io[I]->recv_bool(data2, length*bucket_size);
+				io[I]->send_bool(data, length*bucket_size);
+			}
+			io[I]->flush();
+			for(int i = 0; i < length; ++i) {
+				for(int j = 1; j < bucket_size; ++j) {
+					data[i*bucket_size+j] = (data[i*bucket_size+j] != data2[i*bucket_size+j]);
+				}
+			}
+			for(int i = 0; i < length; ++i) {
+				for(int j = 0; j < 3; ++j) {
+					MAC_res[i*3+j] = MAC[location[i*bucket_size]*3+j];
+					KEY_res[i*3+j] = KEY[location[i*bucket_size]*3+j];
+				}
+				for(int j = 1; j < bucket_size; ++j) {
+					MAC_res[3*i] = MAC_res[3*i] ^ MAC[location[i*bucket_size+j]*3];
+					KEY_res[3*i] = KEY_res[3*i] ^ KEY[location[i*bucket_size+j]*3];
+
+					MAC_res[i*3+2] = MAC_res[i*3+2] ^ MAC[location[i*bucket_size+j]*3+2];
+					KEY_res[i*3+2] = KEY_res[i*3+2] ^ KEY[location[i*bucket_size+j]*3+2];
+
+					if(data[i*bucket_size+j]) {
+						KEY_res[i*3+2] = KEY_res[i*3+2] ^ KEY[location[i*bucket_size+j]*3];
+						MAC_res[i*3+2] = MAC_res[i*3+2] ^ MAC[location[i*bucket_size+j]*3];
+					}
+				}
+			}
+
 			delete[] data;
 			delete[] location;
 			delete[] data2;
-			delete[] MAC2;
-			delete[] KEY2;
-			delete[] r2;
+		}
+
+//for debug
+		void check_correctness(block * MAC, block * KEY, int length) {
+			if (party == ALICE) {
+				for(int i = 0; i < length*3; ++i) {
+					bool tmp = getLSB(MAC[i]);
+					io[0]->send_data(&tmp, 1);
+				}
+				io[0]->send_block(&Delta, 1);
+				io[0]->send_block(KEY, length*3);
+				block DD;io[0]->recv_block(&DD, 1);
+
+				for(int i = 0; i < length*3; ++i) {
+					block tmp;io[0]->recv_block(&tmp, 1);
+					if(getLSB(MAC[i])) tmp = tmp ^ DD;
+					if (!cmpBlock(&tmp, &MAC[i], 1))
+						cout <<i<<"\tWRONG ABIT2!\n";
+				}
+
+			} else {
+				bool tmp[3];
+				for(int i = 0; i < length; ++i) {
+					io[0]->recv_data(tmp, 3);
+					bool res = ((tmp[0] != getLSB(MAC[3*i]) ) && (tmp[1] != getLSB(MAC[3*i+1])));
+					if(res != (tmp[2] != getLSB(MAC[3*i+2])) ) {
+						cout <<i<<"\tWRONG!\t";
+					}
+				}
+				block DD;io[0]->recv_block(&DD, 1);
+
+				for(int i = 0; i < length*3; ++i) {
+					block tmp;io[0]->recv_block(&tmp, 1);
+					if(getLSB(MAC[i])) tmp = tmp ^ DD;
+					if (!cmpBlock(&tmp, &MAC[i], 1))
+						cout <<i<<"\tWRONG ABIT2!\n";
+				}
+
+				io[0]->send_block(&Delta, 1);
+				io[0]->send_block(KEY, length*3);
+			}
+			io[0]->flush();
 		}
 };
-void combine_merge(Fpre * fpre, int start, int length, int I, bool * data, bool* data2, block * MAC2, block * KEY2, bool *r2, int * location) {
-	fpre->io[I]->flush();
-	int bucket_size = fpre->bucket_size;
-	for(int i = start; i < start+length; ++i) {
-		for(int j = 1; j < bucket_size; ++j) {
-			data[i*bucket_size+j] = (fpre->r[location[i*bucket_size]*3+1]!=fpre->r[location[i*bucket_size+j]*3+1]);
-		}
-	}
-	if(fpre->party == ALICE) {
-		send_bool(fpre->io[I], data + start * bucket_size, length*bucket_size);
-		recv_bool(fpre->io[I], data2 + start*bucket_size, length*bucket_size);
-	} else {
-		recv_bool(fpre->io[I], data2 + start*bucket_size, length*bucket_size);
-		send_bool(fpre->io[I], data + start * bucket_size, length*bucket_size);
-	}
-	for(int i = start; i < start+length; ++i) {
-		for(int j = 1; j < bucket_size; ++j) {
-			data[i*bucket_size+j] = (data[i*bucket_size+j] != data2[i*bucket_size+j]);
-		}
-	}
-	for(int i = start; i < start+length; ++i) {
-		for(int j = 0; j < 3; ++j) {
-			MAC2[i*3+j] = fpre->MAC[location[i*bucket_size]*3+j];
-			KEY2[i*3+j] = fpre->KEY[location[i*bucket_size]*3+j];
-			r2[i*3+j] = fpre->r[location[i*bucket_size]*3+j];
-		}
-		for(int j = 1; j < bucket_size; ++j) {
-			MAC2[3*i] = xorBlocks(MAC2[3*i], fpre->MAC[location[i*bucket_size+j]*3]);
-			KEY2[3*i] = xorBlocks(KEY2[3*i], fpre->KEY[location[i*bucket_size+j]*3]);
-			r2[3*i] = (r2[3*i] != fpre->r[location[i*bucket_size+j]*3]);
-
-			MAC2[i*3+2] = xorBlocks(MAC2[i*3+2], fpre->MAC[location[i*bucket_size+j]*3+2]);
-			KEY2[i*3+2] = xorBlocks(KEY2[i*3+2], fpre->KEY[location[i*bucket_size+j]*3+2]);
-			r2[i*3+2] = (r2[i*3+2] != fpre->r[location[i*bucket_size+j]*3+2]);
-
-			if(data[i*bucket_size+j]) {
-				KEY2[i*3+2] = xorBlocks(KEY2[i*3+2], fpre->KEY[location[i*bucket_size+j]*3]);
-				MAC2[i*3+2] = xorBlocks(MAC2[i*3+2], fpre->MAC[location[i*bucket_size+j]*3]);
-				r2[i*3+2] = (r2[i*3+2] != fpre->r[location[i*bucket_size+j]*3]);
-			}
-		}
-	}
-	fpre->io[I]->flush();
-}
 }
 #endif// FPRE_H__

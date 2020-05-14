@@ -7,7 +7,7 @@ int main(int argc, char** argv) {
 	int party, port;
 	parse_party_and_port(argv, &party, &port);
 	NetIO* io = new NetIO(party==ALICE ? nullptr:IP, port);
-	io->set_nodelay();
+	//io->set_nodelay();
 	test(party, io, "test/ands.txt");
 	delete io;
 	return 0;
