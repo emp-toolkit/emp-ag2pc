@@ -633,10 +633,10 @@ class AmortizedC2PC { public:
 		block A[2], B[2];
 		A[0] = a; A[1] = xorBlocks(a, fpre->Delta);
 		B[0] = b; B[1] = xorBlocks(b, fpre->Delta);
-		A[0] = double_block(A[0]);
-		A[1] = double_block(A[1]);
-		B[0] = double_block(double_block(B[0]));
-		B[1] = double_block(double_block(B[1]));
+		A[0] = sigma(A[0]);
+		A[1] = sigma(A[1]);
+		B[0] = sigma(sigma(B[0]));
+		B[1] = sigma(sigma(B[1]));
 
 		H[0][1] = H[0][0] = xorBlocks(A[0], B[0]);
 		H[1][1] = H[1][0] = xorBlocks(A[0], B[1]);
@@ -650,8 +650,8 @@ class AmortizedC2PC { public:
 	}
 
 	void Hash(block H[2], block a, block b, uint64_t i, uint64_t row) {
-		a = double_block(a);
-		b = double_block(double_block(b));
+		a = sigma(a);
+		b = sigma(sigma(b));
 		H[0] = H[1] = xorBlocks(a, b);
 		H[0] = xorBlocks(H[0], _mm_set_epi64x(4*i+row, 0ULL));
 		H[1] = xorBlocks(H[1], _mm_set_epi64x(4*i+row, 1ULL));

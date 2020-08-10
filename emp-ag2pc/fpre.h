@@ -241,8 +241,8 @@ class Fpre {
 			if(checker) {
 				for(int i = 0; i < length; ++i) {
 					block tmp[2], tmp2[2], tmp3[2];
-					tmp[0] = double_block(KEY[3*i]);
-					tmp[1] = double_block(xorBlocks(KEY[3*i], Delta));
+					tmp[0] = sigma(KEY[3*i]);
+					tmp[1] = sigma(xorBlocks(KEY[3*i], Delta));
 
 					tmp2[0] = KEY[3*i+2];
 					if(r[3*i+2]) tmp2[0] = xorBlocks(tmp2[0], Delta);
@@ -250,8 +250,8 @@ class Fpre {
 					tmp2[1] = xorBlocks(KEY[3*i+1], KEY[3*i+2]);
 					if(r[3*i+2] != r[3*i+1]) tmp2[1] = xorBlocks(tmp2[1], Delta);
 
-					tmp2[0] = double_block( double_block (tmp2[0]));
-					tmp2[1] = double_block( double_block (tmp2[1]));
+					tmp2[0] = sigma( sigma (tmp2[0]));
+					tmp2[1] = sigma( sigma (tmp2[1]));
 
 					tmp3[0] = xorBlocks(tmp[r[3*i]], tmp2[0]);
 					tmp3[1] = xorBlocks(tmp[!r[3*i]], tmp2[1]);
@@ -273,10 +273,10 @@ class Fpre {
 			} else {
 				for(int i = 0; i < length; ++i) {
 					block V[2], tmp2[2];
-					V[0] = double_block(MAC[3*i]);
-					V[1] = double_block(MAC[3*i]);
-					tmp2[0] = double_block(double_block(MAC[3*i+2]));
-					tmp2[1] = double_block(double_block(xorBlocks(MAC[3*i+2], MAC[3*i+1])));
+					V[0] = sigma(MAC[3*i]);
+					V[1] = sigma(MAC[3*i]);
+					tmp2[0] = sigma(sigma(MAC[3*i+2]));
+					tmp2[1] = sigma(sigma(xorBlocks(MAC[3*i+2], MAC[3*i+1])));
 					xorBlocks_arr(V, V, tmp2, 2);
 					prps[I].H<2>(V, V, 2*i);
 
