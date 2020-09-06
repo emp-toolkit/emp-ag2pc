@@ -7,11 +7,10 @@ More details of the protocol can be found in the [paper](https://eprint.iacr.org
 
 ## Installation
 
-1. Install prerequisites using instructions [here](https://github.com/emp-toolkit/emp-readme).
-2. Install [emp-tool](https://github.com/emp-toolkit/emp-tool).
-3. Install [emp-ot](https://github.com/emp-toolkit/emp-ot).
-4. git clone https://github.com/emp-toolkit/emp-ag2pc.git
-5. cd emp-ag2pc && cmake . && make 
+1. `wget https://raw.githubusercontent.com/emp-toolkit/emp-readme/master/scripts/install.py`
+2. `python install.py -install -tool -ot -ag2pc`
+    1. By default it will build for Release. `-DCMAKE_BUILD_TYPE=[Release|Debug]` option is also available.
+    2. No sudo? Change [`CMAKE_INSTALL_PREFIX`](https://cmake.org/cmake/help/v2.8.8/cmake.html#variable%3aCMAKE_INSTALL_PREFIX).
 
 ## Test
 
@@ -30,13 +29,6 @@ More details of the protocol can be found in the [paper](https://eprint.iacr.org
 ### Question
 Please send email to wangxiao1254@gmail.com
 
-
-##TODOs
-2. clean up code
-
-4. improve multithreading code using lambda function
-
-5. improve testing code
 
 ## Acknowledgement
 This work was supported in part by the National Science Foundation under Awards #1111599 and #1563722.
