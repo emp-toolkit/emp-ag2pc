@@ -324,7 +324,7 @@ class C2PC { public:
 						mask_input[cf->gates[4*i+2]] = false;
 					else if(cmpBlock(&GT[ands][index][0], &ttt, 1))
 						mask_input[cf->gates[4*i+2]] = true;
-					else 	cout <<ands <<"no match GT!"<<endl;
+					else 	cout <<ands <<" no match GT!"<<endl;
 					mask_input[cf->gates[4*i+2]] = logic_xor(mask_input[cf->gates[4*i+2]], getLSB(GTM[ands][index]));
 
 					labels[cf->gates[4*i+2]] = GT[ands][index][1] ^ GTM[ands][index];
