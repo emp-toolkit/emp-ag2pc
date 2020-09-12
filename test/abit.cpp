@@ -4,7 +4,7 @@
 using namespace std;
 using namespace emp;
 
-int size = 10000000;
+int size = 1<<25;
 
 int main(int argc, char** argv) {
 	int port, party;

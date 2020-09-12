@@ -45,6 +45,7 @@ before_install:
 
 script:
   - cmake -DCMAKE_BUILD_TYPE=$TYPE . && make
+  - ./run ./bin/abit
   - ./run ./bin/triple
   - ./run ./bin/aes 
   - ./run ./bin/sha1 

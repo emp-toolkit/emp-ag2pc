@@ -23,7 +23,7 @@ class AmortizedC2PC { public:
 	block * labels[exec];
 
 	bool * mask[exec];
-	CircuitFile * cf;
+	BristolFormat * cf;
 	T * io;
 	int num_ands = 0;
 	int party, total_pre;
@@ -33,7 +33,7 @@ class AmortizedC2PC { public:
 	bool * x2[exec];
 	bool * y2[exec];
 
-	AmortizedC2PC(T * io, int party, CircuitFile * cf) {
+	AmortizedC2PC(T * io, int party, BristolFormat * cf) {
 		this->party = party;
 		this->io = io;
 		this->cf = cf;

@@ -21,11 +21,11 @@ class C2PC { public:
 	block * labels = nullptr;
 
 	bool * mask = nullptr;
-	CircuitFile * cf;
+	BristolFormat * cf;
 	T * io;
 	int num_ands = 0;
 	int party, total_pre;
-	C2PC(T * io, int party, CircuitFile * cf) {
+	C2PC(T * io, int party, BristolFormat * cf) {
 		this->party = party;
 		this->io = io;
 		this->cf = cf;

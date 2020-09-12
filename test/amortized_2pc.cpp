@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
 	file = circuit_file_location+"/AES-non-expanded.txt";//adder_32bit.txt";
 	file = circuit_file_location+"/sha-1.txt";
 
-	CircuitFile cf(file.c_str());
+	BristolFormat cf(file.c_str());
 
 	auto t1 = clock_start();
 	AmortizedC2PC<NetIO, runs> twopc(io, party, &cf);
