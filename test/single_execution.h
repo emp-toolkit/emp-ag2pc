@@ -33,7 +33,7 @@ inline std::string hex_to_binary(std::string hex) {
 	return bin;
 }
 
-const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH);
+const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH)+string("bristol_format/");
 
 template<typename T>
 void test(int party, T* io, string name, string check_output = "") {
