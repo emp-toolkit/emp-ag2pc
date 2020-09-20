@@ -59,9 +59,9 @@ void test(int party, T* io, string name, string check_output = "") {
 	memset(in, false, max(cf.n1, cf.n2));
 	memset(out, false, cf.n3);
 	t1 = clock_start();
-	twopc.online(in, out);
+	twopc.online(in, out, true);
 	cout << "online:\t"<<party<<"\t"<<time_from(t1)<<endl;
-	if(party == BOB and check_output.size() > 0){
+	if(check_output.size() > 0){
 		string res = "";
 		for(int i = 0; i < cf.n3; ++i)
 			res += (out[i]?"1":"0");
