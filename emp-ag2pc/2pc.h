@@ -271,7 +271,7 @@ class C2PC { public:
 		io->flush();
 	}
 
-	void online (bool * input, bool * output) {
+	void online (bool * input, bool * output, bool alice_output = false) {
 		uint8_t * mask_input = new uint8_t[cf->num_wire];
 		memset(mask_input, 0, cf->num_wire);
 		block tmp;
@@ -357,6 +357,50 @@ class C2PC { public:
 				output[i] = logic_xor(output[i], getLSB(mac[cf->num_wire - cf->n3 + i]));
 			}
 			delete[] o;
+			if(alice_output) {
+				send_partial_block<T, SSP>(io, mac+cf->num_wire - cf->n3, cf->n3);
+				send_partial_block<T, SSP>(io, labels+cf->num_wire - cf->n3, cf->n3);
+				io->send_data(mask_input + cf->num_wire - cf->n3, cf->n3);
+				io->flush();	
+			}	
+		} else {//ALICE
+			if(alice_output) {
+				block * tmp_mac = new block[cf->n3];
+				block * tmp_label = new block[cf->n3];
+				bool * tmp_mask_input = new bool[cf->n3];
+				recv_partial_block<T, SSP>(io, tmp_mac, cf->n3);
+				recv_partial_block<T, SSP>(io, tmp_label, cf->n3);
+				io->recv_data(tmp_mask_input, cf->n3);
+				io->flush();
+				for(int i = 0; i < cf->n3; ++i) {
+					block tmp = tmp_mac[i];
+					tmp =  tmp & MASK;
+
+					block ttt = key[cf->num_wire - cf-> n3 + i] ^ fpre->Delta;
+					ttt =  ttt & MASK;
+					key[cf->num_wire - cf-> n3 + i] = key[cf->num_wire - cf-> n3 + i] & MASK;
+
+					if(cmpBlock(&tmp, &key[cf->num_wire - cf-> n3 + i], 1))
+						output[i] = false;
+					else if(cmpBlock(&tmp, &ttt, 1))
+						output[i] = true;
+					else 	cout <<"no match output label!"<<endl;
+					block mask_label = tmp_label[i];
+					if(tmp_mask_input[i])
+						mask_label = mask_label ^ fpre->Delta;
+					mask_label = mask_label & MASK;
+					block masked_labels = labels[cf->num_wire - cf-> n3 + i] & MASK;
+					if(!cmpBlock(&mask_label, &masked_labels, 1))
+						cout <<"no match output label2!"<<endl;
+
+					output[i] = logic_xor(output[i], tmp_mask_input[i]);
+					output[i] = logic_xor(output[i], getLSB(mac[cf->num_wire - cf->n3 + i]));
+				}
+				delete[] tmp_mac;
+				delete[] tmp_label;
+				delete[] tmp_mask_input;
+			}
+
 		}
 		delete[] mask_input;
 	}
