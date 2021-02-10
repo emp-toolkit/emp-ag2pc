@@ -42,7 +42,7 @@ class AmortizedC2PC { public:
 				++num_ands;
 		}
 		total_pre = cf->n1 + cf->n2 + num_ands;
-		fpre = new Fpre<T>(io, party);
+		fpre = new Fpre<T>(io, party, num_ands*exec);
 
 		preprocess_mac = new block[total_pre*exec];
 		preprocess_key = new block[total_pre*exec];
