@@ -1,6 +1,6 @@
 # EMP-ag2pc
-![arm](https://github.com/emp-toolkit/emp-ot/workflows/arm/badge.svg)
-![x86](https://github.com/emp-toolkit/emp-ot/workflows/x86/badge.svg)
+![arm](https://github.com/emp-toolkit/emp-ag2pc/workflows/arm/badge.svg)
+![x86](https://github.com/emp-toolkit/emp-ag2pc/workflows/x86/badge.svg)
 
 <img src="https://raw.githubusercontent.com/emp-toolkit/emp-readme/master/art/logo-full.jpg" width=300px/>
 
