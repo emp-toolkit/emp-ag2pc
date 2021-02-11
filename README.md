@@ -1,10 +1,10 @@
-# EMP-ag2pc[![Build Status](https://travis-ci.org/emp-toolkit/emp-ag2pc.svg?branch=master)](https://travis-ci.org/emp-toolkit/emp-ag2pc)
-## Authenticated Garbling and Efficient Maliciously Secure Two-Party Computation 
-
-More details of the protocol can be found in the [paper](https://eprint.iacr.org/2017/030).
+# EMP-ag2pc
+![arm](https://github.com/emp-toolkit/emp-ot/workflows/arm/badge.svg)
+![x86](https://github.com/emp-toolkit/emp-ot/workflows/x86/badge.svg)
 
 <img src="https://raw.githubusercontent.com/emp-toolkit/emp-readme/master/art/logo-full.jpg" width=300px/>
 
+Authenticated Garbling and Efficient Maliciously Secure Two-Party Computation. More details of the protocol can be found in the [paper](https://eprint.iacr.org/2017/030).
 
 # Installation
 1. `wget https://raw.githubusercontent.com/emp-toolkit/emp-readme/master/scripts/install.py`
