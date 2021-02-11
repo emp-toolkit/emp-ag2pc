@@ -47,6 +47,7 @@ class Fpre {
 			this->party = in_party;
 			for(int i = 0; i < THDS; ++i) {
 				io[i] = new T(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port, true);
+				usleep(1000);
 				io2[i] = new T(in_io->is_server?nullptr:in_io->addr.c_str(), in_io->port, true);
 				eq[i] = new Feq<T>(io[i], party);
 				eq[THDS+i] = new Feq<T>(io2[i], party);
