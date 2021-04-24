@@ -9,9 +9,9 @@ int main(int argc, char** argv) {
 	int port, party;
 	parse_party_and_port(argv, &party, &port);
 
-	HighSpeedNetIO *io;
-	io = new HighSpeedNetIO(party==ALICE ? nullptr:IP, port, port+1);
-	Fpre<HighSpeedNetIO> * fpre = new Fpre<HighSpeedNetIO>(io, party, N);
+	NetIO *io;
+	io = new NetIO(party==ALICE ? nullptr:IP, port);
+	Fpre<NetIO> * fpre = new Fpre<NetIO>(io, party, N);
 	auto tt1 = clock_start();
 	fpre->refill();
 	//fpre->refill();
