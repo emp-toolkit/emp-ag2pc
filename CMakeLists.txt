@@ -15,15 +15,17 @@ install(DIRECTORY emp-ag2pc DESTINATION include)
 install(DIRECTORY cmake/ DESTINATION cmake)
 
 # Test cases
-macro (add_test _name)
-	add_test_with_lib(${_name} ${EMP-OT_LIBRARIES})
+macro(add_test_executable _name)
+	add_executable(${_name} "test/${_name}.cpp")
+	target_link_libraries(${_name} ${EMP-OT_LIBRARIES})
 endmacro()
 
-add_test(aes)
-add_test(sha1)
-add_test(sha256)
-add_test (simple_circuit)
-add_test (abit)
-add_test (triple)
-add_test (amortized_2pc)
+
+add_test_executable(aes)
+add_test_executable(sha1)
+add_test_executable(sha256)
+add_test_executable (simple_circuit)
+add_test_executable (abit)
+add_test_executable (triple)
+add_test_executable (amortized_2pc)
 
