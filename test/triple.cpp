@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
 	cout << fpre->bandwidth()<<endl;	
 
 	fpre->check_correctness(fpre->MAC_res, fpre->KEY_res, fpre->batch_size);	
-
+	delete fpre;
 	delete io;
 	return 0;
 }

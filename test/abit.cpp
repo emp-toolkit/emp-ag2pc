@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
 				error("check failed!");
 		}
 	}
+	delete abit;
 	delete io;
 	return 0;
 }
