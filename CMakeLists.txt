@@ -3,9 +3,7 @@ project (emp-ag2pc)
 set(NAME "emp-ag2pc")
 
 find_path(CMAKE_FOLDER NAMES cmake/emp-tool-config.cmake)
-include(${CMAKE_FOLDER}/cmake/common.cmake)
-include(${CMAKE_FOLDER}/cmake/enable_rdseed.cmake)
-include(${CMAKE_FOLDER}/cmake/enable_float.cmake)
+include(${CMAKE_FOLDER}/cmake/emp-base.cmake)
 
 FIND_PACKAGE(emp-ot REQUIRED)
 INCLUDE_DIRECTORIES(${EMP-OT_INCLUDE_DIRS})
