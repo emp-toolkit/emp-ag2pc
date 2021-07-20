@@ -118,6 +118,8 @@ class Fpre {
 				delete[] MAC;
 				delete[] KEY;
 			}
+			if (MAC_res != nullptr) delete[] MAC_res;
+			if (KEY_res != nullptr) delete[] KEY_res;
 			delete[] prps;
 			delete pool;
 			for(int i = 0; i < THDS; ++i) {
