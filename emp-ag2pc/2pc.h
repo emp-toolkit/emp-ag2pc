@@ -281,7 +281,7 @@ class C2PC { public:
 #endif
 		if(party == ALICE) {
 			for(int i = cf->n1; i < cf->n1+cf->n2; ++i) {
-				mask_input[i] = logic_xor(input[i - cf->n1], getLSB(mac[i]));
+				mask_input[i] = logic_xor(input[i], getLSB(mac[i]));
 				mask_input[i] = logic_xor(mask_input[i], mask[i]);
 			}
 			io->recv_data(mask_input, cf->n1);
