@@ -25,7 +25,6 @@ inline const char* hex_char_to_bin(char c) {
 	}
 }
 
-
 inline std::string hex_to_binary(std::string hex) {
 	std::string bin;
 	for(unsigned i = 0; i != hex.length(); ++i)
@@ -36,8 +35,9 @@ inline std::string hex_to_binary(std::string hex) {
 const string circuit_file_location = macro_xstr(EMP_CIRCUIT_PATH)+string("bristol_format/");
 
 template<typename T>
-void test(int party, T* io, string name, string check_output = "") {
-	string file = name;//circuit_file_location + name;
+void test(int party, T* io, string name, string check_output = "", string hin = "") {
+	//string file = circuit_file_location + name;
+	string file = name;
 	BristolFormat cf(file.c_str());
 	auto t1 = clock_start();
 	C2PC<T> twopc(io, party, &cf);
@@ -54,13 +54,33 @@ void test(int party, T* io, string name, string check_output = "") {
 	io->flush();
 	cout << "dep:\t"<<party<<"\t"<<time_from(t1)<<endl;
 
-	bool *in = new bool[max(cf.n1, cf.n2)];
-	bool * out = new bool[cf.n3];
-	memset(in, false, max(cf.n1, cf.n2));
+    bool *in; 
+    bool *out;
+    in = new bool[cf.n1 + cf.n2];
+    out = new bool[cf.n3];
+    if (hin.size() > 0) {
+        string bin = hex_to_binary(hin);
+        for (int i=0; i < cf.n1 + cf.n2; ++i) {
+            if (bin[i] == '0') 
+                in[i] = false;
+            else if (bin[i] == '1') 
+                in[i] = true;
+            else {
+                cout << "problem: " << bin[i] << endl;
+                exit(1);
+            }
+        }
+    } else {
+        memset(in, false, cf.n1 + cf.n2);
+    }
 	memset(out, false, cf.n3);
 	t1 = clock_start();
 	twopc.online(in, out, true);
 	cout << "online:\t"<<party<<"\t"<<time_from(t1)<<endl;
+    //cout << "actual output: " << endl;
+    //for (int i=0; i < cf.n3; ++i)
+        //cout << out[i];
+    //cout << endl;
 	if(check_output.size() > 0){
 		string res = "";
 		for(int i = 0; i < cf.n3; ++i)
@@ -70,4 +90,6 @@ void test(int party, T* io, string name, string check_output = "") {
 	delete[] in;
 	delete[] out;
 }
+
+
 
