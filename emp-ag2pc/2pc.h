@@ -271,7 +271,7 @@ class C2PC { public:
 		io->flush();
 	}
 
-	void online (bool * input, bool * output, bool alice_output = false) {
+	void online (const bool * input, bool * output, bool alice_output = false) {
 		uint8_t * mask_input = new uint8_t[cf->num_wire];
 		memset(mask_input, 0, cf->num_wire);
 		block tmp;
