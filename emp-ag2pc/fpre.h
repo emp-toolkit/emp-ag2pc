@@ -127,6 +127,7 @@ class Fpre {
 				delete io[i];
 				delete io2[i];
 				delete eq[i];
+                                delete eq[THDS + i];
 			}
 		}
 		void refill() {
