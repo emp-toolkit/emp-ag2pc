@@ -47,7 +47,7 @@ double c2 = get_io_count(twopc.fpre, io);
 cout <<c2 - c1<<endl;
 
 
-	bool in[512], out[512];
+	bool in[1024], out[512];
 	t1 = clock_start();
 	for(int i = 0; i < runs; ++i) {
 		twopc.online(in, out);

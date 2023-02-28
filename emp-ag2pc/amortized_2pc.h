@@ -509,7 +509,7 @@ class AmortizedC2PC { public:
 	}
 
 
-	void online (bool * input, bool * output) {
+	void online (const bool * input, bool * output) {
 		uint8_t * mask_input = new uint8_t[cf->num_wire];
 		memset(mask_input, 0, cf->num_wire);
 		block tmp;
@@ -520,7 +520,7 @@ class AmortizedC2PC { public:
 #endif
 		if(party == ALICE) {
 			for(int i = cf->n1; i < cf->n1+cf->n2; ++i) {
-				mask_input[i] = logic_xor(input[i - cf->n1], getLSB(mac[exec_times][i]));
+				mask_input[i] = logic_xor(input[i], getLSB(mac[exec_times][i]));
 				mask_input[i] = logic_xor(mask_input[i], mask[exec_times][i]);
 			}
 			io->recv_data(mask_input, cf->n1);
