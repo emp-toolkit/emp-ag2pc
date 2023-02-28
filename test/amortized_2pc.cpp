@@ -33,9 +33,9 @@ int main(int argc, char** argv) {
 	cout << "dep:\t"<<party<<"\t"<<time_from(t1)<<endl;
 
 
-	bool in[512], out[512];
+        bool in[1024], out[512];
 	for(int i = 0; i < runs; ++i) {
-		memset(in, false, 512);
+		memset(in, false, 1024);
 		memset(out, false, 512);
 		t1 = clock_start();
 		twopc.online(in, out);
