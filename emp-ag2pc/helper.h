@@ -126,7 +126,7 @@ public:
   void finalize() {
     char d_me[Hash::DIGEST_SIZE];
     h.digest(d_me);
-    char recv[nP + 1][Hash::DIGEST_SIZE];
+    char recv[Hash::DIGEST_SIZE];
     const int p2 = 3 - party;
     vector<future<void>> res;
     res.push_back(pool->enqueue([this, &d_me, p2]() {
@@ -134,10 +134,10 @@ public:
       io_flush(io1, io2, party, p2);
     }));
     res.push_back(pool->enqueue([this, &recv, p2]() {
-      io_recv(io1, io2, party, p2, recv[p2], Hash::DIGEST_SIZE);
+      io_recv(io1, io2, party, p2, recv, Hash::DIGEST_SIZE);
     }));
     joinNclean(res);
-    if (strncmp(d_me, recv[p2], Hash::DIGEST_SIZE) != 0)
+    if (strncmp(d_me, recv, Hash::DIGEST_SIZE) != 0)
       error("EchoBC finalize: transcript divergence\n");
   }
 };
@@ -165,37 +165,34 @@ template <int nP>
 block sampleRandom(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party) {
   vector<future<void>> res;
   vector<future<bool>> res2;
-  char(*dgst)[Hash::DIGEST_SIZE] = new char[nP + 1][Hash::DIGEST_SIZE];
-  block *S = new block[nP + 1];
-  prg->random_block(&S[party], 1);
-  Hash::hash_once(dgst[party], &S[party], sizeof(block));
   const int party2 = 3 - party;
+  block S_me, S_peer;
+  char dgst_me[Hash::DIGEST_SIZE], dgst_peer[Hash::DIGEST_SIZE];
+  prg->random_block(&S_me, 1);
+  Hash::hash_once(dgst_me, &S_me, sizeof(block));
 
   // Commit: exchange digests of the two shares.
-  res.push_back(pool->enqueue([dgst, io1, io2, party, party2]() {
-    io_send(io1, io2, party, party2, dgst[party], Hash::DIGEST_SIZE);
+  res.push_back(pool->enqueue([&dgst_me, &dgst_peer, io1, io2, party, party2]() {
+    io_send(io1, io2, party, party2, dgst_me, Hash::DIGEST_SIZE);
     io_flush(io1, io2, party, party2);
-    io_recv(io1, io2, party, party2, dgst[party2], Hash::DIGEST_SIZE);
+    io_recv(io1, io2, party, party2, dgst_peer, Hash::DIGEST_SIZE);
   }));
   joinNclean(res);
-  // Open: exchange shares, verify each against the committed digest.
-  res2.push_back(pool->enqueue([io1, io2, S, dgst, party, party2]() -> bool {
-    io_send(io1, io2, party, party2, &S[party], sizeof(block));
+  // Open: exchange shares, verify the peer's against its committed digest.
+  res2.push_back(pool->enqueue([io1, io2, &S_me, &S_peer, &dgst_peer, party, party2]() -> bool {
+    io_send(io1, io2, party, party2, &S_me, sizeof(block));
     io_flush(io1, io2, party, party2);
-    io_recv(io1, io2, party, party2, &S[party2], sizeof(block));
+    io_recv(io1, io2, party, party2, &S_peer, sizeof(block));
     char tmp[Hash::DIGEST_SIZE];
-    Hash::hash_once(tmp, &S[party2], sizeof(block));
-    return strncmp(tmp, dgst[party2], Hash::DIGEST_SIZE) != 0;
+    Hash::hash_once(tmp, &S_peer, sizeof(block));
+    return strncmp(tmp, dgst_peer, Hash::DIGEST_SIZE) != 0;
   }));
   bool cheat = joinNcleanCheat(res2);
   if (cheat) {
     cout << "cheat in sampleRandom\n" << flush;
     exit(0);
   }
-  block result = S[1] ^ S[2];
-  delete[] S;
-  delete[] dgst;
-  return result;
+  return S_me ^ S_peer;
 }
 
 // Π_FZero: shared-zero block-vector via pairwise seed-and-expand under

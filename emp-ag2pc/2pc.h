@@ -643,13 +643,11 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
         const AShareBundle<nP> &wb_in1 = WIRE(in1);
         const AShareBundle<nP> &wb_out = WIRE(out);
         const AShareBundle<nP> &sb     = sigma[ai];
-        block Mr[nP + 1][nP + 1];
-        { const int i = 2;
-          int s = i - 2;
-          block t = sb.mac(s) ^ wb_out.mac(s);
-          if (La) t = t ^ wb_in1.mac(s);
-          if (Lb) t = t ^ wb_in0.mac(s);
-          Mr[1][i] = t;
+        block Mr;  // was Mr[1][2]: the single (sender=1, receiver=2) cross term
+        { block t = sb.mac(0) ^ wb_out.mac(0);
+          if (La) t = t ^ wb_in1.mac(0);
+          if (Lb) t = t ^ wb_in0.mac(0);
+          Mr = t;
         }
         // Pass 1: per sender s, batch all (γ, s, d ∈ [2,nP]) tweaks into
         // one renew_ks + hash_cir call (matching sender s's batch). d == s
@@ -667,17 +665,10 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
           }
           mitc.renew_ks(tweaks);
           mitc.template hash_cir<nP - 1, 2>(buf);
-          { const int d = 2;
-            int k = d - 2;
-            if (d == s) {
-              self_Ha[s] = buf[2 * k];
-              self_Hb[s] = buf[2 * k + 1];
-            } else {
-              block t = buf[2 * k] ^ buf[2 * k + 1] ^ S[ai][s][d][2];
-              if (La) t = t ^ S[ai][s][d][0];
-              if (Lb) t = t ^ S[ai][s][d][1];
-              Mr[s][d] = t;
-            }
+          // Single garbler: d == s == 2 always, so only the self tweak fires
+          // (no cross-garbler S term).
+          { self_Ha[s] = buf[0];
+            self_Hb[s] = buf[1];
           }
         }
         // Pass 2: combine cached self hashes with G + Mr column to produce
@@ -687,7 +678,7 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
           block t = self_Ha[i] ^ self_Hb[i];
           if (La) t = t ^ G[ai][i][0];
           if (Lb) t = t ^ G[ai][i][1] ^ EVAL(i, in0);
-          t = t ^ Mr[1][i];  // the single s != i (= 2) is s = 1
+          t = t ^ Mr;  // the single cross term (sender s = 1, receiver i = 2)
           EVAL(i, out) = t;
         }
         mask_input[out] =

@@ -648,16 +648,16 @@ public:
     vector_inn_prdt_sum_no_red(ip[party].data(), phi.data(), tKEYphi[party].data(), LB);
     ip[party][0] ^= u_zero;
 
-    char dgst[nP + 1][Hash::DIGEST_SIZE];
-    Hash::hash_once(dgst[party], ip[party].data(), sizeof(block) * 2);
+    char dgst_me[Hash::DIGEST_SIZE], dgst_peer[Hash::DIGEST_SIZE];
+    Hash::hash_once(dgst_me, ip[party].data(), sizeof(block) * 2);
 
     { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &dgst, peer]() {
-        io_send(io1, io2, party, peer, dgst[party], Hash::DIGEST_SIZE);
+      res.push_back(pool->enqueue([this, &dgst_me, peer]() {
+        io_send(io1, io2, party, peer, dgst_me, Hash::DIGEST_SIZE);
         io_flush(io1, io2, party, peer);
       }));
-      res.push_back(pool->enqueue([this, &dgst, peer]() {
-        io_recv(io1, io2, party, peer, dgst[peer], Hash::DIGEST_SIZE);
+      res.push_back(pool->enqueue([this, &dgst_peer, peer]() {
+        io_recv(io1, io2, party, peer, dgst_peer, Hash::DIGEST_SIZE);
       }));
     }
     joinNclean(res);
@@ -668,11 +668,11 @@ public:
         io_send(io1, io2, party, peer, ip[party].data(), sizeof(block) * 2);
         io_flush(io1, io2, party, peer);
       }));
-      res2.push_back(pool->enqueue([this, &ip, &dgst, peer]() -> bool {
+      res2.push_back(pool->enqueue([this, &ip, &dgst_peer, peer]() -> bool {
         io_recv(io1, io2, party, peer, ip[peer].data(), sizeof(block) * 2);
         char chk[Hash::DIGEST_SIZE];
         Hash::hash_once(chk, ip[peer].data(), sizeof(block) * 2);
-        return memcmp(chk, dgst[peer], Hash::DIGEST_SIZE) != 0;
+        return memcmp(chk, dgst_peer, Hash::DIGEST_SIZE) != 0;
       }));
     }
     joinNclean(res);
