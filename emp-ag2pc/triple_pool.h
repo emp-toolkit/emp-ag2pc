@@ -140,32 +140,26 @@ public:
     };
     int ap = (party == 1) ? 2 : 1;  // any peer slot carries a^me in bit0
     z.assign(len, 0);
-    std::vector<std::vector<uint8_t>> s_send(nP + 1), s_recv(nP + 1);
-    { const int j = 3 - party; s_send[j].resize(len); s_recv[j].resize(len); }
+    const int peer = 3 - party;
+    std::vector<uint8_t> s_send(len), s_recv(len);
     for (int k = 0; k < len; ++k) z[k] = (uint8_t)(LSB(aMAC[ap][k]) & b[k]);
-    { const int j = 3 - party;
-      for (int k = 0; k < len; ++k) {
-        uint8_t v0 = H(aKEY[j][k]);
-        s_send[j][k] = (uint8_t)(v0 ^ H(aKEY[j][k] ^ Delta) ^ b[k]);
-        z[k] ^= v0;
-      }
+    for (int k = 0; k < len; ++k) {
+      uint8_t v0 = H(aKEY[peer][k]);
+      s_send[k] = (uint8_t)(v0 ^ H(aKEY[peer][k] ^ Delta) ^ b[k]);
+      z[k] ^= v0;
     }
     std::vector<std::future<void>> res;
-    { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &s_send, len, peer]() {
-        send_ch(peer)->send_bool((const bool *)s_send[peer].data(), len);
-        send_ch(peer)->flush();
-      }));
-      res.push_back(pool->enqueue([this, &s_recv, len, peer]() {
-        recv_ch(peer)->recv_bool((bool *)s_recv[peer].data(), len);
-      }));
-    }
+    res.push_back(pool->enqueue([this, &s_send, len, peer]() {
+      send_ch(peer)->send_bool((const bool *)s_send.data(), len);
+      send_ch(peer)->flush();
+    }));
+    res.push_back(pool->enqueue([this, &s_recv, len, peer]() {
+      recv_ch(peer)->recv_bool((bool *)s_recv.data(), len);
+    }));
     joinNclean(res);
-    { const int j = 3 - party;
-      for (int k = 0; k < len; ++k) {
-        uint8_t ame = (uint8_t)LSB(aMAC[ap][k]);
-        z[k] ^= (uint8_t)(H(aMAC[j][k]) ^ (ame & s_recv[j][k]));
-      }
+    for (int k = 0; k < len; ++k) {
+      uint8_t ame = (uint8_t)LSB(aMAC[ap][k]);
+      z[k] ^= (uint8_t)(H(aMAC[peer][k]) ^ (ame & s_recv[k]));
     }
   }
 
@@ -212,22 +206,19 @@ public:
     std::vector<uint8_t> dme(LB);
     for (int k = 0; k < LB; ++k)
       dme[k] = (uint8_t)(z[k] ^ LSB(tMAC[ap][2 * LB + k]));
-    std::vector<std::vector<uint8_t>> dr(nP + 1);
+    std::vector<uint8_t> dr(LB);
+    const int peer = 3 - party;
     std::vector<std::future<void>> res;
-    { const int peer = 3 - party;
-      dr[peer].resize(LB);
-      res.push_back(pool->enqueue([this, &dme, LB, peer]() {
-        send_ch(peer)->send_bool((const bool *)dme.data(), LB);
-        send_ch(peer)->flush();
-      }));
-      res.push_back(pool->enqueue([this, &dr, LB, peer]() {
-        recv_ch(peer)->recv_bool((bool *)dr[peer].data(), LB);
-      }));
-    }
+    res.push_back(pool->enqueue([this, &dme, LB, peer]() {
+      send_ch(peer)->send_bool((const bool *)dme.data(), LB);
+      send_ch(peer)->flush();
+    }));
+    res.push_back(pool->enqueue([this, &dr, LB, peer]() {
+      recv_ch(peer)->recv_bool((bool *)dr.data(), LB);
+    }));
     joinNclean(res);
     std::vector<uint8_t> d(dme);
-    { const int peer = 3 - party;
-      for (int k = 0; k < LB; ++k) d[k] ^= dr[peer][k]; }
+    for (int k = 0; k < LB; ++k) d[k] ^= dr[k];
     // c = r ⊕ d (public d) on the r-region: P1 flips bit0(MAC) by d; every other
     // party flips its key for peer 1 by Δ⊕e_0 to keep the MAC on c consistent.
     block dxor = Delta ^ bit0_mask;
@@ -325,22 +316,19 @@ public:
   // Open a per-party bit-share vector: returns the public ⊕_p share^p at every
   // party (all-to-all XOR). (Value-level open; MAC binding checked separately.)
   std::vector<uint8_t> open_bits(const std::vector<uint8_t> &share, int len) {
-    std::vector<std::vector<uint8_t>> r(nP + 1);
+    std::vector<uint8_t> r(len);
+    const int peer = 3 - party;
     std::vector<std::future<void>> res;
-    { const int peer = 3 - party;
-      r[peer].resize(len);
-      res.push_back(pool->enqueue([this, &share, len, peer]() {
-        send_ch(peer)->send_bool((const bool *)share.data(), len);
-        send_ch(peer)->flush();
-      }));
-      res.push_back(pool->enqueue([this, &r, len, peer]() {
-        recv_ch(peer)->recv_bool((bool *)r[peer].data(), len);
-      }));
-    }
+    res.push_back(pool->enqueue([this, &share, len, peer]() {
+      send_ch(peer)->send_bool((const bool *)share.data(), len);
+      send_ch(peer)->flush();
+    }));
+    res.push_back(pool->enqueue([this, &r, len, peer]() {
+      recv_ch(peer)->recv_bool((bool *)r.data(), len);
+    }));
     joinNclean(res);
     std::vector<uint8_t> pub(share);
-    { const int peer = 3 - party;
-      for (int k = 0; k < len; ++k) pub[k] ^= r[peer][k]; }
+    for (int k = 0; k < len; ++k) pub[k] ^= r[k];
     return pub;
   }
 

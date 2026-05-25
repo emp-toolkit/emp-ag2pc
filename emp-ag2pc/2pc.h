@@ -944,16 +944,11 @@ std::vector<bool> C2PC<nP>::decode(const SecureWires<nP> &wires,
     io_flush(io1, io2, party, recipient);
   } else {
     result.resize(n);
-    std::vector<std::vector<unsigned char>> tmp(nP + 1);
     const int party2 = 3 - recipient;  // the single non-recipient party
-    tmp[party2].resize(n);
-    std::vector<future<void>> res;
-    res.push_back(pool->enqueue([this, &tmp, n, party2]() {
-      io_recv(io1, io2, party, party2, tmp[party2].data(), n);
-    }));
-    joinNclean(res);
+    std::vector<unsigned char> tmp(n);
+    io_recv(io1, io2, party, party2, tmp.data(), n);
     for (int i = 0; i < n; ++i) {
-      unsigned char v = my_share[i] ^ wires.Lambda[i] ^ tmp[party2][i];
+      unsigned char v = my_share[i] ^ wires.Lambda[i] ^ tmp[i];
       result[i] = (v & 1);
     }
   }
