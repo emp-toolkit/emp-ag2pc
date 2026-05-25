@@ -67,7 +67,7 @@ public:
   size_t cursor = 0;
   // Floor for refill batch size. Any draw smaller than this still mints
   // `min_refill` triples to amortize the per-call protocol overhead
-  // (sampleRandom, csp tail, closing exchanges). Set at the bucket_size=4
+  // (csp tail, closing exchanges). Set at the bucket_size=4
   // threshold from Figure 16: anything ≥ 3100 already gets B=4, so this
   // floor doesn't push us into a worse bucket. Genuinely large workloads
   // (≥ 280K triples) still hit B=3 naturally because `batch = max(needed,
@@ -243,7 +243,7 @@ public:
     const int T = cutchoose_T, N = T * LB;
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
     int ap = (party == 1) ? 2 : 1;
-    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
+    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
@@ -351,7 +351,7 @@ public:
       tMAC[2 * N + tamper] = tMAC[2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
-    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
+    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
@@ -443,15 +443,6 @@ public:
       for (int k = 0; k < abit_len; ++k)
         tr[k] = LSB(tMAC[k]);
     }
-
-    // aShare consistency check (check2), run as one shared pass over the
-    // pristine a/b/r shares BEFORE the leaky-AND step mutates them (the c=r⊕d
-    // flip), so it stays independent of which leaky-AND method runs. Seed is
-    // sampled AFTER process_phase1 commits MAC/KEY so the adversary can't adapt.
-    block check2_seed = sampleRandom<nP>(io1, io2, &prg, pool, party);
-    abit.check2_init(check2_seed, abit_len);
-    abit.check2_chunk(0, abit_len, tMAC, tKEY);
-    abit.check2_finalize();
 
     vector<future<void>> res;
 
@@ -640,7 +631,7 @@ public:
     // gives a 2-block α^i (univ. hash output before mod reduction); u^i
     // is folded into the low half — Σ_p u^p = 0 keeps the column sum
     // invariant after the cross-party XOR.
-    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
+    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
     PRG jprg(&S);
     jprg.random_block(phi.data(), LB);
     BlockVec ip[nP + 1];
@@ -696,7 +687,7 @@ public:
     // bucket i's k-th slot is leaky triple (k * length + (i + r_k) mod length),
     // which is sequential in i (with at most one wraparound), so each row is
     // streamed once per bucket range.
-    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
+    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
     vector<unsigned char> d[nP + 1];
     for (int i = 1; i <= nP; ++i)
       d[i].resize(length * (bucket_size - 1));

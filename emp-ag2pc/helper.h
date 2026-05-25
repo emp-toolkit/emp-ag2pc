@@ -1,6 +1,7 @@
 #ifndef __HELPER
 #define __HELPER
 #include "emp-tool/io/net_io_channel.h"
+#include "emp-tool/crypto/ro.h"
 #include <future>
 #include <memory>
 #include <type_traits>
@@ -74,73 +75,6 @@ bool joinNcleanCheat(vector<future<bool>> &res) {
   return cheat;
 }
 
-// Echo broadcast with deferred finalize. Each all_bcast does an insecure
-// pairwise send (one round) and folds the received view into a rolling
-// transcript hash in canonical order. finalize() exchanges transcript
-// digests pairwise and aborts on any mismatch — one round suffices because
-// honest parties compare received digests against their own. Any logical
-// broadcast routed through all_bcast is protected against equivocation.
-template <int nP>
-class EchoBC {
-public:
-  Hash h;
-  NetIO *io1, *io2;
-  ThreadPool *pool;
-  int party;
-
-  EchoBC(NetIO *io1_in, NetIO *io2_in, ThreadPool *pool_in, int party_in)
-      : io1(io1_in), io2(io2_in), pool(pool_in), party(party_in) {}
-
-  // Broadcast `len` elements of type T per party. view[p] must point to a
-  // buffer of at least `len` T's for every p; view[party] is populated from
-  // my_v, and view[p] for p != party is filled from the wire. The full
-  // view (nP * len * sizeof(T) bytes) is folded into the transcript hash
-  // in party-index order.
-  template <typename T>
-  void all_bcast(const T *my_v, int len, T *view[nP + 1]) {
-    memcpy(view[party], my_v, sizeof(T) * len);
-    int bytes = (int)(sizeof(T) * len);
-    const int p2 = 3 - party;
-    vector<future<void>> res;
-    res.push_back(pool->enqueue([this, my_v, bytes, p2]() {
-      io_send(io1, io2, party, p2, my_v, bytes);
-      io_flush(io1, io2, party, p2);
-    }));
-    res.push_back(pool->enqueue([this, &view, bytes, p2]() {
-      io_recv(io1, io2, party, p2, view[p2], bytes);
-    }));
-    joinNclean(res);
-    h.put(view[1], bytes);  // canonical party order: 1 then 2
-    h.put(view[2], bytes);
-  }
-
-  // Single-element convenience overload: view is a flat [nP+1] stack array.
-  template <typename T>
-  void all_bcast(const T &my_v, T view[nP + 1]) {
-    T *ptrs[nP + 1];
-    ptrs[1] = &view[1];
-    ptrs[2] = &view[2];
-    all_bcast(&my_v, 1, ptrs);
-  }
-
-  void finalize() {
-    char d_me[Hash::DIGEST_SIZE];
-    h.digest(d_me);
-    char recv[Hash::DIGEST_SIZE];
-    const int p2 = 3 - party;
-    vector<future<void>> res;
-    res.push_back(pool->enqueue([this, &d_me, p2]() {
-      io_send(io1, io2, party, p2, d_me, Hash::DIGEST_SIZE);
-      io_flush(io1, io2, party, p2);
-    }));
-    res.push_back(pool->enqueue([this, &recv, p2]() {
-      io_recv(io1, io2, party, p2, recv, Hash::DIGEST_SIZE);
-    }));
-    joinNclean(res);
-    if (strncmp(d_me, recv, Hash::DIGEST_SIZE) != 0)
-      error("EchoBC finalize: transcript divergence\n");
-  }
-};
 
 template <int B>
 void send_partial_block(NetIO *io, const block *data, int length) {
@@ -160,40 +94,6 @@ inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 // invariant LSB1(⊕_p Δ_p) = 1; bit 0 is reserved for share-value encoding
 // (see share_bundle.h).
 inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1; }
-
-template <int nP>
-block sampleRandom(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party) {
-  vector<future<void>> res;
-  vector<future<bool>> res2;
-  const int party2 = 3 - party;
-  block S_me, S_peer;
-  char dgst_me[Hash::DIGEST_SIZE], dgst_peer[Hash::DIGEST_SIZE];
-  prg->random_block(&S_me, 1);
-  Hash::hash_once(dgst_me, &S_me, sizeof(block));
-
-  // Commit: exchange digests of the two shares.
-  res.push_back(pool->enqueue([&dgst_me, &dgst_peer, io1, io2, party, party2]() {
-    io_send(io1, io2, party, party2, dgst_me, Hash::DIGEST_SIZE);
-    io_flush(io1, io2, party, party2);
-    io_recv(io1, io2, party, party2, dgst_peer, Hash::DIGEST_SIZE);
-  }));
-  joinNclean(res);
-  // Open: exchange shares, verify the peer's against its committed digest.
-  res2.push_back(pool->enqueue([io1, io2, &S_me, &S_peer, &dgst_peer, party, party2]() -> bool {
-    io_send(io1, io2, party, party2, &S_me, sizeof(block));
-    io_flush(io1, io2, party, party2);
-    io_recv(io1, io2, party, party2, &S_peer, sizeof(block));
-    char tmp[Hash::DIGEST_SIZE];
-    Hash::hash_once(tmp, &S_peer, sizeof(block));
-    return strncmp(tmp, dgst_peer, Hash::DIGEST_SIZE) != 0;
-  }));
-  bool cheat = joinNcleanCheat(res2);
-  if (cheat) {
-    cout << "cheat in sampleRandom\n" << flush;
-    exit(0);
-  }
-  return S_me ^ S_peer;
-}
 
 // Π_FZero: shared-zero block-vector via pairwise seed-and-expand under
 // the ICM assumption on the AES-based PRG. Each peer-pair shares a

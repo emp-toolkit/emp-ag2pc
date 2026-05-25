@@ -73,20 +73,8 @@ class AuthSharePool { public:
 	int party;
 	PRG prg;
 	block Delta;
-	Hash hash;
 	int csp = 128;
-	GaloisFieldPacking packer;
 
-	// ==== Streaming check2 state (Stage 2 split) ====
-	// Set up by check2_init, accumulated by check2_chunk, drained by
-	// check2_finalize. Lifetime is per-call: each check2_init resets to a
-	// fresh session.
-	int check2_length = 0;
-	BlockVec check2_coeff;
-	block check2_bw;
-	block check2_Mw;
-	block check2_Kw;
-	std::unique_ptr<EchoBC<nP>> check2_echo;
 
 	// `choice_seed_in` (optional): when non-null, all of this party's COT
 	// receiver instances (abit2) seed their choice_prg from the same
@@ -99,6 +87,15 @@ class AuthSharePool { public:
 	AuthSharePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party,
 			const block *choice_seed_in = nullptr)
 		: io1(io1), io2(io2), pool(pool), party(party) {
+			// Enable the Fiat-Shamir transcript on both channels from the very
+			// start of the protocol, so io{1,2}->get_digest() binds the full
+			// transcript (not just from the COT's first rcot onward). The
+			// per-channel role is opposite on the two ends (party 1 vs 2), which
+			// is all get_digest() needs to agree; the COT's own lazy enable_fs
+			// then no-ops (fs_enabled() already true).
+			if (!io1->fs_enabled()) io1->enable_fs(/*send_first=*/party == 1);
+			if (!io2->fs_enabled()) io2->enable_fs(/*send_first=*/party == 1);
+
 			// Step 1 (Fig.13 Init): pick Δ_me with two pinned bits:
 			//   bit 0 of Δ — share-value encoding (always 1; lets bit0(M) carry
 			//                the authenticated bit when bit0(K)=0).
@@ -159,13 +156,6 @@ class AuthSharePool { public:
 	void compute(BlockVec &MAC, BlockVec &KEY, int length) {
 		process_phase1(MAC, KEY, length);
 
-		// Step 10 seed: collectively-sampled, derived after MAC/KEY are
-		// committed (post-step-9), so adversary can't adapt MAC/KEY to it.
-		block seed = sampleRandom<nP>(io1, io2, &prg, pool, party);
-		check2_init(seed, length);
-		check2_chunk(0, length, MAC, KEY);
-		check2_finalize();
-
 #ifdef EMP_DEBUG_PHASE
 		_phase("[abit] aShare", party);
 		check_MAC<nP>(io1, io2, MAC, KEY, Delta, length, party);
@@ -224,78 +214,6 @@ class AuthSharePool { public:
 		MAC.resize(length);
 		KEY.resize(length);
 	}
-
-	// Begin a streaming check2 session of `length` aShares with the given
-	// collectively-sampled seed. Allocates coefficients[length] and zeroes
-	// the per-peer accumulators; subsequent check2_chunk calls fold their
-	// slice into bw / Mw[peer] / Kw[peer]. EchoBC is owned by check2 — its
-	// bw broadcast and finalize happen in check2_finalize.
-	void check2_init(block seed, int length) {
-		check2_length = length;
-		check2_coeff.resize(length);
-		PRG prg2(&seed);
-		prg2.random_block(check2_coeff.data(), length);
-		check2_bw = zero_block;
-		check2_Mw = zero_block;
-		check2_Kw = zero_block;
-		check2_echo.reset(new EchoBC<nP>(io1, io2, pool, party));
-	}
-
-	// Accumulate Mw[peer]/Kw[peer]/bw partial sums over [start, start+n).
-	// Caller may invoke this any number of times in any order over disjoint
-	// sub-ranges of [0, length); result before finalize is the sum over all
-	// invoked ranges. Streaming use-case: TriplePool walks each region of
-	// its 3*LB aShare batch and feeds a chunk per region.
-	void check2_chunk(int start, int n, BlockVec &MAC, BlockVec &KEY) {
-		// w^me partial: bw += Σ_{k in chunk} coeff[k] · bit0(MAC[k]).
-		// Branchless tab[bit] mirrors the original loop.
-		block tab[2] = {zero_block, zero_block};
-		for (int k = start; k < start + n; ++k) {
-			tab[1] = check2_coeff[k];
-			check2_bw = check2_bw ^ tab[LSB(MAC[k])];
-		}
-		// Mw/Kw partial: vector_inn_prdt_sum_red writes Σ coeff·v into a
-		// fresh block; XOR into running accumulator.
-		block partial;
-		vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
-				MAC.data() + start, n);
-		check2_Mw = check2_Mw ^ partial;
-		vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
-				KEY.data() + start, n);
-		check2_Kw = check2_Kw ^ partial;
-	}
-
-	// Close the check2 session: broadcast bw via FBC, exchange Mw with each
-	// peer, verify M_me[w^peer] = K_me[w^peer] ⊕ w^peer · Δ_me. Aborts on
-	// cheating. echo.finalize() also runs, ensuring all_bcast transcripts
-	// agreed across parties.
-	void check2_finalize() {
-		block bw_recv[nP + 1];
-		check2_echo->all_bcast(check2_bw, bw_recv);
-
-		vector<future<void>> res;
-		{ const int peer = 3 - party;
-			res.push_back(pool->enqueue([this, peer]() {
-				io_send(io1, io2, party, peer, &check2_Mw, sizeof(block));
-				io_flush(io1, io2, party, peer);
-			}));
-			res.push_back(pool->enqueue([this, &bw_recv, peer]() {
-				block Mw_recv, tmp;
-				io_recv(io1, io2, party, peer, &Mw_recv, sizeof(block));
-				gfmul(bw_recv[peer], Delta, &tmp);
-				block Kw_check = check2_Kw ^ tmp;
-				if (!cmpBlock(&Kw_check, &Mw_recv, 1))
-					error("cheat aShare\n");
-			}));
-		}
-		joinNclean(res);
-
-		check2_echo->finalize();
-		check2_echo.reset();
-		check2_coeff.clear();
-		check2_coeff.shrink_to_fit();
-	}
-
 
 	// One-shot mint helper: run compute() into a fresh SoA scratch and
 	// transpose into AoS bundles. Each call runs a full Π_aShare protocol
