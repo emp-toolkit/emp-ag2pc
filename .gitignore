@@ -1,12 +1,11 @@
-*Testing
+Testing/
 *CTestTestfile.cmake
-CMakeCache.txt
-CMakeFiles/
-Makefile
-bin/
-cmake_install.cmake
-install_manifest.txt
-
+*CMakeCache.txt
+*CMakeFiles/
+*Makefile
+*bin/
+*cmake_install.cmake
+*DS_Store
 # Compiled Object files
 *.slo
 *.lo
@@ -37,3 +36,5 @@ install_manifest.txt
 *.app
 
 perf.data*
+
+.claude/settings.local.json
