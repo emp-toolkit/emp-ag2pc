@@ -5,8 +5,8 @@
 // — so peak gate-list memory is one AES, not two. Oracle: the same 2x chain in
 // plaintext via setup_clear_backend (no checkpoint).
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 

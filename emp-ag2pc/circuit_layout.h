@@ -1,6 +1,6 @@
 #ifndef CIRCUIT_LAYOUT_H__
 #define CIRCUIT_LAYOUT_H__
-#include "emp-agmpc/wire_graph.h"   // Gate
+#include "emp-ag2pc/wire_graph.h"   // Gate
 #include <utility>
 #include <vector>
 using namespace emp;

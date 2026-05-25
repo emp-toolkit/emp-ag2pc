@@ -3,8 +3,8 @@
 // no explicit reveal/checkpoint). Same SPMD program runs under WRK and under the
 // plaintext clear backend; results must match and be identical across parties.
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 

@@ -24,9 +24,9 @@
 // prof_triple all call TriplePool::compute which calls process_phase1
 // then continues into TriplePool's own protocol steps WITHOUT the
 // AuthSharePool::compute-level check2 finalize sync. aes/sha256 work
-// because their CMPC path eventually hits sync points that mask the
+// because their C2PC path eventually hits sync points that mask the
 // issue.
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 using namespace std;
 using namespace emp;
 

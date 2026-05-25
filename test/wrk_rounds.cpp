@@ -2,8 +2,8 @@
 // SINGLE process_input (one input-processing round), not one per Integer. This
 // is the regression the deferred + per-owner-batched feed exists to prevent.
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>

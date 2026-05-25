@@ -1,5 +1,5 @@
-#ifndef EMP_AGMPC_WIRE_GRAPH_H__
-#define EMP_AGMPC_WIRE_GRAPH_H__
+#ifndef EMP_AG2PC_WIRE_GRAPH_H__
+#define EMP_AG2PC_WIRE_GRAPH_H__
 #include "emp-tool/core/constants.h"   // GateType { AND_GATE=0, XOR_GATE=1, NOT_GATE=2 }
 #include <vector>
 
@@ -54,4 +54,4 @@ struct WireGraph {
 };
 
 }  // namespace emp
-#endif  // EMP_AGMPC_WIRE_GRAPH_H__
+#endif  // EMP_AG2PC_WIRE_GRAPH_H__

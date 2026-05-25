@@ -1,10 +1,10 @@
 // Stage B: author a WRK circuit in emp-tool's native Bit frontend, run it
-// through WRKBackend (record -> WireGraph -> CMPC), no Bristol. SPMD: every
+// through WRKBackend (record -> WireGraph -> C2PC), no Bristol. SPMD: every
 // party runs identical code, passing its own real input and a dummy for
 // inputs it does not own.
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>

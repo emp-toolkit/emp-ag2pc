@@ -1,7 +1,7 @@
 #ifndef TRIPLE_POOL_H__
 #define TRIPLE_POOL_H__
-#include "emp-agmpc/auth_share_pool.h"
-#include "emp-agmpc/netmp.h"
+#include "emp-ag2pc/auth_share_pool.h"
+#include "emp-ag2pc/netmp.h"
 #include "emp-tool/crypto/mitccrh.h"
 #include "emp-tool/crypto/prp.h"
 #include <thread>

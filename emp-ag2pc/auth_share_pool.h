@@ -1,11 +1,11 @@
 #ifndef AUTH_SHARE_POOL_H__
 #define AUTH_SHARE_POOL_H__
-#include "emp-agmpc/helper.h"
-#include "emp-agmpc/netmp.h"
+#include "emp-ag2pc/helper.h"
+#include "emp-ag2pc/netmp.h"
 #include "emp-ot/ot_extension/iknp.h"
 #include "emp-ot/ot_extension/ferret/ferret.h"
 #include "emp-ot/ot_extension/softspoken/softspoken.h"
-#include "emp-agmpc/share_bundle.h"
+#include "emp-ag2pc/share_bundle.h"
 #include <memory>
 
 // Choose the OT extension backend used for the per-pair COT mesh.

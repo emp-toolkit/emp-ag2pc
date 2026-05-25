@@ -1,20 +1,20 @@
 // Direct call to TriplePool::compute. Reproduces a deterministic protocol
 // failure ("LaAND alpha: Sigma alpha != 0") even though:
 //   - AuthSharePool::compute on the same lengths passes (see auth_share test).
-//   - Calling TriplePool::compute via CMPC->function_independent
+//   - Calling TriplePool::compute via C2PC->function_independent
 //     ->preprocess->refill_internal->compute(BlockVec, BlockVec, length,
 //     pool_triples.data()) — same code path, same arguments — passes
 //     (see aes / sha256 / chain tests).
 //
-// Difference between this failing test and the passing CMPC tests:
-//   - CMPC tests: TriplePool::compute called from
+// Difference between this failing test and the passing C2PC tests:
+//   - C2PC tests: TriplePool::compute called from
 //     refill_internal(batch) inside TriplePool::preprocess(num).
 //   - This test: TriplePool::compute called directly from main.
 //
 // Both paths end at the same compute() body with the same (length, out_aos)
 // args. Yet only the direct call corrupts the leaky-triple c-bit (~50%
 // wrong → Sigma alpha != 0). Root cause not yet identified.
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 using namespace std;
 using namespace emp;
 

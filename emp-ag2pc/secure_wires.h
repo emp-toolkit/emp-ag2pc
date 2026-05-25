@@ -1,6 +1,6 @@
 #ifndef SECURE_WIRES_H__
 #define SECURE_WIRES_H__
-#include "emp-agmpc/share_bundle.h"
+#include "emp-ag2pc/share_bundle.h"
 #include <vector>
 using namespace emp;
 
@@ -48,7 +48,7 @@ template <int nP> struct SecureWires {
     return r;
   }
 
-  // In-place concatenation. Mirrors CMPC::concat without allocating a copy
+  // In-place concatenation. Mirrors C2PC::concat without allocating a copy
   // of `*this`.
   void append(const SecureWires<nP> &b) {
     Lambda.insert(Lambda.end(), b.Lambda.begin(), b.Lambda.end());

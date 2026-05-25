@@ -8,14 +8,14 @@
 // use), so what we exercise here is the per-pair base-OT-then-extend
 // pipeline running concurrently across all (party, peer) pairs. If
 // this fires "OT Extension check failed" or hangs, the bug is in
-// upstream emp-ot/IKNP itself, not in any emp-agmpc protocol code.
+// upstream emp-ot/IKNP itself, not in any emp-ag2pc protocol code.
 //
 // Knobs:
 //   nP   — number of parties (default 3, the regression boundary)
 //   LEN  — random COTs per pair (default 1<<14 = 16K, big enough to
 //          exercise the malicious-check chi-fold over many chunks)
 
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 #include <future>
 #include <memory>
 using namespace std;

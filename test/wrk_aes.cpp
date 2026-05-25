@@ -1,11 +1,11 @@
 // Stage B: native AES-128 (emp-tool's AES_Calculator) authored in the Bit
-// frontend and run through WRKBackend (record -> WireGraph -> CMPC). Oracle:
+// frontend and run through WRKBackend (record -> WireGraph -> C2PC). Oracle:
 // the SAME AES_Calculator run in plaintext via setup_clear_backend(""), so the
 // AES bit-convention cancels and we directly verify WRK == plaintext AES.
 // Exercises many ANDs/XORs + many public constants (Rcon / SBox), no Bristol.
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 

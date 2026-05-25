@@ -1,8 +1,8 @@
-// Stage A: validate CMPC::compute(WireGraph) on a hand-built tiny graph, with
+// Stage A: validate C2PC::compute(WireGraph) on a hand-built tiny graph, with
 // no recorder and no Bristol. Exercises: per-owner input bundles laid into
 // [0,num_in), gates referencing inputs, a constant-via-XOR(w,w) wire, an
 // explicit (non-tail) output id, and decode to a chosen recipient.
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 using namespace std;
 using namespace emp;
 
@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
 
   NetIOMP<nP> io(party, port);
   ThreadPool pool(2 * (nP - 1) + 2);
-  CMPC<nP> mpc(&io, &pool, party);
+  C2PC<nP> mpc(&io, &pool, party);
   io.flush();
 
   // Inputs: a from ALICE (party 1) at wire 0, b from BOB (party 2) at wire 1.

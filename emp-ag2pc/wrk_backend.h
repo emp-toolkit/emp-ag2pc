@@ -1,8 +1,8 @@
-#ifndef EMP_AGMPC_WRK_BACKEND_H__
-#define EMP_AGMPC_WRK_BACKEND_H__
+#ifndef EMP_AG2PC_WRK_BACKEND_H__
+#define EMP_AG2PC_WRK_BACKEND_H__
 #include "emp-tool/execution/backend.h"
-#include "emp-agmpc/mpc.h"
-#include "emp-agmpc/wire_graph.h"
+#include "emp-ag2pc/2pc.h"
+#include "emp-ag2pc/wire_graph.h"
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -26,7 +26,7 @@ template <int nP> class WRKBackend : public Backend {
 public:
   WRKBackend(NetIOMP<nP> *io_, ThreadPool *pool_, int party_) {
     this->party = party_;
-    mpc = new CMPC<nP>(io_, pool_, party_);
+    mpc = new C2PC<nP>(io_, pool_, party_);
   }
   ~WRKBackend() override { delete mpc; }
 
@@ -120,7 +120,7 @@ private:
     std::vector<int> ids;
   };
 
-  CMPC<nP> *mpc = nullptr;
+  C2PC<nP> *mpc = nullptr;
   int64_t gid = 0;
   std::vector<Gate> gates_;       // typed; moved into WireGraph at a boundary
   std::vector<InputRec> input_log;
@@ -297,4 +297,4 @@ inline void finalize_wrk_backend() {
 }
 
 }  // namespace emp
-#endif  // EMP_AGMPC_WRK_BACKEND_H__
+#endif  // EMP_AG2PC_WRK_BACKEND_H__

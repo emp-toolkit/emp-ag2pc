@@ -7,7 +7,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 function(add_test_case _name)
     add_executable(test_${_name} ${_name}.cpp)
-    target_link_libraries(test_${_name} PRIVATE emp-agmpc::emp-agmpc)
+    target_link_libraries(test_${_name} PRIVATE emp-ag2pc::emp-ag2pc)
     add_test(NAME ${_name}
              COMMAND test_${_name}
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -15,7 +15,7 @@ endfunction()
 
 function(add_test_case_with_run _name)
     add_executable(test_${_name} ${_name}.cpp)
-    target_link_libraries(test_${_name} PRIVATE emp-agmpc::emp-agmpc)
+    target_link_libraries(test_${_name} PRIVATE emp-ag2pc::emp-ag2pc)
     add_test(NAME ${_name}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../run $<TARGET_FILE:test_${_name}>
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -27,7 +27,7 @@ add_test_case_with_run(prof_triple)
 add_test_case_with_run(three_party_iknp)
 add_test_case_with_run(auth_share)
 
-# Native Bit frontend (WRKBackend -> WireGraph -> CMPC) + IR
+# Native Bit frontend (WRKBackend -> WireGraph -> C2PC) + IR
 add_test_case_with_run(wire_graph_test)
 add_test_case_with_run(wrk_recording)
 add_test_case_with_run(wrk_aes)

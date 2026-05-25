@@ -1,5 +1,5 @@
 // Native SHA-256 compression (emp::sha256_compress<Wire>) authored in the Bit
-// frontend and run through WRKBackend (record -> WireGraph -> CMPC). A larger
+// frontend and run through WRKBackend (record -> WireGraph -> C2PC). A larger
 // circuit than AES (~24.7k ANDs). The 512-bit message block is a secret input
 // of party 2; the IV (H0) is public, matching real SHA-256. Oracle: the same
 // compression under setup_clear_backend(""), so we verify WRK == plaintext.
@@ -11,8 +11,8 @@
 // (flush_keep_all) that would carry every prior wire forward (O(N^2)).
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/circuits/sha256_circuit.h"
-#include "emp-agmpc/emp-agmpc.h"
-#include "emp-agmpc/wrk_backend.h"
+#include "emp-ag2pc/emp-ag2pc.h"
+#include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 

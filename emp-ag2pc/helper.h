@@ -1,6 +1,6 @@
 #ifndef __HELPER
 #define __HELPER
-#include "emp-agmpc/netmp.h"
+#include "emp-ag2pc/netmp.h"
 #include <future>
 #include <memory>
 #include <type_traits>

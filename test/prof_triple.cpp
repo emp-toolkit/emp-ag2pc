@@ -1,4 +1,4 @@
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 #include <chrono>
 #include <thread>
 using namespace std;

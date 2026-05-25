@@ -2,7 +2,7 @@
 // multiplication produces correct UNAUTHENTICATED product shares
 // ⊕_p z^p = (⊕_p a^p) ∧ (⊕_p b^p), checked by opening a,b,z to party 1.
 #include "emp-tool/emp-tool.h"
-#include "emp-agmpc/emp-agmpc.h"
+#include "emp-ag2pc/emp-ag2pc.h"
 using namespace std;
 using namespace emp;
 

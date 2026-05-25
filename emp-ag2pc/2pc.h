@@ -1,12 +1,12 @@
-#ifndef CMPC_H__
-#define CMPC_H__
-#include "emp-agmpc/auth_share_pool.h"
-#include "emp-agmpc/triple_pool.h"
-#include "emp-agmpc/netmp.h"
-#include "emp-agmpc/share_bundle.h"
-#include "emp-agmpc/secure_wires.h"
-#include "emp-agmpc/circuit_layout.h"
-#include "emp-agmpc/wire_graph.h"
+#ifndef C2PC_H__
+#define C2PC_H__
+#include "emp-ag2pc/auth_share_pool.h"
+#include "emp-ag2pc/triple_pool.h"
+#include "emp-ag2pc/netmp.h"
+#include "emp-ag2pc/share_bundle.h"
+#include "emp-ag2pc/secure_wires.h"
+#include "emp-ag2pc/circuit_layout.h"
+#include "emp-ag2pc/wire_graph.h"
 #include <array>
 #include <vector>
 using namespace emp;
@@ -14,7 +14,7 @@ using namespace emp;
 // Opt-in phase profiler: compile with -DWRK_PROFILE (or #define before include).
 // At P1, each WRK_PHASE prints the wall time and this party's send+recv byte
 // delta since the matching WRK_PHASE_BEGIN. Zero-cost when WRK_PROFILE is unset.
-// Requires `io` (NetIOMP*) and `party` in scope — both are CMPC members.
+// Requires `io` (NetIOMP*) and `party` in scope — both are C2PC members.
 #ifdef WRK_PROFILE
 #include <chrono>
 #include <cstdio>
@@ -57,7 +57,7 @@ using namespace emp;
 // Bit/Integer code; circuits are consumed as WireGraph, not BristolFormat.
 
 template <int nP>
-class CMPC {
+class C2PC {
 public:
   // Long-lived setup: COT mesh + Δ + TriplePool (which owns the inner
   // AuthSharePool). Constructed once per session and reused across all
@@ -70,12 +70,12 @@ public:
   block Delta;
   PRG prg;
 
-  CMPC(NetIOMP<nP> *io_, ThreadPool *pool_, int party_)
+  C2PC(NetIOMP<nP> *io_, ThreadPool *pool_, int party_)
       : io(io_), pool(pool_), party(party_) {
     fpre = new TriplePool<nP>(io_, pool_, party_);
     Delta = fpre->Delta;
   }
-  ~CMPC() { delete fpre; }
+  ~C2PC() { delete fpre; }
 
   // Eagerly mint num_triples triples into TriplePool's pool so subsequent
   // compute() calls draw from cache. AuthSharePool no longer has a pool
@@ -180,7 +180,7 @@ private:
 // ==========================================================================
 
 template <int nP>
-SecureWires<nP> CMPC<nP>::concat(const SecureWires<nP> &a,
+SecureWires<nP> C2PC<nP>::concat(const SecureWires<nP> &a,
                                        const SecureWires<nP> &b) {
   SecureWires<nP> r = a;
   r.append(b);
@@ -188,7 +188,7 @@ SecureWires<nP> CMPC<nP>::concat(const SecureWires<nP> &a,
 }
 
 template <int nP>
-SecureWires<nP> CMPC<nP>::process_input(const bool *inputs, int n, int owner) {
+SecureWires<nP> C2PC<nP>::process_input(const bool *inputs, int n, int owner) {
   WRK_PHASE_BEGIN();
   SecureWires<nP> sw;
   sw.Lambda.resize(n);
@@ -269,7 +269,7 @@ SecureWires<nP> CMPC<nP>::process_input(const bool *inputs, int n, int owner) {
 
 // WireGraph marshals directly: gate list as-is, outputs taken by explicit id.
 template <int nP>
-SecureWires<nP> CMPC<nP>::compute(const WireGraph &g,
+SecureWires<nP> C2PC<nP>::compute(const WireGraph &g,
                                         const std::vector<SecureWires<nP>> &inputs) {
   std::vector<const SecureWires<nP> *> ptrs;
   ptrs.reserve(inputs.size());
@@ -280,7 +280,7 @@ SecureWires<nP> CMPC<nP>::compute(const WireGraph &g,
 }
 
 template <int nP>
-SecureWires<nP> CMPC<nP>::compute_impl(const CircuitView *cf,
+SecureWires<nP> C2PC<nP>::compute_impl(const CircuitView *cf,
                                              const std::vector<int> &output_ids,
                                              const SecureWires<nP> *const *inputs,
                                              int n_inputs) {
@@ -317,7 +317,7 @@ SecureWires<nP> CMPC<nP>::compute_impl(const CircuitView *cf,
 // Copy each input SecureWires bundle into wire indices [0, num_in) in order;
 // inputs occupy slots [0, num_in). SecureWires is AoS, so this is a pure memcpy.
 template <int nP>
-void CMPC<nP>::load_inputs(ComputeCtx &ctx, const SecureWires<nP> *const *inputs,
+void C2PC<nP>::load_inputs(ComputeCtx &ctx, const SecureWires<nP> *const *inputs,
                            int n_inputs) {
   size_t off = 0;
   for (int b = 0; b < n_inputs; ++b) {
@@ -341,7 +341,7 @@ void CMPC<nP>::load_inputs(ComputeCtx &ctx, const SecureWires<nP> *const *inputs
 // preprocessing pool. ANDS_bundle[ai].b[s] holds triple ai's slot-s share
 // bundle; the slot-s share-bit is implicit in bit0(.mac(0)).
 template <int nP>
-void CMPC<nP>::draw_and_seed(ComputeCtx &ctx) {
+void C2PC<nP>::draw_and_seed(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
@@ -388,7 +388,7 @@ void CMPC<nP>::draw_and_seed(ComputeCtx &ctx) {
 // "λ_{αβ} ⊕= 1" (P1-only): at P1 flip bit0 of every sb.mac(s); at non-P1 update
 // sb.key(peer_slot(*,1)) by (Δ ⊕ e_0) so bit0(KEY)=0 stays pinned.
 template <int nP>
-void CMPC<nP>::beaver_pass(ComputeCtx &ctx) {
+void C2PC<nP>::beaver_pass(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
@@ -476,7 +476,7 @@ void CMPC<nP>::beaver_pass(ComputeCtx &ctx) {
 // (γ, sender)→(d∈[2,nP]) batch — d == sender is the self tweak feeding G_{γ,*};
 // d ≠ sender feeds S_{γ,*}^{sender,d}.
 template <int nP>
-void CMPC<nP>::garble_and_ship(ComputeCtx &ctx) {
+void C2PC<nP>::garble_and_ship(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
@@ -581,7 +581,7 @@ void CMPC<nP>::garble_and_ship(ComputeCtx &ctx) {
 // Steps 6-7: P1 receives G, S, b from each Pi (i >= 2) into ctx (consumed by
 // p1_evaluate). Streams are independent so run them in parallel.
 template <int nP>
-void CMPC<nP>::receive_garbling(ComputeCtx &ctx) {
+void C2PC<nP>::receive_garbling(ComputeCtx &ctx) {
   const int num_ands = ctx.num_ands;
   auto &G = ctx.G;
   auto &S = ctx.S;
@@ -618,7 +618,7 @@ void CMPC<nP>::receive_garbling(ComputeCtx &ctx) {
 // public mask. XOR/NOT propagate locally; AND combines the received G/S
 // ciphertexts with the half-gate hashes. Called only at P1.
 template <int nP>
-void CMPC<nP>::p1_evaluate(ComputeCtx &ctx) {
+void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
   auto EVAL = [&](int j, int w) -> block & { return ctx.EVAL(j, w); };
@@ -712,7 +712,7 @@ void CMPC<nP>::p1_evaluate(ComputeCtx &ctx) {
 // the streaming label-hash check (step 12). h'_s({a_w}) = ⊕_w a_w·s^{w+1} is
 // linear in {a_w}, which step 13's ⊕_p z_p = h'(⊕_p {M_1[t_w^p]}) check requires.
 template <int nP>
-void CMPC<nP>::check_label_hash(ComputeCtx &ctx) {
+void C2PC<nP>::check_label_hash(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_in = ctx.num_in;
   const int num_ands = ctx.num_ands;
@@ -805,7 +805,7 @@ void CMPC<nP>::check_label_hash(ComputeCtx &ctx) {
 // Step 13: t_γ check. ⊕_p M_1[t_γ^p] = (y_α y_β ⊕ y_γ)·Δ_1 = 0 on honest gates;
 // h' linearity then gives ⊕_p z_p = 0. coeff_ands is the uni-hash of hp_seed.
 template <int nP>
-void CMPC<nP>::check_tgamma(ComputeCtx &ctx) {
+void C2PC<nP>::check_tgamma(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
@@ -893,7 +893,7 @@ void CMPC<nP>::check_tgamma(ComputeCtx &ctx) {
 // Gather output SecureWires by explicit wire id; outputs are pinned to permanent
 // slots and need not be contiguous or at the tail.
 template <int nP>
-SecureWires<nP> CMPC<nP>::gather_outputs(ComputeCtx &ctx,
+SecureWires<nP> C2PC<nP>::gather_outputs(ComputeCtx &ctx,
                                          const std::vector<int> &output_ids) {
   auto WIRE = [&](int w) -> AShareBundle<nP> & { return ctx.WIRE(w); };
   auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
@@ -920,7 +920,7 @@ SecureWires<nP> CMPC<nP>::gather_outputs(ComputeCtx &ctx,
 }
 
 template <int nP>
-std::vector<bool> CMPC<nP>::decode(const SecureWires<nP> &wires,
+std::vector<bool> C2PC<nP>::decode(const SecureWires<nP> &wires,
                                          int recipient) {
   int n = (int)wires.size();
   WRK_PHASE_BEGIN();
@@ -977,4 +977,4 @@ std::vector<bool> CMPC<nP>::decode(const SecureWires<nP> &wires,
   return result;
 }
 
-#endif // CMPC_H__
+#endif // C2PC_H__

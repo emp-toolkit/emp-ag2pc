@@ -1,5 +1,5 @@
-#ifndef CMPC_TEST_IP_H__
-#define CMPC_TEST_IP_H__
+#ifndef C2PC_TEST_IP_H__
+#define C2PC_TEST_IP_H__
 
 // Per-party address table for multi-host test runs. 1-based: IP[p] is the
 // address of party p. All loopback by default; pass to NetIOMP's `ip` argument
@@ -16,4 +16,4 @@ const static char *IP[] = {"",
     "127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1",
     "127.0.0.1"};
 
-#endif // CMPC_TEST_IP_H__
+#endif // C2PC_TEST_IP_H__
