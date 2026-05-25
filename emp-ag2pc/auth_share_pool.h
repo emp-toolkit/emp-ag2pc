@@ -66,8 +66,8 @@ class AuthSharePool { public:
 	// this file selects the backend (IKNP / SoftSpoken / Ferret); ctor
 	// takes (role, io) upfront, so we store unique_ptrs and construct
 	// per-peer in the body of the AuthSharePool ctor.
-	std::unique_ptr<OTExt> abit1[nP + 1];
-	std::unique_ptr<OTExt> abit2[nP + 1];
+	std::unique_ptr<OTExt> abit1;
+	std::unique_ptr<OTExt> abit2;
 	NetIO *io1, *io2;
 	ThreadPool *pool;
 	int party;
@@ -84,12 +84,12 @@ class AuthSharePool { public:
 	int check2_length = 0;
 	BlockVec check2_coeff;
 	block check2_bw;
-	block check2_Mw[nP + 1];
-	block check2_Kw[nP + 1];
+	block check2_Mw;
+	block check2_Kw;
 	std::unique_ptr<EchoBC<nP>> check2_echo;
 
 	// `choice_seed_in` (optional): when non-null, all of this party's COT
-	// receiver instances (abit2[peer]) seed their choice_prg from the same
+	// receiver instances (abit2) seed their choice_prg from the same
 	// block. With a shared choice seed, the choice bits Pi commits in
 	// COT(i, j) are identical across j by construction, so x^me_k =
 	// bit0(MAC[any_peer][k]) is automatically consistent across peers —
@@ -122,16 +122,16 @@ class AuthSharePool { public:
 			// replaces the abit1 ctor-sampled Δ with our protocol Δ_me.
 			{ const int peer = 3 - party;
 				bool me_smaller = party < peer;
-				abit1[peer] = std::make_unique<OTExt>(
+				abit1 = std::make_unique<OTExt>(
 					ALICE, (me_smaller ? false : true) ? io1 : io2);
-				abit2[peer] = std::make_unique<OTExt>(
+				abit2 = std::make_unique<OTExt>(
 					BOB, (me_smaller ? true : false) ? io1 : io2);
 			}
 
 			// Install Δ_me on every sender instance. set_delta only updates
 			// the Δ bits; the base-OT round-trip that ships Δ to the peer
 			// happens lazily inside the first rcot_send / rcot_recv call.
-			abit1[3 - party]->set_delta(tmp);
+			abit1->set_delta(tmp);
 
 			// Shared choice seed: same r vector across all of Pi's COT
 			// receiver instances, so x^me is implicitly consistent across peer
@@ -141,9 +141,9 @@ class AuthSharePool { public:
 			block choice_seed;
 			if (choice_seed_in) choice_seed = *choice_seed_in;
 			else prg.random_block(&choice_seed, 1);
-			abit2[3 - party]->set_choice_seed(choice_seed);
+			abit2->set_choice_seed(choice_seed);
 
-			Delta = abit1[party == 1 ? 2 : 1]->Delta;
+			Delta = abit1->Delta;
 		}
 
 	// On entry, MAC[i]/KEY[i] may have any size; compute() grows them to
@@ -191,7 +191,7 @@ class AuthSharePool { public:
 		}
 
 		// Step 8/9 ELIDED: with the shared choice_prg seed set in the ctor,
-		// all of Pi's abit2[peer] receivers commit the SAME choice bits
+		// all of Pi's abit2 receivers commit the SAME choice bits
 		// across peer pairs. So bit0(MAC[peer1][k]) = bit0(MAC[peer2][k])
 		// = ... = x^me_k automatically — no need to sample x^me, exchange
 		// r_choice/d, or update K. The pinned-bit invariants (bit0(Δ)=1,
@@ -209,11 +209,11 @@ class AuthSharePool { public:
 		{ const int peer = 3 - party;
 			bool me_smaller = party < peer;
 			res.push_back(pool->enqueue([this, KEY, ext_len, peer, me_smaller]() {
-				abit1[peer]->rcot(KEY[peer].data(), ext_len);
+				abit1->rcot(KEY[peer].data(), ext_len);
 				((me_smaller ? false : true) ? io1 : io2)->flush();
 			}));
 			res.push_back(pool->enqueue([this, MAC, ext_len, peer, me_smaller]() {
-				abit2[peer]->rcot(MAC[peer].data(), ext_len);
+				abit2->rcot(MAC[peer].data(), ext_len);
 				((me_smaller ? true : false) ? io1 : io2)->flush();
 			}));
 		}
@@ -240,10 +240,8 @@ class AuthSharePool { public:
 		PRG prg2(&seed);
 		prg2.random_block(check2_coeff.data(), length);
 		check2_bw = zero_block;
-		for (int i = 0; i <= nP; ++i) {
-			check2_Mw[i] = zero_block;
-			check2_Kw[i] = zero_block;
-		}
+		check2_Mw = zero_block;
+		check2_Kw = zero_block;
 		check2_echo.reset(new EchoBC<nP>(io1, io2, pool, party));
 	}
 
@@ -269,10 +267,10 @@ class AuthSharePool { public:
 		{ const int i = 3 - party;
 			vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
 					MAC[i].data() + start, n);
-			check2_Mw[i] = check2_Mw[i] ^ partial;
+			check2_Mw = check2_Mw ^ partial;
 			vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
 					KEY[i].data() + start, n);
-			check2_Kw[i] = check2_Kw[i] ^ partial;
+			check2_Kw = check2_Kw ^ partial;
 		}
 	}
 
@@ -287,14 +285,14 @@ class AuthSharePool { public:
 		vector<future<void>> res;
 		{ const int peer = 3 - party;
 			res.push_back(pool->enqueue([this, peer]() {
-				io_send(io1, io2, party, peer, &check2_Mw[peer], sizeof(block));
+				io_send(io1, io2, party, peer, &check2_Mw, sizeof(block));
 				io_flush(io1, io2, party, peer);
 			}));
 			res.push_back(pool->enqueue([this, &bw_recv, peer]() {
 				block Mw_recv, tmp;
 				io_recv(io1, io2, party, peer, &Mw_recv, sizeof(block));
 				gfmul(bw_recv[peer], Delta, &tmp);
-				block Kw_check = check2_Kw[peer] ^ tmp;
+				block Kw_check = check2_Kw ^ tmp;
 				if (!cmpBlock(&Kw_check, &Mw_recv, 1))
 					error("cheat aShare\n");
 			}));
