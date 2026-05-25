@@ -1,7 +1,7 @@
 #ifndef AUTH_SHARE_POOL_H__
 #define AUTH_SHARE_POOL_H__
 #include "emp-ag2pc/helper.h"
-#include "emp-ag2pc/netmp.h"
+#include "emp-tool/io/net_io_channel.h"
 #include "emp-ot/ot_extension/iknp.h"
 #include "emp-ot/ot_extension/ferret/ferret.h"
 #include "emp-ot/ot_extension/softspoken/softspoken.h"
@@ -68,7 +68,7 @@ class AuthSharePool { public:
 	// per-peer in the body of the AuthSharePool ctor.
 	std::unique_ptr<OTExt> abit1[nP + 1];
 	std::unique_ptr<OTExt> abit2[nP + 1];
-	NetIOMP<nP> *io;
+	NetIO *io1, *io2;
 	ThreadPool *pool;
 	int party;
 	PRG prg;
@@ -96,9 +96,9 @@ class AuthSharePool { public:
 	// step 8/9's r_choice/d exchange + K-update is unnecessary. When null,
 	// we sample one internally; that's the default and gives the same
 	// behavior. Pass an explicit seed only for determinism / testing.
-	AuthSharePool(NetIOMP<nP> *io, ThreadPool *pool, int party,
+	AuthSharePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party,
 			const block *choice_seed_in = nullptr)
-		: io(io), pool(pool), party(party) {
+		: io1(io1), io2(io2), pool(pool), party(party) {
 			// Step 1 (Fig.13 Init): pick Δ_me with two pinned bits:
 			//   bit 0 of Δ — share-value encoding (always 1; lets bit0(M) carry
 			//                the authenticated bit when bit0(K)=0).
@@ -120,19 +120,18 @@ class AuthSharePool { public:
 			// poking io post-construction. Pass party_=ALICE on abit1
 			// (sender) and party_=BOB on abit2 (receiver). set_delta below
 			// replaces the abit1 ctor-sampled Δ with our protocol Δ_me.
-			for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+			{ const int peer = 3 - party;
 				bool me_smaller = party < peer;
 				abit1[peer] = std::make_unique<OTExt>(
-					ALICE, io->get(peer, /*swap=*/me_smaller ? false : true));
+					ALICE, (me_smaller ? false : true) ? io1 : io2);
 				abit2[peer] = std::make_unique<OTExt>(
-					BOB, io->get(peer, /*swap=*/me_smaller ? true : false));
+					BOB, (me_smaller ? true : false) ? io1 : io2);
 			}
 
 			// Install Δ_me on every sender instance. set_delta only updates
 			// the Δ bits; the base-OT round-trip that ships Δ to the peer
 			// happens lazily inside the first rcot_send / rcot_recv call.
-			for (int peer = 1; peer <= nP; ++peer) if (peer != party)
-				abit1[peer]->set_delta(tmp);
+			abit1[3 - party]->set_delta(tmp);
 
 			// Shared choice seed: same r vector across all of Pi's COT
 			// receiver instances, so x^me is implicitly consistent across peer
@@ -142,8 +141,7 @@ class AuthSharePool { public:
 			block choice_seed;
 			if (choice_seed_in) choice_seed = *choice_seed_in;
 			else prg.random_block(&choice_seed, 1);
-			for (int peer = 1; peer <= nP; ++peer) if (peer != party)
-				abit2[peer]->set_choice_seed(choice_seed);
+			abit2[3 - party]->set_choice_seed(choice_seed);
 
 			Delta = abit1[party == 1 ? 2 : 1]->Delta;
 		}
@@ -163,14 +161,14 @@ class AuthSharePool { public:
 
 		// Step 10 seed: collectively-sampled, derived after MAC/KEY are
 		// committed (post-step-9), so adversary can't adapt MAC/KEY to it.
-		block seed = sampleRandom(io, &prg, pool, party);
+		block seed = sampleRandom<nP>(io1, io2, &prg, pool, party);
 		check2_init(seed, length);
 		check2_chunk(0, length, MAC, KEY);
 		check2_finalize();
 
 #ifdef EMP_DEBUG_PHASE
 		_phase("[abit] aShare", party);
-		check_MAC(io, MAC, KEY, Delta, length, party);
+		check_MAC<nP>(io1, io2, MAC, KEY, Delta, length, party);
 		_phase("", party);
 #endif
 	}
@@ -187,7 +185,7 @@ class AuthSharePool { public:
 		// COT still mints them so the FS check covers the same width as
 		// before; we just don't pin/consume them).
 		int ext_len = length + csp;
-		for (int i = 1; i <= nP; ++i) if (i != party) {
+		{ const int i = 3 - party;
 			MAC[i].resize(ext_len);
 			KEY[i].resize(ext_len);
 		}
@@ -202,30 +200,30 @@ class AuthSharePool { public:
 		// construction; a malicious Pi using non-shared seeds across peers
 		// would produce mismatched per-peer bit0(MAC), and check2's per-
 		// peer Mw verification catches that — soundness preserved.
-		// Same channel-routing caveat as in the ctor: io->flush(peer) hits
+		// Same channel-routing caveat as in the ctor: io_flush(io1, io2, party, peer) hits
 		// the abit2 channel, so we must flush abit1.io directly.
 #ifdef WRK_PROFILE
-		int64_t _cot0 = io->count();
+		int64_t _cot0 = io_count(io1, io2);
 #endif
 		vector<future<void>> res;
-		for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+		{ const int peer = 3 - party;
 			bool me_smaller = party < peer;
 			res.push_back(pool->enqueue([this, KEY, ext_len, peer, me_smaller]() {
 				abit1[peer]->rcot(KEY[peer].data(), ext_len);
-				io->get(peer, me_smaller ? false : true)->flush();
+				((me_smaller ? false : true) ? io1 : io2)->flush();
 			}));
 			res.push_back(pool->enqueue([this, MAC, ext_len, peer, me_smaller]() {
 				abit2[peer]->rcot(MAC[peer].data(), ext_len);
-				io->get(peer, me_smaller ? true : false)->flush();
+				((me_smaller ? true : false) ? io1 : io2)->flush();
 			}));
 		}
 		joinNclean(res);
 #ifdef WRK_PROFILE
-		g_wrk_cot_bytes += (uint64_t)(io->count() - _cot0);
+		g_wrk_cot_bytes += (uint64_t)(io_count(io1, io2) - _cot0);
 #endif
 
 		// Drop the sacrificial tail; output region is [0, length).
-		for (int i = 1; i <= nP; ++i) if (i != party) {
+		{ const int i = 3 - party;
 			MAC[i].resize(length);
 			KEY[i].resize(length);
 		}
@@ -246,7 +244,7 @@ class AuthSharePool { public:
 			check2_Mw[i] = zero_block;
 			check2_Kw[i] = zero_block;
 		}
-		check2_echo.reset(new EchoBC<nP>(io, pool, party));
+		check2_echo.reset(new EchoBC<nP>(io1, io2, pool, party));
 	}
 
 	// Accumulate Mw[peer]/Kw[peer]/bw partial sums over [start, start+n).
@@ -268,7 +266,7 @@ class AuthSharePool { public:
 		// Mw/Kw partial: vector_inn_prdt_sum_red writes Σ coeff·v into a
 		// fresh block; XOR into running accumulator.
 		block partial;
-		for (int i = 1; i <= nP; ++i) if (i != party) {
+		{ const int i = 3 - party;
 			vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
 					MAC[i].data() + start, n);
 			check2_Mw[i] = check2_Mw[i] ^ partial;
@@ -287,14 +285,14 @@ class AuthSharePool { public:
 		check2_echo->all_bcast(check2_bw, bw_recv);
 
 		vector<future<void>> res;
-		for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+		{ const int peer = 3 - party;
 			res.push_back(pool->enqueue([this, peer]() {
-				io->send_data(peer, &check2_Mw[peer], sizeof(block));
-				io->flush(peer);
+				io_send(io1, io2, party, peer, &check2_Mw[peer], sizeof(block));
+				io_flush(io1, io2, party, peer);
 			}));
 			res.push_back(pool->enqueue([this, &bw_recv, peer]() {
 				block Mw_recv, tmp;
-				io->recv_data(peer, &Mw_recv, sizeof(block));
+				io_recv(io1, io2, party, peer, &Mw_recv, sizeof(block));
 				gfmul(bw_recv[peer], Delta, &tmp);
 				block Kw_check = check2_Kw[peer] ^ tmp;
 				if (!cmpBlock(&Kw_check, &Mw_recv, 1))
@@ -317,7 +315,7 @@ class AuthSharePool { public:
 		//   Kx[j] = K_me[x^{j,me}] from KEY tail
 		//   xv[j] = x^{me,j}        from bit0 of MAC[j] tail (carries choice)
 		block Mx[nP + 1], Kx[nP + 1], xv[nP + 1];
-		for (int i = 1; i <= nP; ++i) if (i != party) {
+		{ const int i = 3 - party;
 			packer.packing(&Mx[i], MAC[i].data() + length);
 			packer.packing(&Kx[i], KEY[i].data() + length);
 			// ⟨g, s⟩ = ∑ s_k · X^k packs the 128 choice bits into a 128-bit
@@ -336,7 +334,7 @@ class AuthSharePool { public:
 		// every column k. See fzero_xor in helper.h.
 		block u_me[nP];
 		for (int k = 0; k < nP; ++k) u_me[k] = zero_block;
-		fzero_xor<nP>(io, &prg, pool, party, u_me, nP);
+		fzero_xor<nP>(io1, io2, &prg, pool, party, u_me, nP);
 
 		vector<future<void>> res;
 
@@ -370,13 +368,13 @@ class AuthSharePool { public:
 
 		char z_dgst[nP + 1][Hash::DIGEST_SIZE];
 		Hash::hash_once(z_dgst[party], z + 1, nP * sizeof(block));
-		for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+		{ const int peer = 3 - party;
 			res.push_back(pool->enqueue([this, &z_dgst, peer]() {
-				io->send_data(peer, z_dgst[party], Hash::DIGEST_SIZE);
-				io->flush(peer);
+				io_send(io1, io2, party, peer, z_dgst[party], Hash::DIGEST_SIZE);
+				io_flush(io1, io2, party, peer);
 			}));
 			res.push_back(pool->enqueue([this, &z_dgst, peer]() {
-				io->recv_data(peer, z_dgst[peer], Hash::DIGEST_SIZE);
+				io_recv(io1, io2, party, peer, z_dgst[peer], Hash::DIGEST_SIZE);
 			}));
 		}
 		joinNclean(res);
@@ -388,13 +386,13 @@ class AuthSharePool { public:
 		block z_storage[nP + 1][nP];
 		block *z_recv[nP + 1];
 		for (int i = 1; i <= nP; ++i) z_recv[i] = (i == party ? z + 1 : z_storage[i]);
-		for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+		{ const int peer = 3 - party;
 			res.push_back(pool->enqueue([this, &z, peer]() {
-				io->send_data(peer, z + 1, nP * sizeof(block));
-				io->flush(peer);
+				io_send(io1, io2, party, peer, z + 1, nP * sizeof(block));
+				io_flush(io1, io2, party, peer);
 			}));
 			res.push_back(pool->enqueue([this, &z_recv, &z_dgst, peer]() {
-				io->recv_data(peer, z_recv[peer], nP * sizeof(block));
+				io_recv(io1, io2, party, peer, z_recv[peer], nP * sizeof(block));
 				char chk[Hash::DIGEST_SIZE];
 				Hash::hash_once(chk, z_recv[peer], nP * sizeof(block));
 				if (memcmp(chk, z_dgst[peer], Hash::DIGEST_SIZE) != 0)

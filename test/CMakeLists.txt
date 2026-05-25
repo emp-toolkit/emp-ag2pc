@@ -24,7 +24,6 @@ endfunction()
 # Lower-layer protocol tests (triples / auth-shares / IKNP)
 add_test_case_with_run(triple)
 add_test_case_with_run(prof_triple)
-add_test_case_with_run(three_party_iknp)
 add_test_case_with_run(auth_share)
 
 # Native Bit frontend (WRKBackend -> WireGraph -> C2PC) + IR

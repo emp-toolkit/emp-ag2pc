@@ -44,9 +44,9 @@ However, note that run script only works for nP=2
 
 The test binaries differ in party count (e.g. `test_triple` hardcodes `nP = 2`, `test_mpc` / `test_iknp_aes` / `test_pool` hardcode `nP = 3`); if you change `nP`, edit the test file.
 
-**Always grep `nP =` in the test source before launching processes.** A test compiled with `nP = 3` will silently hang if you only spawn 2 parties — `NetIOMP` blocks waiting for the missing peer's connection. There is no error message; the test just sits there. Pattern: `grep -n 'static int nP' test/<name>.cpp` to confirm before running. Spawn exactly `nP` processes, party ids 1..nP, all on the same `port`.
+This is now **2-party** (`nP = 2`): spawn exactly two processes, party ids 1 and 2. Tests build the transport with `make_io2pc(party, port, io1, io2)` ([test/net_setup.h](test/net_setup.h)) and feed `io1`/`io2` to the constructors.
 
-Each `NetIOMP` instance listens on a single port `port + party` and accepts `nP - 1` connections, dispatching them by handshake (peer party id only — the channel slot is determined by `sign(peer - party)` since lower-id party always connects on `ios` and higher-id on `ios2`). One `NetIOMP` per process is enough — it provides two channels per peer pair (`ios[peer]` / `ios2[peer]`), which is what `AuthSharePool` consumes for parallel COT send/recv.
+The transport is a **duplex pair of `NetIO` channels** to the single peer: `io1` on `port` (party 1 server, party 2 client), `io2` on `port + 1` (the mirror). `io1` carries the 1→2 direction, `io2` the 2→1; the layers route by `sign(idx - party)` via the `io_send`/`io_recv`/`io_flush` free helpers in [helper.h](emp-ag2pc/helper.h), and `AuthSharePool` hands one channel to each of its two COT instances for parallel send/recv. (The old `nP × nP` `NetIOMP` mesh is gone.)
 
 ## Architecture
 
@@ -62,7 +62,9 @@ The protocol stack is strictly layered; upper layers instantiate and drive the l
 
 4. **`C2PC`** ([emp-ag2pc/2pc.h](emp-ag2pc/2pc.h)) — top-level WRK protocol. New API: `process_input(bits, n, owner) → SecureWires`, `compute(cf, inputs) → SecureWires`, `decode(wires, recipient) → vector<bool>`; `compute()` accepts a single bundle or a `vector<SecureWires>` of bundles laid out sequentially in the wire space. Both `process_input` and `compute` draw aShares/triples from the pools owned by the inner `TriplePool` (`fpre`) and `AuthSharePool` (`fpre->abit`); `C2PC::preprocess(num_triples, num_abits)` eagerly mints into both. Backward-compat wrappers (`function_independent`/`function_dependent`/`online`) cover the old workflow; `function_independent()` now pre-mints based on the cached circuit's AND count and input width. Takes a `BristolFormat` circuit ([emp-ag2pc/circuits/circuit_file.h](emp-ag2pc/circuits/circuit_file.h)). Circuits live under [emp-ag2pc/circuits/files/](emp-ag2pc/circuits/files/); the `EMP_CIRCUIT_PATH` macro (set via `add_definitions` in the root CMake) is how tests find them.
 
-5. **`NetIOMP`** ([emp-ag2pc/netmp.h](emp-ag2pc/netmp.h)) — `nP × nP` mesh of `NetIO` channels. A single `NetIOMP` instance provides two channels per peer pair (`ios[peer]`, `ios2[peer]`), enough for `AuthSharePool` to run COT sender + receiver Cots in parallel against the same peer.
+5. **Transport** — two raw `emp::NetIO` channels (`io1`, `io2`) held directly by each layer (no wrapper object); the duplex pair to the single peer. Created in tests by `make_io2pc` ([test/net_setup.h](test/net_setup.h)) and routed by the `io_send`/`io_recv`/`io_flush`/`io_count` free helpers in [helper.h](emp-ag2pc/helper.h). `AuthSharePool` runs its COT sender + receiver in parallel, one on each channel.
+
+> NOTE: the rest of this Architecture section is inherited from the pre-modernization doc and is partly stale (e.g. `cot.h`, `BristolFormat`, `function_independent`); it needs a full rewrite to match the imported agmpc stack (native Bit frontend, `wrk_backend.h`, typed gate IR).
 
 ## Debug timing
 

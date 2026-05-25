@@ -3,22 +3,23 @@
 // is the regression the deferred + per-owner-batched feed exists to prevent.
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 #include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>
 
-const static int nP = 3;
+const static int nP = 2;
 
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
   if (party > nP) return 0;
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  auto *b = setup_wrk_backend<nP>(&io, &pool, party);
-  io.flush();
+  auto *b = setup_wrk_backend<nP>(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
 
   // K+1 input feeds, ALL owned by party 1 and ALL fed before any gate. Eager
   // feed would do K+1 process_inputs; batched-per-owner does exactly 1.

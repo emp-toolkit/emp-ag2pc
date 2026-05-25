@@ -3,20 +3,21 @@
 // [0,num_in), gates referencing inputs, a constant-via-XOR(w,w) wire, an
 // explicit (non-tail) output id, and decode to a chosen recipient.
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
   if (party > nP) return 0;
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  C2PC<nP> mpc(&io, &pool, party);
-  io.flush();
+  C2PC<nP> mpc(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
 
   // Inputs: a from ALICE (party 1) at wire 0, b from BOB (party 2) at wire 1.
   // Each party supplies its own real bit; non-owners pass a dummy (ignored).

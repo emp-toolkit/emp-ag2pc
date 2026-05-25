@@ -15,19 +15,20 @@
 // args. Yet only the direct call corrupts the leaky-triple c-bit (~50%
 // wrong → Sigma alpha != 0). Root cause not yet identified.
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 int party, port;
 int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
   if (party > nP)
     return 0;
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
 
   ThreadPool pool(2 * (nP - 1) + 2);
-  TriplePool<nP> mp(&io, &pool, party);
+  TriplePool<nP> mp(io1, io2, &pool, party);
 
   int num_ands = 1 << 15;
   block *mac[nP + 1];

@@ -24,9 +24,9 @@ namespace emp {
 // gates (c0 = XOR(w,w), c1 = NOT(c0)) so the protocol needs no special handling.
 template <int nP> class WRKBackend : public Backend {
 public:
-  WRKBackend(NetIOMP<nP> *io_, ThreadPool *pool_, int party_) {
+  WRKBackend(NetIO *io1_, NetIO *io2_, ThreadPool *pool_, int party_) {
     this->party = party_;
-    mpc = new C2PC<nP>(io_, pool_, party_);
+    mpc = new C2PC<nP>(io1_, io2_, pool_, party_);
   }
   ~WRKBackend() override { delete mpc; }
 
@@ -266,9 +266,9 @@ private:
 };
 
 template <int nP>
-inline WRKBackend<nP> *setup_wrk_backend(NetIOMP<nP> *io, ThreadPool *pool,
+inline WRKBackend<nP> *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *pool,
                                          int party) {
-  auto *b = new WRKBackend<nP>(io, pool, party);
+  auto *b = new WRKBackend<nP>(io1, io2, pool, party);
   backend = b;
   return b;
 }

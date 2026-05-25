@@ -4,11 +4,12 @@
 // plaintext clear backend; results must match and be identical across parties.
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 #include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 
 // a from party 1, b from party 2, d from party 1. Returns {v, r, ru}.
 template <typename Wire>
@@ -47,10 +48,10 @@ int main(int argc, char **argv) {
   bool b_in = (party == 2) ? Bv : false;
   bool d_in = (party == 1) ? D : false;
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(&io, &pool, party);
-  io.flush();
+  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
   bool got[3];
   reactive<block>(a_in, b_in, d_in, got);   // all parties branch on revealed v
   finalize_wrk_backend();

@@ -16,5 +16,4 @@
 #include "emp-ag2pc/secure_wires.h"
 #include "emp-ag2pc/circuit_layout.h"
 #include "emp-ag2pc/2pc.h"
-#include "emp-ag2pc/netmp.h"
 #endif // EMP_AG2PC_H__

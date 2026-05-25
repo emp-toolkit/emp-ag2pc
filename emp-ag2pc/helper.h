@@ -1,6 +1,6 @@
 #ifndef __HELPER
 #define __HELPER
-#include "emp-ag2pc/netmp.h"
+#include "emp-tool/io/net_io_channel.h"
 #include <future>
 #include <memory>
 #include <type_traits>
@@ -22,6 +22,29 @@ using std::max;
 // of K, half-gate Λ_γ recovery pins bit 1 of ⊕_p Δ_p).
 inline constexpr block bit0_mask = makeBlock(0, 1);
 inline constexpr block bit1_mask = makeBlock(0, 2);
+
+// Two-party transport: parties {1, 2} hold a duplex pair of NetIO channels to
+// the single peer. io1 carries the 1->2 direction, io2 the 2->1 direction
+// (so party 1 sends on io1 / recvs on io2, party 2 the mirror); the OT layer
+// uses both channels by index. These free routers replace the old NetIOMP
+// object -- callers pass io1/io2/party directly. The dst/src == party guard
+// is kept so the (formerly no-op) self-addressed calls stay no-ops.
+inline void io_send(NetIO *io1, NetIO *io2, int party, int dst,
+                    const void *data, size_t len) {
+  if (dst != 0 && dst != party) (party < dst ? io1 : io2)->send_data(data, len);
+}
+inline void io_recv(NetIO *io1, NetIO *io2, int party, int src,
+                    void *data, size_t len) {
+  if (src != 0 && src != party) (src < party ? io1 : io2)->recv_data(data, len);
+}
+inline void io_flush(NetIO *io1, NetIO *io2, int party, int idx) {
+  if (idx == 0) { io1->flush(); io2->flush(); }
+  else if (idx != party) (party < idx ? io1 : io2)->flush();
+}
+inline int64_t io_count(NetIO *io1, NetIO *io2) {
+  return io1->send_counter + io1->recv_counter +
+         io2->send_counter + io2->recv_counter;
+}
 
 
 #ifdef EMP_DEBUG_PHASE
@@ -61,12 +84,12 @@ template <int nP>
 class EchoBC {
 public:
   Hash h;
-  NetIOMP<nP> *io;
+  NetIO *io1, *io2;
   ThreadPool *pool;
   int party;
 
-  EchoBC(NetIOMP<nP> *io_in, ThreadPool *pool_in, int party_in)
-      : io(io_in), pool(pool_in), party(party_in) {}
+  EchoBC(NetIO *io1_in, NetIO *io2_in, ThreadPool *pool_in, int party_in)
+      : io1(io1_in), io2(io2_in), pool(pool_in), party(party_in) {}
 
   // Broadcast `len` elements of type T per party. view[p] must point to a
   // buffer of at least `len` T's for every p; view[party] is populated from
@@ -77,27 +100,26 @@ public:
   void all_bcast(const T *my_v, int len, T *view[nP + 1]) {
     memcpy(view[party], my_v, sizeof(T) * len);
     int bytes = (int)(sizeof(T) * len);
+    const int p2 = 3 - party;
     vector<future<void>> res;
-    for (int i = 1; i <= nP; ++i) for (int j = 1; j <= nP; ++j)
-      if ((i < j) and (i == party or j == party)) {
-        int p2 = i + j - party;
-        res.push_back(pool->enqueue([this, my_v, bytes, p2]() {
-          io->send_data(p2, my_v, bytes);
-          io->flush(p2);
-        }));
-        res.push_back(pool->enqueue([this, &view, bytes, p2]() {
-          io->recv_data(p2, view[p2], bytes);
-        }));
-      }
+    res.push_back(pool->enqueue([this, my_v, bytes, p2]() {
+      io_send(io1, io2, party, p2, my_v, bytes);
+      io_flush(io1, io2, party, p2);
+    }));
+    res.push_back(pool->enqueue([this, &view, bytes, p2]() {
+      io_recv(io1, io2, party, p2, view[p2], bytes);
+    }));
     joinNclean(res);
-    for (int p = 1; p <= nP; ++p) h.put(view[p], bytes);
+    h.put(view[1], bytes);  // canonical party order: 1 then 2
+    h.put(view[2], bytes);
   }
 
   // Single-element convenience overload: view is a flat [nP+1] stack array.
   template <typename T>
   void all_bcast(const T &my_v, T view[nP + 1]) {
     T *ptrs[nP + 1];
-    for (int p = 1; p <= nP; ++p) ptrs[p] = &view[p];
+    ptrs[1] = &view[1];
+    ptrs[2] = &view[2];
     all_bcast(&my_v, 1, ptrs);
   }
 
@@ -105,22 +127,18 @@ public:
     char d_me[Hash::DIGEST_SIZE];
     h.digest(d_me);
     char recv[nP + 1][Hash::DIGEST_SIZE];
+    const int p2 = 3 - party;
     vector<future<void>> res;
-    for (int i = 1; i <= nP; ++i) for (int j = 1; j <= nP; ++j)
-      if ((i < j) and (i == party or j == party)) {
-        int p2 = i + j - party;
-        res.push_back(pool->enqueue([this, &d_me, p2]() {
-          io->send_data(p2, d_me, Hash::DIGEST_SIZE);
-          io->flush(p2);
-        }));
-        res.push_back(pool->enqueue([this, &recv, p2]() {
-          io->recv_data(p2, recv[p2], Hash::DIGEST_SIZE);
-        }));
-      }
+    res.push_back(pool->enqueue([this, &d_me, p2]() {
+      io_send(io1, io2, party, p2, d_me, Hash::DIGEST_SIZE);
+      io_flush(io1, io2, party, p2);
+    }));
+    res.push_back(pool->enqueue([this, &recv, p2]() {
+      io_recv(io1, io2, party, p2, recv[p2], Hash::DIGEST_SIZE);
+    }));
     joinNclean(res);
-    for (int p = 1; p <= nP; ++p) if (p != party)
-      if (strncmp(d_me, recv[p], Hash::DIGEST_SIZE) != 0)
-        error("EchoBC finalize: transcript divergence\n");
+    if (strncmp(d_me, recv[p2], Hash::DIGEST_SIZE) != 0)
+      error("EchoBC finalize: transcript divergence\n");
   }
 };
 
@@ -144,46 +162,37 @@ inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1; }
 
 template <int nP>
-block sampleRandom(NetIOMP<nP> *io, PRG *prg, ThreadPool *pool, int party) {
+block sampleRandom(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party) {
   vector<future<void>> res;
   vector<future<bool>> res2;
   char(*dgst)[Hash::DIGEST_SIZE] = new char[nP + 1][Hash::DIGEST_SIZE];
   block *S = new block[nP + 1];
   prg->random_block(&S[party], 1);
   Hash::hash_once(dgst[party], &S[party], sizeof(block));
+  const int party2 = 3 - party;
 
-  for (int i = 1; i <= nP; ++i)
-    for (int j = 1; j <= nP; ++j)
-      if ((i < j) and (i == party or j == party)) {
-        int party2 = i + j - party;
-        res.push_back(pool->enqueue([dgst, io, party, party2]() {
-          io->send_data(party2, dgst[party], Hash::DIGEST_SIZE);
-          io->flush(party2);
-          io->recv_data(party2, dgst[party2], Hash::DIGEST_SIZE);
-        }));
-      }
+  // Commit: exchange digests of the two shares.
+  res.push_back(pool->enqueue([dgst, io1, io2, party, party2]() {
+    io_send(io1, io2, party, party2, dgst[party], Hash::DIGEST_SIZE);
+    io_flush(io1, io2, party, party2);
+    io_recv(io1, io2, party, party2, dgst[party2], Hash::DIGEST_SIZE);
+  }));
   joinNclean(res);
-  for (int i = 1; i <= nP; ++i)
-    for (int j = 1; j <= nP; ++j)
-      if ((i < j) and (i == party or j == party)) {
-        int party2 = i + j - party;
-        res2.push_back(pool->enqueue([io, S, dgst, party, party2]() -> bool {
-          io->send_data(party2, &S[party], sizeof(block));
-          io->flush(party2);
-          io->recv_data(party2, &S[party2], sizeof(block));
-          char tmp[Hash::DIGEST_SIZE];
-          Hash::hash_once(tmp, &S[party2], sizeof(block));
-          return strncmp(tmp, dgst[party2], Hash::DIGEST_SIZE) != 0;
-        }));
-      }
+  // Open: exchange shares, verify each against the committed digest.
+  res2.push_back(pool->enqueue([io1, io2, S, dgst, party, party2]() -> bool {
+    io_send(io1, io2, party, party2, &S[party], sizeof(block));
+    io_flush(io1, io2, party, party2);
+    io_recv(io1, io2, party, party2, &S[party2], sizeof(block));
+    char tmp[Hash::DIGEST_SIZE];
+    Hash::hash_once(tmp, &S[party2], sizeof(block));
+    return strncmp(tmp, dgst[party2], Hash::DIGEST_SIZE) != 0;
+  }));
   bool cheat = joinNcleanCheat(res2);
   if (cheat) {
     cout << "cheat in sampleRandom\n" << flush;
     exit(0);
   }
-  for (int i = 2; i <= nP; ++i)
-    S[1] = S[1] ^ S[i];
-  block result = S[1];
+  block result = S[1] ^ S[2];
   delete[] S;
   delete[] dgst;
   return result;
@@ -199,96 +208,83 @@ block sampleRandom(NetIOMP<nP> *io, PRG *prg, ThreadPool *pool, int party) {
 // the contributions are XORed in so this composes with caller buffers
 // that already have content (e.g. TriplePool loads z directly into phi).
 template <int nP>
-void fzero_xor(NetIOMP<nP> *io, PRG *prg, ThreadPool *pool, int party,
+void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
                block *out, int n) {
   block seed_by_peer[nP + 1];
   prg->random_block(&seed_by_peer[1], nP);
 
-  vector<future<void>> res;
-  for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
-    res.push_back(pool->enqueue([io, &seed_by_peer, peer, party]() {
-      if (peer < party) {
-        io->send_data(peer, &seed_by_peer[peer], sizeof(block));
-        io->flush(peer);
-      } else {
-        io->recv_data(peer, &seed_by_peer[peer], sizeof(block));
-      }
-    }));
+  // Single pair: the larger-indexed party samples + sends the shared seed,
+  // the smaller receives it (only one direction happens per party).
+  const int peer = 3 - party;
+  if (peer < party) {
+    io_send(io1, io2, party, peer, &seed_by_peer[peer], sizeof(block));
+    io_flush(io1, io2, party, peer);
+  } else {
+    io_recv(io1, io2, party, peer, &seed_by_peer[peer], sizeof(block));
   }
-  joinNclean(res);
 
   BlockVec contribution(n);
-  for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
-    PRG expand(&seed_by_peer[peer]);
-    expand.random_block(contribution.data(), n);
-    xorBlocks_arr(out, out, contribution.data(), n);
-  }
+  PRG expand(&seed_by_peer[peer]);
+  expand.random_block(contribution.data(), n);
+  xorBlocks_arr(out, out, contribution.data(), n);
 }
 
 template <int nP>
-void check_MAC(NetIOMP<nP> *io, block *MAC[nP + 1], block *KEY[nP + 1], bool *r,
+void check_MAC(NetIO *io1, NetIO *io2, block *MAC[nP + 1], block *KEY[nP + 1], bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
   block tD;
-  for (int i = 1; i <= nP; ++i)
-    for (int j = 1; j <= nP; ++j)
-      if (i < j) {
-        if (party == i) {
-          io->send_data(j, &Delta, sizeof(block));
-          io->send_data(j, KEY[j], sizeof(block) * length);
-          io->flush(j);
-        } else if (party == j) {
-          io->recv_data(i, &tD, sizeof(block));
-          io->recv_data(i, tmp, sizeof(block) * length);
-          for (int k = 0; k < length; ++k) {
-            if (r[k])
-              tmp[k] = tmp[k] ^ tD;
-          }
-          if (!cmpBlock(MAC[i], tmp, length))
-            error("check_MAC failed!");
-        }
-      }
+  // Single pair (1, 2): party 1 sends Δ + KEY[2], party 2 verifies MAC[1].
+  if (party == 1) {
+    io_send(io1, io2, party, 2, &Delta, sizeof(block));
+    io_send(io1, io2, party, 2, KEY[2], sizeof(block) * length);
+    io_flush(io1, io2, party, 2);
+  } else {
+    io_recv(io1, io2, party, 1, &tD, sizeof(block));
+    io_recv(io1, io2, party, 1, tmp, sizeof(block) * length);
+    for (int k = 0; k < length; ++k)
+      if (r[k]) tmp[k] = tmp[k] ^ tD;
+    if (!cmpBlock(MAC[1], tmp, length))
+      error("check_MAC failed!");
+  }
   delete[] tmp;
   if (party == 1)
     cerr << "check_MAC pass!\n" << flush;
 }
 
 template <int nP>
-void check_MAC(NetIOMP<nP> *io, BlockVec MAC[nP + 1],
+void check_MAC(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1],
                BlockVec KEY[nP + 1], std::vector<unsigned char> &r, block Delta,
                int length, int party) {
   block *MAC_p[nP + 1], *KEY_p[nP + 1];
-  for (int i = 1; i <= nP; ++i) if (i != party) {
-    MAC_p[i] = MAC[i].data();
-    KEY_p[i] = KEY[i].data();
-  }
-  check_MAC<nP>(io, MAC_p, KEY_p, (bool *)r.data(), Delta, length, party);
+  const int peer = 3 - party;
+  MAC_p[peer] = MAC[peer].data();
+  KEY_p[peer] = KEY[peer].data();
+  check_MAC<nP>(io1, io2, MAC_p, KEY_p, (bool *)r.data(), Delta, length, party);
 }
 
 // r-less overload: derive share bits from bit0(MAC[any peer]). Valid when
 // the pool invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x consistently
 // across peers).
 template <int nP>
-void check_MAC(NetIOMP<nP> *io, BlockVec MAC[nP + 1],
+void check_MAC(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1],
                BlockVec KEY[nP + 1], block Delta, int length, int party) {
   int any_peer = (party == 1) ? 2 : 1;
   std::vector<unsigned char> r(length);
   for (int k = 0; k < length; ++k)
     r[k] = (unsigned char)LSB(MAC[any_peer][k]);
-  check_MAC<nP>(io, MAC, KEY, r, Delta, length, party);
+  check_MAC<nP>(io1, io2, MAC, KEY, r, Delta, length, party);
 }
 
 template <int nP>
-void check_correctness(NetIOMP<nP> *io, bool *r, int length, int party) {
+void check_correctness(NetIO *io1, NetIO *io2, bool *r, int length, int party) {
   if (party == 1) {
     bool *tmp1 = new bool[length * 3];
     bool *tmp2 = new bool[length * 3];
     memcpy(tmp1, r, length * 3);
-    for (int i = 2; i <= nP; ++i) {
-      io->recv_data(i, tmp2, length * 3);
-      for (int k = 0; k < length * 3; ++k)
-        tmp1[k] = (tmp1[k] != tmp2[k]);
-    }
+    io_recv(io1, io2, party, 2, tmp2, length * 3);
+    for (int k = 0; k < length * 3; ++k)
+      tmp1[k] = (tmp1[k] != tmp2[k]);
     for (int k = 0; k < length; ++k) {
       if ((tmp1[k] and tmp1[length + k]) != tmp1[2 * length + k])
         error("check_correctness failed!");
@@ -297,26 +293,26 @@ void check_correctness(NetIOMP<nP> *io, bool *r, int length, int party) {
     delete[] tmp2;
     cerr << "check_correctness pass!\n" << flush;
   } else {
-    io->send_data(1, r, length * 3);
-    io->flush(1);
+    io_send(io1, io2, party, 1, r, length * 3);
+    io_flush(io1, io2, party, 1);
   }
 }
 
 template <int nP>
-void check_correctness(NetIOMP<nP> *io, vector<unsigned char> &r, int length, int party) {
-  check_correctness<nP>(io, (bool *)r.data(), length, party);
+void check_correctness(NetIO *io1, NetIO *io2, vector<unsigned char> &r, int length, int party) {
+  check_correctness<nP>(io1, io2, (bool *)r.data(), length, party);
 }
 
 // r-less overload for AND-triple buffers: MAC[*] is sized 3*length (slot-major
 // a/b/c), so r[k] = bit0(MAC[any peer][k]) reconstructs the full 3*length
 // share vector before delegating to the bool* form.
 template <int nP>
-void check_correctness(NetIOMP<nP> *io, BlockVec MAC[nP + 1], int length, int party) {
+void check_correctness(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1], int length, int party) {
   int any_peer = (party == 1) ? 2 : 1;
   std::vector<unsigned char> r(3 * length);
   for (int k = 0; k < 3 * length; ++k)
     r[k] = (unsigned char)LSB(MAC[any_peer][k]);
-  check_correctness<nP>(io, (bool *)r.data(), length, party);
+  check_correctness<nP>(io1, io2, (bool *)r.data(), length, party);
 }
 
 inline const char *hex_char_to_bin(char c) {

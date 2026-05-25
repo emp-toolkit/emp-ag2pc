@@ -1,7 +1,7 @@
 #ifndef TRIPLE_POOL_H__
 #define TRIPLE_POOL_H__
 #include "emp-ag2pc/auth_share_pool.h"
-#include "emp-ag2pc/netmp.h"
+#include "emp-tool/io/net_io_channel.h"
 #include "emp-tool/crypto/mitccrh.h"
 #include "emp-tool/crypto/prp.h"
 #include <thread>
@@ -52,7 +52,7 @@ class TriplePool {
 public:
   ThreadPool *pool;
   int party;
-  NetIOMP<nP> *io;
+  NetIO *io1, *io2;
   AuthSharePool<nP> abit;
   block Delta;
   PRG prg;
@@ -76,16 +76,16 @@ public:
   // SHA-256-sized circuits where the actual demand is ~22K.
   size_t min_refill = 3100;
 
-  TriplePool(NetIOMP<nP> *io, ThreadPool *pool, int party)
-      : pool(pool), party(party), io(io),
-        abit(io, pool, party), Delta(abit.Delta) {}
+  TriplePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party)
+      : pool(pool), party(party), io1(io1), io2(io2),
+        abit(io1, io2, pool, party), Delta(abit.Delta) {}
 
-  // The two NetIO channels behind NetIOMP for one peer (see netmp.h: the
-  // smaller party drives `ios`, the larger drives `ios2`). send_data/recv_data
-  // pick these; we reach them directly to send bit vectors via the channel's
-  // packed send_bool/recv_bool (8 bits/byte) instead of one byte per bit.
-  NetIO *send_ch(int dst) { return party < dst ? io->ios[dst] : io->ios2[dst]; }
-  NetIO *recv_ch(int src) { return src < party ? io->ios[src] : io->ios2[src]; }
+  // The duplex channel pair to the peer. io1 carries 1->2, io2 carries 2->1;
+  // send/recv pick by sign(idx - party). We reach them directly to send bit
+  // vectors via the channel's packed send_bool/recv_bool (8 bits/byte) rather
+  // than one byte per bit.
+  NetIO *send_ch(int dst) { return party < dst ? io1 : io2; }
+  NetIO *recv_ch(int src) { return src < party ? io1 : io2; }
 
   // Bucket size B vs. number of triples ℓ_2 — picked from the leak-rate bound
   // max(1/2^ssp + (2B+1)/ℓ^{B-1}, ...) (see triple.tex theorem for Π_aAND).
@@ -141,7 +141,7 @@ public:
     int ap = (party == 1) ? 2 : 1;  // any peer slot carries a^me in bit0
     z.assign(len, 0);
     std::vector<std::vector<uint8_t>> s_send(nP + 1), s_recv(nP + 1);
-    for (int j = 1; j <= nP; ++j) if (j != party) { s_send[j].resize(len); s_recv[j].resize(len); }
+    { const int j = 3 - party; s_send[j].resize(len); s_recv[j].resize(len); }
     for (int k = 0; k < len; ++k) z[k] = (uint8_t)(LSB(aMAC[ap][k]) & b[k]);
     for (int j = 1; j <= nP; ++j) if (j != party)
       for (int k = 0; k < len; ++k) {
@@ -150,7 +150,7 @@ public:
         z[k] ^= v0;
       }
     std::vector<std::future<void>> res;
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s_send, len, peer]() {
         send_ch(peer)->send_bool((const bool *)s_send[peer].data(), len);
         send_ch(peer)->flush();
@@ -178,15 +178,15 @@ public:
     for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[ap][k]); b[k] = (uint8_t)LSB(bMAC[ap][k]); }
     multiply_unauth(aMAC, aKEY, b, len, z);
     if (party != 1) {
-      io->send_data(1, a.data(), len); io->send_data(1, b.data(), len);
-      io->send_data(1, z.data(), len); io->flush(1);
+      io_send(io1, io2, party, 1, a.data(), len); io_send(io1, io2, party, 1, b.data(), len);
+      io_send(io1, io2, party, 1, z.data(), len); io_flush(io1, io2, party, 1);
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), Z(z);
       for (int p = 2; p <= nP; ++p) {
         std::vector<uint8_t> ta(len), tb(len), tz(len);
-        io->recv_data(p, ta.data(), len); io->recv_data(p, tb.data(), len);
-        io->recv_data(p, tz.data(), len);
+        io_recv(io1, io2, party, p, ta.data(), len); io_recv(io1, io2, party, p, tb.data(), len);
+        io_recv(io1, io2, party, p, tz.data(), len);
         for (int k = 0; k < len; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; Z[k] ^= tz[k]; }
       }
       for (int k = 0; k < len; ++k) if (Z[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -212,7 +212,7 @@ public:
       dme[k] = (uint8_t)(z[k] ^ LSB(tMAC[ap][2 * LB + k]));
     std::vector<std::vector<uint8_t>> dr(nP + 1);
     std::vector<std::future<void>> res;
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       dr[peer].resize(LB);
       res.push_back(pool->enqueue([this, &dme, LB, peer]() {
         send_ch(peer)->send_bool((const bool *)dme.data(), LB);
@@ -251,7 +251,7 @@ public:
     const int T = cutchoose_T, N = T * LB;
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
     int ap = (party == 1) ? 2 : 1;
-    block S = sampleRandom<nP>(io, &prg, pool, party);
+    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
@@ -276,7 +276,7 @@ public:
     for (int e = 0; e < P; ++e)
       if (Vpub[e]) error("cut-and-choose sacrifice: incorrect AND triple");
     // Compact row-0 heads: a already at [0,LB); move b,c heads down.
-    for (int j = 1; j <= nP; ++j) if (j != party) {
+    { const int j = 3 - party;
       memcpy(&tMAC[j][LB], &tMAC[j][N], LB * sizeof(block));
       memcpy(&tMAC[j][2 * LB], &tMAC[j][2 * N], LB * sizeof(block));
       memcpy(&tKEY[j][LB], &tKEY[j][N], LB * sizeof(block));
@@ -299,21 +299,21 @@ public:
     for (int k = 0; k < LB; ++k) c[k] = (uint8_t)LSB(tMAC[ap][2 * LB + k]);
     // Authentication check on the c-region (aborts via error() on bad MAC).
     BlockVec cMAC[nP + 1], cKEY[nP + 1];
-    for (int j = 1; j <= nP; ++j) if (j != party) {
+    { const int j = 3 - party;
       cMAC[j].assign(tMAC[j].begin() + 2 * LB, tMAC[j].begin() + 3 * LB);
       cKEY[j].assign(tKEY[j].begin() + 2 * LB, tKEY[j].begin() + 3 * LB);
     }
-    check_MAC<nP>(io, cMAC, cKEY, Delta, LB, party);
+    check_MAC<nP>(io1, io2, cMAC, cKEY, Delta, LB, party);
     if (party != 1) {
-      io->send_data(1, a.data(), LB); io->send_data(1, b.data(), LB);
-      io->send_data(1, c.data(), LB); io->flush(1);
+      io_send(io1, io2, party, 1, a.data(), LB); io_send(io1, io2, party, 1, b.data(), LB);
+      io_send(io1, io2, party, 1, c.data(), LB); io_flush(io1, io2, party, 1);
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), C(c);
       for (int p = 2; p <= nP; ++p) {
         std::vector<uint8_t> ta(LB), tb(LB), tc(LB);
-        io->recv_data(p, ta.data(), LB); io->recv_data(p, tb.data(), LB);
-        io->recv_data(p, tc.data(), LB);
+        io_recv(io1, io2, party, p, ta.data(), LB); io_recv(io1, io2, party, p, tb.data(), LB);
+        io_recv(io1, io2, party, p, tc.data(), LB);
         for (int k = 0; k < LB; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; C[k] ^= tc[k]; }
       }
       for (int k = 0; k < LB; ++k) if (C[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -326,7 +326,7 @@ public:
   std::vector<uint8_t> open_bits(const std::vector<uint8_t> &share, int len) {
     std::vector<std::vector<uint8_t>> r(nP + 1);
     std::vector<std::future<void>> res;
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       r[peer].resize(len);
       res.push_back(pool->enqueue([this, &share, len, peer]() {
         send_ch(peer)->send_bool((const bool *)share.data(), len);
@@ -363,7 +363,7 @@ public:
         tMAC[j][2 * N + tamper] = tMAC[j][2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
-    block S = sampleRandom<nP>(io, &prg, pool, party);
+    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
@@ -460,7 +460,7 @@ public:
     // pristine a/b/r shares BEFORE the leaky-AND step mutates them (the c=r⊕d
     // flip), so it stays independent of which leaky-AND method runs. Seed is
     // sampled AFTER process_phase1 commits MAC/KEY so the adversary can't adapt.
-    block check2_seed = sampleRandom(io, &prg, pool, party);
+    block check2_seed = sampleRandom<nP>(io1, io2, &prg, pool, party);
     abit.check2_init(check2_seed, abit_len);
     abit.check2_chunk(0, abit_len, tMAC, tKEY);
     abit.check2_finalize();
@@ -481,7 +481,7 @@ public:
     // helper.h. We pack into a single LB+1-block buffer; step 4 then
     // XORs the b·Δ ⊕ K ⊕ M terms into phi[0..LB) on top of z^i.
     BlockVec z_u(LB + 1, zero_block);
-    fzero_xor<nP>(io, &prg, pool, party, z_u.data(), LB + 1);
+    fzero_xor<nP>(io1, io2, &prg, pool, party, z_u.data(), LB + 1);
     for (int k = 0; k < LB; ++k) phi[k] = z_u[k];
     block u_zero = z_u[LB];
 #ifdef EMP_DEBUG_PHASE
@@ -496,7 +496,7 @@ public:
       res.push_back(pool->enqueue([this, st, ed, LB, &tKEY, &tMAC, &phi, &tr]() {
         for (int k = st; k < ed; ++k) {
           phi[k] ^= (select_mask[tr[LB + k]] & Delta);
-          for (int j = 1; j <= nP; ++j) if (j != party) {
+          { const int j = 3 - party;
             phi[k] ^= tKEY[j][LB + k];
             phi[k] ^= tMAC[j][LB + k];
           }
@@ -518,9 +518,9 @@ public:
     // buffer is allocated once and reused across chunks.
     int hg_chunk = 1 << 16;
 #ifdef WRK_PROFILE
-    int64_t _phi0 = io->count();
+    int64_t _phi0 = io_count(io1, io2);
 #endif
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       block pair_seed = makeBlock((uint64_t)std::min(party, peer),
                                   (uint64_t)std::max(party, peer));
       res.push_back(pool->enqueue([this, &tKEY, &tKEYphi, &phi, LB, peer, pair_seed, hg_chunk]() {
@@ -543,8 +543,8 @@ public:
               tmp[k0 + j - st]      = pad[2 * j] ^ pad[2 * j + 1] ^ phi[k0 + j];
             }
           }
-          io->send_data(peer, tmp.data(), (ed - st) * sizeof(block));
-          io->flush(peer);
+          io_send(io1, io2, party, peer, tmp.data(), (ed - st) * sizeof(block));
+          io_flush(io1, io2, party, peer);
         }
       }));
       res.push_back(pool->enqueue([this, &tMAC, &tMACphi, &tr, LB, peer, pair_seed, hg_chunk]() {
@@ -554,7 +554,7 @@ public:
         BlockVec wire(std::min(hg_chunk, LB));
         for (int ci = 0; ci < (LB + hg_chunk - 1) / hg_chunk; ++ci) {
           int st = hg_chunk * ci, ed = std::min(hg_chunk * (ci + 1), LB);
-          io->recv_data(peer, wire.data(), (ed - st) * sizeof(block));
+          io_recv(io1, io2, party, peer, wire.data(), (ed - st) * sizeof(block));
           for (int k0 = st; k0 < ed; k0 += 8) {
             int batch = std::min(8, ed - k0);
             for (int j = 0; j < 8; ++j)
@@ -570,7 +570,7 @@ public:
     }
     joinNclean(res);
 #ifdef WRK_PROFILE
-    g_wrk_phi_bytes += (uint64_t)(io->count() - _phi0);
+    g_wrk_phi_bytes += (uint64_t)(io_count(io1, io2) - _phi0);
 #endif
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] half-gate exchange", party);
@@ -584,7 +584,7 @@ public:
       res.push_back(pool->enqueue([this, st, ed, LB, &tKEYphi, &tMACphi, &tKEY, &tMAC, &phi, &tr]() {
         for (int k = st; k < ed; ++k) {
           tKEYphi[party][k] = zero_block;
-          for (int j = 1; j <= nP; ++j) if (j != party) {
+          { const int j = 3 - party;
             tKEYphi[party][k] = tKEYphi[party][k] ^ tKEYphi[j][k];
             tKEYphi[party][k] = tKEYphi[party][k] ^ tMACphi[j][k];
             tKEYphi[party][k] = tKEYphi[party][k] ^ tKEY[j][2 * LB + k];
@@ -604,13 +604,13 @@ public:
     // commitment round is needed.
     for (int k = 0; k < LB; ++k)
       s[party][k] = LSB1(tKEYphi[party][k]);
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        io->send_data(peer, s[party].data(), LB);
-        io->flush(peer);
+        io_send(io1, io2, party, peer, s[party].data(), LB);
+        io_flush(io1, io2, party, peer);
       }));
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        io->recv_data(peer, s[peer].data(), LB);
+        io_recv(io1, io2, party, peer, s[peer].data(), LB);
       }));
     }
     joinNclean(res);
@@ -656,7 +656,7 @@ public:
     // gives a 2-block α^i (univ. hash output before mod reduction); u^i
     // is folded into the low half — Σ_p u^p = 0 keeps the column sum
     // invariant after the cross-party XOR.
-    block S = sampleRandom(io, &prg, pool, party);
+    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
     PRG jprg(&S);
     jprg.random_block(phi.data(), LB);
     BlockVec ip[nP + 1];
@@ -667,25 +667,25 @@ public:
     char dgst[nP + 1][Hash::DIGEST_SIZE];
     Hash::hash_once(dgst[party], ip[party].data(), sizeof(block) * 2);
 
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &dgst, peer]() {
-        io->send_data(peer, dgst[party], Hash::DIGEST_SIZE);
-        io->flush(peer);
+        io_send(io1, io2, party, peer, dgst[party], Hash::DIGEST_SIZE);
+        io_flush(io1, io2, party, peer);
       }));
       res.push_back(pool->enqueue([this, &dgst, peer]() {
-        io->recv_data(peer, dgst[peer], Hash::DIGEST_SIZE);
+        io_recv(io1, io2, party, peer, dgst[peer], Hash::DIGEST_SIZE);
       }));
     }
     joinNclean(res);
 
     vector<future<bool>> res2;
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &ip, peer]() {
-        io->send_data(peer, ip[party].data(), sizeof(block) * 2);
-        io->flush(peer);
+        io_send(io1, io2, party, peer, ip[party].data(), sizeof(block) * 2);
+        io_flush(io1, io2, party, peer);
       }));
       res2.push_back(pool->enqueue([this, &ip, &dgst, peer]() -> bool {
-        io->recv_data(peer, ip[peer].data(), sizeof(block) * 2);
+        io_recv(io1, io2, party, peer, ip[peer].data(), sizeof(block) * 2);
         char chk[Hash::DIGEST_SIZE];
         Hash::hash_once(chk, ip[peer].data(), sizeof(block) * 2);
         return memcmp(chk, dgst[peer], Hash::DIGEST_SIZE) != 0;
@@ -713,7 +713,7 @@ public:
     // bucket i's k-th slot is leaky triple (k * length + (i + r_k) mod length),
     // which is sequential in i (with at most one wraparound), so each row is
     // streamed once per bucket range.
-    block S = sampleRandom<nP>(io, &prg, pool, party);
+    block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
     vector<unsigned char> d[nP + 1];
     for (int i = 1; i <= nP; ++i)
       d[i].resize(length * (bucket_size - 1));
@@ -737,7 +737,7 @@ public:
         // of src at tMAC[j][s*LB + i]. When out_aos is non-null, also
         // initialize the AoS bundle for each i (Stage 4d: fuses the
         // SoA→AoS transpose into bucketing's existing per-i write).
-        for (int j = 1; j <= nP; ++j) if (j != party) {
+        { const int j = 3 - party;
           for (int s = 0; s < 3; ++s) {
             memcpy(MAC[j] + s * length + st, tMAC[j].data() + s * LB + st, (ed - st) * sizeof(block));
             memcpy(KEY[j] + s * length + st, tKEY[j].data() + s * LB + st, (ed - st) * sizeof(block));
@@ -765,7 +765,7 @@ public:
           int shift = rk[k];
           int cut = std::max(st, std::min(ed, length - shift));
           int base = k * length;
-          for (int j = 1; j <= nP; ++j) if (j != party) {
+          { const int j = 3 - party;
             int slot = out_aos ? peer_slot(party, j) : 0;
             for (int i = st; i < cut; ++i) {
               int src = base + i + shift;
@@ -813,13 +813,13 @@ public:
     _phase("[triple] bucketing", party);
 #endif
 
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party) {
+    { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        io->send_data(peer, d[party].data(), (bucket_size - 1) * length);
-        io->flush(peer);
+        io_send(io1, io2, party, peer, d[party].data(), (bucket_size - 1) * length);
+        io_flush(io1, io2, party, peer);
       }));
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        io->recv_data(peer, d[peer].data(), (bucket_size - 1) * length);
+        io_recv(io1, io2, party, peer, d[peer].data(), (bucket_size - 1) * length);
       }));
     }
     joinNclean(res);
@@ -828,7 +828,7 @@ public:
         d[1][j] = d[1][j] != d[i][j];
 
     for (int i = 0; i < length; ++i) {
-      for (int j = 1; j <= nP; ++j) if (j != party) {
+      { const int j = 3 - party;
         int slot = out_aos ? peer_slot(party, j) : 0;
         for (int k = 1; k < bucket_size; ++k) {
           int src = k * length + (i + rk[k]) % length;
@@ -853,15 +853,15 @@ public:
     _phase("[triple] check2", party);
 
     BlockVec MAC_dbg[nP + 1];
-    for (int i = 1; i <= nP; ++i) if (i != party) {
+    { const int i = 3 - party;
       MAC_dbg[i].assign(MAC[i], MAC[i] + 3 * length);
     }
     BlockVec KEY_dbg[nP + 1];
-    for (int i = 1; i <= nP; ++i) if (i != party) {
+    { const int i = 3 - party;
       KEY_dbg[i].assign(KEY[i], KEY[i] + 3 * length);
     }
-    check_MAC<nP>(io, MAC_dbg, KEY_dbg, Delta, length * 3, party);
-    check_correctness<nP>(io, MAC_dbg, length, party);
+    check_MAC<nP>(io1, io2, MAC_dbg, KEY_dbg, Delta, length * 3, party);
+    check_correctness<nP>(io1, io2, MAC_dbg, length, party);
 #endif
   }
 
@@ -871,12 +871,12 @@ public:
   // bit0(MAC[any non-self peer][k]). out_aos forwards as-is.
   void compute(BlockVec MAC[nP + 1], BlockVec KEY[nP + 1], int length,
                TripleBundle<nP> *out_aos = nullptr) {
-    for (int i = 1; i <= nP; ++i) if (i != party) {
+    { const int i = 3 - party;
       MAC[i].resize(length * 3);
       KEY[i].resize(length * 3);
     }
     block *MAC_p[nP + 1], *KEY_p[nP + 1];
-    for (int i = 1; i <= nP; ++i) if (i != party) {
+    { const int i = 3 - party;
       MAC_p[i] = MAC[i].data();
       KEY_p[i] = KEY[i].data();
     }

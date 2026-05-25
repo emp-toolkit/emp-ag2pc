@@ -6,10 +6,11 @@
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "emp-ag2pc/wrk_backend.h"
+#include "net_setup.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 
 template <typename Wire>
 static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
@@ -39,10 +40,11 @@ int main(int argc, char **argv) {
     pt_bits[i] = ((i * 3 + 1) % 4) == 0;
   }
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2;
+  make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(&io, &pool, party);
-  io.flush();
+  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
 
   // key owned by party 1, plaintext by party 2; each party feeds its own real
   // bits, dummies for the other (Bit ctor uses the value only at the owner).

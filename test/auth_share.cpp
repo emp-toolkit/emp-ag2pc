@@ -27,27 +27,28 @@
 // because their C2PC path eventually hits sync points that mask the
 // issue.
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 int party, port;
 
-static void test_compute(NetIOMP<nP> *io, ThreadPool *pool,
+static void test_compute(NetIO *io1, NetIO *io2, ThreadPool *pool,
                          AuthSharePool<nP> *ap, int length) {
   if (party == 1) cout << "=== compute(" << length << ") ===" << endl;
   BlockVec MAC[nP + 1], KEY[nP + 1];
   ap->compute(MAC, KEY, length);
-  check_MAC<nP>(io, MAC, KEY, ap->Delta, length, party);
+  check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;
 }
 
-static void test_process_phase1(NetIOMP<nP> *io, ThreadPool *pool,
+static void test_process_phase1(NetIO *io1, NetIO *io2, ThreadPool *pool,
                                 AuthSharePool<nP> *ap, int length) {
   if (party == 1) cout << "=== process_phase1(" << length << ") ===" << endl;
   BlockVec MAC[nP + 1], KEY[nP + 1];
   ap->process_phase1(MAC, KEY, length);
-  check_MAC<nP>(io, MAC, KEY, ap->Delta, length, party);
+  check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;
 }
 
@@ -55,11 +56,12 @@ int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
   if (party > nP) return 0;
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2;
+  make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
 
-  AuthSharePool<nP> ap(&io, &pool, party);
-  io.flush();
+  AuthSharePool<nP> ap(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
 
   // Lengths chosen to match TriplePool's process_phase1 ext_lens:
   //   triple.cpp num_ands=32768, bucket=4, abit_len=393216
@@ -67,15 +69,15 @@ int main(int argc, char **argv) {
   //   aes        num_ands=6800,  bucket=4, abit_len=81600
 
   // PART 1: compute() works at all sizes.
-  test_compute(&io, &pool, &ap, 128);
-  test_compute(&io, &pool, &ap, 37200);
-  test_compute(&io, &pool, &ap, 81600);
-  test_compute(&io, &pool, &ap, 393216);
+  test_compute(io1, io2, &pool, &ap, 128);
+  test_compute(io1, io2, &pool, &ap, 37200);
+  test_compute(io1, io2, &pool, &ap, 81600);
+  test_compute(io1, io2, &pool, &ap, 393216);
   if (party == 1) cout << "PART 1 (compute): ALL PASS" << endl;
 
   // PART 2: process_phase1 alone fails at any non-trivial length.
   // Uncomment to reproduce the bug:
-  // test_process_phase1(&io, &pool, &ap, 37200);  // fails with net_recv_data
+  // test_process_phase1(io1, io2, &pool, &ap, 37200);  // fails with net_recv_data
 
   return 0;
 }

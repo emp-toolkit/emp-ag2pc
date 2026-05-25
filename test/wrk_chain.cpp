@@ -6,11 +6,12 @@
 // plaintext via setup_clear_backend (no checkpoint).
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 #include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 
 // C2 = AES(K2, AES(K1, P)). If do_ckpt, checkpoint between the two AES calls.
 template <typename Wire>
@@ -58,10 +59,10 @@ int main(int argc, char **argv) {
     pt[i] = ((i * 3 + 1) % 4) == 0;
   }
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(&io, &pool, party);
-  io.flush();
+  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
   bool k1a[128], k2a[128], pb[128];
   for (int i = 0; i < 128; ++i) {
     k1a[i] = (party == 1) ? k1[i] : false;

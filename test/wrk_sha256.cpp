@@ -12,11 +12,12 @@
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/circuits/sha256_circuit.h"
 #include "emp-ag2pc/emp-ag2pc.h"
+#include "net_setup.h"
 #include "emp-ag2pc/wrk_backend.h"
 using namespace std;
 using namespace emp;
 
-const static int nP = 3;
+const static int nP = 2;
 using U = UnsignedInt_T<block, 32>;
 
 // Compress one pre-fed message into 256 output wire-carriers. The public IV is
@@ -45,10 +46,10 @@ int main(int argc, char **argv) {
     for (int j = 0; j < 16; ++j)
       blk[n][j] = 0x9e3779b9u * (uint32_t)(j + 1) + 0x01000193u * (uint32_t)n;
 
-  NetIOMP<nP> io(party, port);
+  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(&io, &pool, party);
-  io.flush();
+  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  io1->flush(); io2->flush();
 
   // Feed ALL secret inputs first (party 2 owns the messages; others feed dummies),
   // then record all N compressions, then reveal every output bit in ONE call.
