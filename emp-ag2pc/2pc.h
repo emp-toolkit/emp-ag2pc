@@ -195,8 +195,7 @@ SecureWires<nP> C2PC<nP>::process_input(const bool *inputs, int n, int owner) {
   if (party != 1)
     sw.label0.resize(n);
   else
-    for (int j = 2; j <= nP; ++j) sw.eval_label[j].resize(n);
-
+    { const int j = 2; sw.eval_label[j].resize(n); }
   // Step 3 (Π_aShare): n authenticated λ-shares — drawn from pool. The pool
   // stores AoS-by-wire, so draw is a single memcpy into sw.wire_bundle.
   // Each share-bit λ_w^i is implicit in bit0(sw.wire_bundle[w].mac(0)).
@@ -221,9 +220,8 @@ SecureWires<nP> C2PC<nP>::process_input(const bool *inputs, int n, int owner) {
     io_recv(io1, io2, party, 1, sw.Lambda.data(), n);
   } else {
     std::vector<std::vector<unsigned char>> tmp(nP + 1);
-    for (int p2 = 2; p2 <= nP; ++p2) tmp[p2].resize(n);
-    std::vector<future<void>> res;
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2; tmp[p2].resize(n); }    std::vector<future<void>> res;
+    { const int p2 = 2;
       int party2 = p2;
       res.push_back(pool->enqueue([this, &tmp, n, party2]() {
         io_recv(io1, io2, party, party2, tmp[party2].data(), n);
@@ -232,10 +230,9 @@ SecureWires<nP> C2PC<nP>::process_input(const bool *inputs, int n, int owner) {
     joinNclean(res);
     for (int i = 0; i < n; ++i) {
       sw.Lambda[i] = v[i];
-      for (int p2 = 2; p2 <= nP; ++p2)
-        sw.Lambda[i] = sw.Lambda[i] ^ tmp[p2][i];
+      { const int p2 = 2; sw.Lambda[i] = sw.Lambda[i] ^ tmp[p2][i]; }
     }
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2;
       int party2 = p2;
       res.push_back(pool->enqueue([this, &sw, n, party2]() {
         io_send(io1, io2, party, party2, sw.Lambda.data(), n);
@@ -254,7 +251,7 @@ SecureWires<nP> C2PC<nP>::process_input(const bool *inputs, int n, int owner) {
     io_flush(io1, io2, party, 1);
   } else {
     std::vector<future<void>> res;
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2;
       int party2 = p2;
       res.push_back(pool->enqueue([this, &sw, n, party2]() {
         io_recv(io1, io2, party, party2, sw.eval_label[party2].data(),
@@ -298,8 +295,7 @@ SecureWires<nP> C2PC<nP>::compute_impl(const CircuitView *cf,
   ctx.mask_input.assign(cf->num_wire, 0);
   ctx.wire_slot.resize(ctx.num_slots);
   if (party != 1) ctx.label_slot.resize(ctx.num_slots);
-  else for (int j = 2; j <= nP; ++j) ctx.eval_slot[j].resize(ctx.num_slots);
-  ctx.mitc.setS(zero_block);
+  else { const int j = 2; ctx.eval_slot[j].resize(ctx.num_slots); }  ctx.mitc.setS(zero_block);
 
   WRK_PHASE_BEGIN();
   load_inputs(ctx, inputs, n_inputs);     WRK_PHASE("load_inputs");
@@ -329,9 +325,9 @@ void C2PC<nP>::load_inputs(ComputeCtx &ctx, const SecureWires<nP> *const *inputs
     if (party != 1) {
       memcpy(ctx.label_slot.data() + off, in.label0.data(), n * sizeof(block));
     } else {
-      for (int j = 2; j <= nP; ++j)
+      { const int j = 2;
         memcpy(ctx.eval_slot[j].data() + off, in.eval_label[j].data(),
-               n * sizeof(block));
+               n * sizeof(block)); }
     }
     off += n;
   }
@@ -419,26 +415,23 @@ void C2PC<nP>::beaver_pass(ComputeCtx &ctx) {
     }
   }
   std::vector<future<void>> res;
-  for (int i = 1; i <= nP; ++i)
-    for (int j = 1; j <= nP; ++j)
-      if ((i < j) && (i == party || j == party)) {
-        int party2 = i + j - party;
-        res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-          io_send(io1, io2, party, party2, x[party].data(), num_ands);
-          io_send(io1, io2, party, party2, y[party].data(), num_ands);
-          io_flush(io1, io2, party, party2);
-        }));
-        res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-          io_recv(io1, io2, party, party2, x[party2].data(), num_ands);
-          io_recv(io1, io2, party, party2, y[party2].data(), num_ands);
-        }));
-      }
+  { const int party2 = 3 - party;
+    res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
+      io_send(io1, io2, party, party2, x[party].data(), num_ands);
+      io_send(io1, io2, party, party2, y[party].data(), num_ands);
+      io_flush(io1, io2, party, party2);
+    }));
+    res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
+      io_recv(io1, io2, party, party2, x[party2].data(), num_ands);
+      io_recv(io1, io2, party, party2, y[party2].data(), num_ands);
+    }));
+  }
   joinNclean(res);
-  for (int i = 2; i <= nP; ++i)
+  { const int i = 2;
     for (int j = 0; j < num_ands; ++j) {
       x[1][j] = x[1][j] ^ x[i][j];
       y[1][j] = y[1][j] ^ y[i][j];
-    }
+    } }
   {
     block dxor = Delta ^ bit0_mask;
     for (int gi = 0; gi < cf->num_gate; ++gi) {
@@ -486,8 +479,7 @@ void C2PC<nP>::garble_and_ship(ComputeCtx &ctx) {
   {
     BlockVec G_buf(2 * num_ands);
     std::vector<BlockVec> S_buf(nP + 1);
-    for (int j = 2; j <= nP; ++j)
-      if (j != party) S_buf[j].resize(3 * num_ands);
+    if (2 != party) { const int j = 2; S_buf[j].resize(3 * num_ands); }
     std::vector<unsigned char> b_buf;
     if (party == 2) b_buf.resize(num_ands);
 
@@ -514,7 +506,7 @@ void C2PC<nP>::garble_and_ship(ComputeCtx &ctx) {
       // half-gate hashes.
       block tweaks[nP - 1];
       block buf[(nP - 1) * 4];
-      for (int d = 2; d <= nP; ++d) {
+      { const int d = 2;
         int k = d - 2;
         tweaks[k] = tweak_block(ai, party, d);
         buf[4 * k]     = ml_a0;
@@ -532,7 +524,7 @@ void C2PC<nP>::garble_and_ship(ComputeCtx &ctx) {
 
       block H_a0_self = zero_block, H_a1_self = zero_block;
       block H_b0_self = zero_block, H_b1_self = zero_block;
-      for (int d = 2; d <= nP; ++d) {
+      { const int d = 2;
         int k = d - 2;
         if (d == party) {
           H_a0_self = buf[4 * k];     H_a1_self = buf[4 * k + 1];
@@ -571,8 +563,8 @@ void C2PC<nP>::garble_and_ship(ComputeCtx &ctx) {
       if (party == 2) b_buf[ai] = (unsigned char)(LSB1(ml_g0));
     }
     io_send(io1, io2, party, 1, G_buf.data(), 2 * num_ands * sizeof(block));
-    for (int j = 2; j <= nP; ++j) if (j != party)
-      io_send(io1, io2, party, 1, S_buf[j].data(), 3 * num_ands * sizeof(block));
+    // No cross-garbler S terms with a single garbler (party 2): this loop is
+    // empty for 2pc.
     if (party == 2) io_send(io1, io2, party, 1, b_buf.data(), num_ands);
     io_flush(io1, io2, party, 1);
   }
@@ -590,7 +582,7 @@ void C2PC<nP>::receive_garbling(ComputeCtx &ctx) {
   S.resize(num_ands);
   b_buf_at_P1.resize(num_ands);
   std::vector<future<void>> rres;
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2;
       rres.push_back(
           pool->enqueue([this, &G, &S, &b_buf_at_P1, num_ands, p2]() {
             BlockVec G_buf(2 * num_ands);
@@ -599,7 +591,7 @@ void C2PC<nP>::receive_garbling(ComputeCtx &ctx) {
               G[g][p2][0] = G_buf[2 * g];
               G[g][p2][1] = G_buf[2 * g + 1];
             }
-            for (int j = 2; j <= nP; ++j) if (j != p2) {
+            if (2 != p2) { const int j = 2;
               BlockVec S_buf(3 * num_ands);
               io_recv(io1, io2, party, p2, S_buf.data(), 3 * num_ands * sizeof(block));
               for (int g = 0; g < num_ands; ++g) {
@@ -635,11 +627,9 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
       if (!g.is_and()) {
         if (g.is_not()) {
           mask_input[out] = mask_input[in0] ^ 1;
-          for (int j = 2; j <= nP; ++j) EVAL(j, out) = EVAL(j, in0);
-          WIRE(out) = WIRE(in0);
+          { const int j = 2; EVAL(j, out) = EVAL(j, in0); }          WIRE(out) = WIRE(in0);
         } else {  // XOR
-          for (int j = 2; j <= nP; ++j)
-            EVAL(j, out) = EVAL(j, in0) ^ EVAL(j, in1);
+          { const int j = 2; EVAL(j, out) = EVAL(j, in0) ^ EVAL(j, in1); }
           mask_input[out] = mask_input[in0] ^ mask_input[in1];
           // Recompute fabric share for the per-AND Mr term below.
           xor_share(WIRE(out), WIRE(in0), WIRE(in1));
@@ -654,7 +644,7 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
         const AShareBundle<nP> &wb_out = WIRE(out);
         const AShareBundle<nP> &sb     = sigma[ai];
         block Mr[nP + 1][nP + 1];
-        for (int i = 2; i <= nP; ++i) {
+        { const int i = 2;
           int s = i - 2;
           block t = sb.mac(s) ^ wb_out.mac(s);
           if (La) t = t ^ wb_in1.mac(s);
@@ -666,10 +656,10 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
         // is the self tweak — cache its outputs for pass 2 instead of
         // feeding S.
         block self_Ha[nP + 1], self_Hb[nP + 1];
-        for (int s = 2; s <= nP; ++s) {
+        { const int s = 2;
           block tweaks[nP - 1];
           block buf[(nP - 1) * 2];
-          for (int d = 2; d <= nP; ++d) {
+          { const int d = 2;
             int k = d - 2;
             tweaks[k] = tweak_block(ai, s, d);
             buf[2 * k]     = EVAL(s, in0);
@@ -677,7 +667,7 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
           }
           mitc.renew_ks(tweaks);
           mitc.template hash_cir<nP - 1, 2>(buf);
-          for (int d = 2; d <= nP; ++d) {
+          { const int d = 2;
             int k = d - 2;
             if (d == s) {
               self_Ha[s] = buf[2 * k];
@@ -693,12 +683,11 @@ void C2PC<nP>::p1_evaluate(ComputeCtx &ctx) {
         // Pass 2: combine cached self hashes with G + Mr column to produce
         // eval_labels[i][out]. Must follow pass 1 since it reads Mr[s][i]
         // for all s ≠ i.
-        for (int i = 2; i <= nP; ++i) {
+        { const int i = 2;
           block t = self_Ha[i] ^ self_Hb[i];
           if (La) t = t ^ G[ai][i][0];
           if (Lb) t = t ^ G[ai][i][1] ^ EVAL(i, in0);
-          for (int s = 1; s <= nP; ++s) if (s != i)
-            t = t ^ Mr[s][i];
+          t = t ^ Mr[1][i];  // the single s != i (= 2) is s = 1
           EVAL(i, out) = t;
         }
         mask_input[out] =
@@ -740,23 +729,22 @@ void C2PC<nP>::check_label_hash(ComputeCtx &ctx) {
   // from the persisted base on the fly.
   if (party == 1) {
     block acc[nP + 1];
-    for (int j = 2; j <= nP; ++j) acc[j] = zero_block;
-    block pw = hp_seed, term;
+    { const int j = 2; acc[j] = zero_block; }    block pw = hp_seed, term;
     for (int w = 0; w < num_in; ++w) {
-      for (int j = 2; j <= nP; ++j) { gfmul(EVAL(j, w), pw, &term); acc[j] = acc[j] ^ term; }
+      { const int j = 2; gfmul(EVAL(j, w), pw, &term); acc[j] = acc[j] ^ term; }
       gfmul(pw, hp_seed, &pw);
     }
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
       if (!g.is_and())  // AND output eval-labels persist (set during evaluation)
-        for (int j = 2; j <= nP; ++j)
+        { const int j = 2;
           EVAL(j, g.out) = g.is_not() ? EVAL(j, g.in0)
-                                      : EVAL(j, g.in0) ^ EVAL(j, g.in1);
-      for (int j = 2; j <= nP; ++j) { gfmul(EVAL(j, g.out), pw, &term); acc[j] = acc[j] ^ term; }
+                                      : EVAL(j, g.in0) ^ EVAL(j, g.in1); }
+      { const int j = 2; gfmul(EVAL(j, g.out), pw, &term); acc[j] = acc[j] ^ term; }
       gfmul(pw, hp_seed, &pw);
     }
     std::vector<future<void>> r2;
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2;
       int party2 = p2;
       r2.push_back(pool->enqueue([this, &hp_seed, &Lambda_AND, &acc, num_ands, party2]() {
         io_send(io1, io2, party, party2, &hp_seed, sizeof(block));
@@ -851,7 +839,7 @@ void C2PC<nP>::check_tgamma(ComputeCtx &ctx) {
 
     BlockVec z_recv(nP + 1);
     std::vector<future<void>> r3;
-    for (int p2 = 2; p2 <= nP; ++p2) {
+    { const int p2 = 2;
       int party2 = p2;
       r3.push_back(pool->enqueue([this, &z_recv, party2]() {
         io_recv(io1, io2, party, party2, &z_recv[party2], sizeof(block));
@@ -859,8 +847,7 @@ void C2PC<nP>::check_tgamma(ComputeCtx &ctx) {
     }
     joinNclean(r3);
     block sum = z1;
-    for (int i = 2; i <= nP; ++i) sum = sum ^ z_recv[i];
-    if (!cmpBlock(&sum, &zero_block, 1))
+    { const int i = 2; sum = sum ^ z_recv[i]; }    if (!cmpBlock(&sum, &zero_block, 1))
       error("cheat in t_gamma check (step 13)");
   } else {
     // Non-P1: peer 1 always exists, slot = peer_slot(party, 1).
@@ -911,7 +898,7 @@ SecureWires<nP> C2PC<nP>::gather_outputs(ComputeCtx &ctx,
     out.label0.resize(n3);
     for (int i = 0; i < n3; ++i) out.label0[i] = LABEL(output_ids[i]);
   } else {
-    for (int j = 2; j <= nP; ++j) {
+    { const int j = 2;
       out.eval_label[j].resize(n3);
       for (int i = 0; i < n3; ++i) out.eval_label[j][i] = EVAL(j, output_ids[i]);
     }
@@ -932,7 +919,7 @@ std::vector<bool> C2PC<nP>::decode(const SecureWires<nP> &wires,
     if (party == 1) {
       for (int i = 0; i < n; ++i) buf[i] = v[i];
       std::vector<future<void>> res;
-      for (int p = 2; p <= nP; ++p) {
+      { const int p = 2;
         int p2 = p;
         res.push_back(pool->enqueue([this, &buf, n, p2]() {
           io_send(io1, io2, party, p2, buf.data(), n);
@@ -958,18 +945,15 @@ std::vector<bool> C2PC<nP>::decode(const SecureWires<nP> &wires,
   } else {
     result.resize(n);
     std::vector<std::vector<unsigned char>> tmp(nP + 1);
-    for (int p = 1; p <= nP; ++p) if (p != recipient) tmp[p].resize(n);
+    const int party2 = 3 - recipient;  // the single non-recipient party
+    tmp[party2].resize(n);
     std::vector<future<void>> res;
-    for (int p = 1; p <= nP; ++p) if (p != recipient) {
-      int party2 = p;
-      res.push_back(pool->enqueue([this, &tmp, n, party2]() {
-        io_recv(io1, io2, party, party2, tmp[party2].data(), n);
-      }));
-    }
+    res.push_back(pool->enqueue([this, &tmp, n, party2]() {
+      io_recv(io1, io2, party, party2, tmp[party2].data(), n);
+    }));
     joinNclean(res);
     for (int i = 0; i < n; ++i) {
-      unsigned char v = my_share[i] ^ wires.Lambda[i];
-      for (int p = 1; p <= nP; ++p) if (p != recipient) v ^= tmp[p][i];
+      unsigned char v = my_share[i] ^ wires.Lambda[i] ^ tmp[party2][i];
       result[i] = (v & 1);
     }
   }

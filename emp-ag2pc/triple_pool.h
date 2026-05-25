@@ -143,12 +143,13 @@ public:
     std::vector<std::vector<uint8_t>> s_send(nP + 1), s_recv(nP + 1);
     { const int j = 3 - party; s_send[j].resize(len); s_recv[j].resize(len); }
     for (int k = 0; k < len; ++k) z[k] = (uint8_t)(LSB(aMAC[ap][k]) & b[k]);
-    for (int j = 1; j <= nP; ++j) if (j != party)
+    { const int j = 3 - party;
       for (int k = 0; k < len; ++k) {
         uint8_t v0 = H(aKEY[j][k]);
         s_send[j][k] = (uint8_t)(v0 ^ H(aKEY[j][k] ^ Delta) ^ b[k]);
         z[k] ^= v0;
       }
+    }
     std::vector<std::future<void>> res;
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s_send, len, peer]() {
@@ -160,11 +161,12 @@ public:
       }));
     }
     joinNclean(res);
-    for (int j = 1; j <= nP; ++j) if (j != party)
+    { const int j = 3 - party;
       for (int k = 0; k < len; ++k) {
         uint8_t ame = (uint8_t)LSB(aMAC[ap][k]);
         z[k] ^= (uint8_t)(H(aMAC[j][k]) ^ (ame & s_recv[j][k]));
       }
+    }
   }
 
   // Self-test: gen random authenticated a, b; multiply; open a,b,z to P1 and
@@ -183,7 +185,7 @@ public:
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), Z(z);
-      for (int p = 2; p <= nP; ++p) {
+      { const int p = 2;
         std::vector<uint8_t> ta(len), tb(len), tz(len);
         io_recv(io1, io2, party, p, ta.data(), len); io_recv(io1, io2, party, p, tb.data(), len);
         io_recv(io1, io2, party, p, tz.data(), len);
@@ -224,16 +226,15 @@ public:
     }
     joinNclean(res);
     std::vector<uint8_t> d(dme);
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party)
-      for (int k = 0; k < LB; ++k) d[k] ^= dr[peer][k];
+    { const int peer = 3 - party;
+      for (int k = 0; k < LB; ++k) d[k] ^= dr[peer][k]; }
     // c = r ⊕ d (public d) on the r-region: P1 flips bit0(MAC) by d; every other
     // party flips its key for peer 1 by Δ⊕e_0 to keep the MAC on c consistent.
     block dxor = Delta ^ bit0_mask;
     for (int k = 0; k < LB; ++k) {
       if (!d[k]) continue;
       if (party == 1) {
-        for (int j = 1; j <= nP; ++j) if (j != party)
-          tMAC[j][2 * LB + k] = tMAC[j][2 * LB + k] ^ bit0_mask;
+        tMAC[2][2 * LB + k] = tMAC[2][2 * LB + k] ^ bit0_mask;
       } else {
         tKEY[1][2 * LB + k] = tKEY[1][2 * LB + k] ^ dxor;
       }
@@ -310,7 +311,7 @@ public:
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), C(c);
-      for (int p = 2; p <= nP; ++p) {
+      { const int p = 2;
         std::vector<uint8_t> ta(LB), tb(LB), tc(LB);
         io_recv(io1, io2, party, p, ta.data(), LB); io_recv(io1, io2, party, p, tb.data(), LB);
         io_recv(io1, io2, party, p, tc.data(), LB);
@@ -338,8 +339,8 @@ public:
     }
     joinNclean(res);
     std::vector<uint8_t> pub(share);
-    for (int peer = 1; peer <= nP; ++peer) if (peer != party)
-      for (int k = 0; k < len; ++k) pub[k] ^= r[peer][k];
+    { const int peer = 3 - party;
+      for (int k = 0; k < len; ++k) pub[k] ^= r[peer][k]; }
     return pub;
   }
 
@@ -359,8 +360,7 @@ public:
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // a=[0,N) b=[N,2N) c=[2N,3N)
     int ap = (party == 1) ? 2 : 1;
     if (tamper >= 0 && party == 1)  // flip ⊕c by flipping bit0 of c-MAC on P1
-      for (int j = 1; j <= nP; ++j) if (j != party)
-        tMAC[j][2 * N + tamper] = tMAC[j][2 * N + tamper] ^ bit0_mask;
+      tMAC[2][2 * N + tamper] = tMAC[2][2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
     block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
@@ -630,16 +630,12 @@ public:
       block *T = tKEYphi[party].data();
       block dxor = Delta ^ bit0_mask;
       for (int k = 0; k < LB; ++k) {
-        s[0][k] = 0;
-        for (int i = 1; i <= nP; ++i)
-          s[0][k] = (s[0][k] != s[i][k]);
+        s[0][k] = (s[1][k] != s[2][k]);
         block mask_s = select_mask[s[0][k]];
         if (party == 1) {
           tr[2 * LB + k] = (s[0][k] != tr[2 * LB + k]);
-          if (s[0][k]) {
-            for (int j = 1; j <= nP; ++j) if (j != party)
-              tMAC[j][2 * LB + k] = tMAC[j][2 * LB + k] ^ bit0_mask;
-          }
+          if (s[0][k])
+            tMAC[2][2 * LB + k] = tMAC[2][2 * LB + k] ^ bit0_mask;
         } else {
           tKEY[1][2 * LB + k] = tKEY[1][2 * LB + k] ^ (dxor & mask_s);
         }
@@ -694,8 +690,7 @@ public:
     joinNclean(res);
     if (joinNcleanCheat(res2)) error("LaAND alpha: commit-open mismatch");
 
-    for (int i = 2; i <= nP; ++i)
-      xorBlocks_arr(ip[1].data(), ip[1].data(), ip[i].data(), 2);
+    xorBlocks_arr(ip[1].data(), ip[1].data(), ip[2].data(), 2);
     if (!cmpBlock(&ip[1][0], &zero_block, 1) || !cmpBlock(&ip[1][1], &zero_block, 1))
       error("LaAND alpha: Sigma alpha != 0");
 #ifdef EMP_DEBUG_PHASE
@@ -823,9 +818,8 @@ public:
       }));
     }
     joinNclean(res);
-    for (int i = 2; i <= nP; ++i)
-      for (int j = 0; j < (bucket_size - 1) * length; ++j)
-        d[1][j] = d[1][j] != d[i][j];
+    for (int j = 0; j < (bucket_size - 1) * length; ++j)
+      d[1][j] = d[1][j] != d[2][j];
 
     for (int i = 0; i < length; ++i) {
       { const int j = 3 - party;
