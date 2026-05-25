@@ -37,7 +37,7 @@ int party, port;
 static void test_compute(NetIO *io1, NetIO *io2, ThreadPool *pool,
                          AuthSharePool<nP> *ap, int length) {
   if (party == 1) cout << "=== compute(" << length << ") ===" << endl;
-  BlockVec MAC[nP + 1], KEY[nP + 1];
+  BlockVec MAC, KEY;
   ap->compute(MAC, KEY, length);
   check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;
@@ -46,7 +46,7 @@ static void test_compute(NetIO *io1, NetIO *io2, ThreadPool *pool,
 static void test_process_phase1(NetIO *io1, NetIO *io2, ThreadPool *pool,
                                 AuthSharePool<nP> *ap, int length) {
   if (party == 1) cout << "=== process_phase1(" << length << ") ===" << endl;
-  BlockVec MAC[nP + 1], KEY[nP + 1];
+  BlockVec MAC, KEY;
   ap->process_phase1(MAC, KEY, length);
   check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;

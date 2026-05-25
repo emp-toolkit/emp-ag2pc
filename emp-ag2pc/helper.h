@@ -227,21 +227,21 @@ void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
 }
 
 template <int nP>
-void check_MAC(NetIO *io1, NetIO *io2, block *MAC[nP + 1], block *KEY[nP + 1], bool *r,
+void check_MAC(NetIO *io1, NetIO *io2, block *MAC, block *KEY, bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
   block tD;
-  // Single pair (1, 2): party 1 sends Δ + KEY[2], party 2 verifies MAC[1].
+  // Single pair (1, 2): party 1 sends Δ + its KEY for the peer, party 2 verifies.
   if (party == 1) {
     io_send(io1, io2, party, 2, &Delta, sizeof(block));
-    io_send(io1, io2, party, 2, KEY[2], sizeof(block) * length);
+    io_send(io1, io2, party, 2, KEY, sizeof(block) * length);
     io_flush(io1, io2, party, 2);
   } else {
     io_recv(io1, io2, party, 1, &tD, sizeof(block));
     io_recv(io1, io2, party, 1, tmp, sizeof(block) * length);
     for (int k = 0; k < length; ++k)
       if (r[k]) tmp[k] = tmp[k] ^ tD;
-    if (!cmpBlock(MAC[1], tmp, length))
+    if (!cmpBlock(MAC, tmp, length))
       error("check_MAC failed!");
   }
   delete[] tmp;
@@ -250,26 +250,22 @@ void check_MAC(NetIO *io1, NetIO *io2, block *MAC[nP + 1], block *KEY[nP + 1], b
 }
 
 template <int nP>
-void check_MAC(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1],
-               BlockVec KEY[nP + 1], std::vector<unsigned char> &r, block Delta,
+void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
+               BlockVec &KEY, std::vector<unsigned char> &r, block Delta,
                int length, int party) {
-  block *MAC_p[nP + 1], *KEY_p[nP + 1];
-  const int peer = 3 - party;
-  MAC_p[peer] = MAC[peer].data();
-  KEY_p[peer] = KEY[peer].data();
-  check_MAC<nP>(io1, io2, MAC_p, KEY_p, (bool *)r.data(), Delta, length, party);
+  check_MAC<nP>(io1, io2, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
+                length, party);
 }
 
 // r-less overload: derive share bits from bit0(MAC[any peer]). Valid when
 // the pool invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x consistently
 // across peers).
 template <int nP>
-void check_MAC(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1],
-               BlockVec KEY[nP + 1], block Delta, int length, int party) {
-  int any_peer = (party == 1) ? 2 : 1;
+void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
+               BlockVec &KEY, block Delta, int length, int party) {
   std::vector<unsigned char> r(length);
   for (int k = 0; k < length; ++k)
-    r[k] = (unsigned char)LSB(MAC[any_peer][k]);
+    r[k] = (unsigned char)LSB(MAC[k]);
   check_MAC<nP>(io1, io2, MAC, KEY, r, Delta, length, party);
 }
 
@@ -301,14 +297,13 @@ void check_correctness(NetIO *io1, NetIO *io2, vector<unsigned char> &r, int len
 }
 
 // r-less overload for AND-triple buffers: MAC[*] is sized 3*length (slot-major
-// a/b/c), so r[k] = bit0(MAC[any peer][k]) reconstructs the full 3*length
+// a/b/c), so r[k] = bit0(MAC[k]) reconstructs the full 3*length
 // share vector before delegating to the bool* form.
 template <int nP>
-void check_correctness(NetIO *io1, NetIO *io2, BlockVec MAC[nP + 1], int length, int party) {
-  int any_peer = (party == 1) ? 2 : 1;
+void check_correctness(NetIO *io1, NetIO *io2, BlockVec &MAC, int length, int party) {
   std::vector<unsigned char> r(3 * length);
   for (int k = 0; k < 3 * length; ++k)
-    r[k] = (unsigned char)LSB(MAC[any_peer][k]);
+    r[k] = (unsigned char)LSB(MAC[k]);
   check_correctness<nP>(io1, io2, (bool *)r.data(), length, party);
 }
 

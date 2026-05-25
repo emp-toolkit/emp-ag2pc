@@ -32,7 +32,7 @@ inline uint64_t g_wrk_cot_bytes = 0;
 // by COT post-processing), the receiver's choice IS x^me and the MAC
 // relation M = K ⊕ x · Δ already holds straight out of rcot — no Fix
 // exchange or KEY update is needed. The share x^me_k is recoverable as
-// bit0(MAC[any non-self peer][k]).
+// bit0(MAC[k]).
 //
 // Two small implementation choices:
 //
@@ -92,7 +92,7 @@ class AuthSharePool { public:
 	// receiver instances (abit2) seed their choice_prg from the same
 	// block. With a shared choice seed, the choice bits Pi commits in
 	// COT(i, j) are identical across j by construction, so x^me_k =
-	// bit0(MAC[any_peer][k]) is automatically consistent across peers —
+	// bit0(MAC[k]) is automatically consistent across peers —
 	// step 8/9's r_choice/d exchange + K-update is unnecessary. When null,
 	// we sample one internally; that's the default and gives the same
 	// behavior. Pass an explicit seed only for determinism / testing.
@@ -149,14 +149,14 @@ class AuthSharePool { public:
 	// On entry, MAC[i]/KEY[i] may have any size; compute() grows them to
 	// length + csp for the COT + gadget-tail check, then shrinks back to
 	// length (preserving capacity). The output share x^me_k is implicit
-	// in bit0(MAC[any non-self peer][k]) — no separate share buffer.
+	// in bit0(MAC[k]) — no separate share buffer.
 	//
 	// Stage 2 split: compute() is now a thin wrapper over process_phase1 +
 	// the streaming check2 (init / chunk / finalize). The behavioral
 	// contract (final MAC/KEY contents, network rounds, abort conditions)
 	// is unchanged — TriplePool can later call the pieces directly to
 	// interleave check2_chunk with its own per-region work.
-	void compute(BlockVec MAC[nP + 1], BlockVec KEY[nP + 1], int length) {
+	void compute(BlockVec &MAC, BlockVec &KEY, int length) {
 		process_phase1(MAC, KEY, length);
 
 		// Step 10 seed: collectively-sampled, derived after MAC/KEY are
@@ -178,21 +178,19 @@ class AuthSharePool { public:
 	// `length` blocks each, with MAC = KEY ⊕ x^me · Δ and bit0(MAC) = x^me
 	// across all peers (honest case). The csp tail used for check1 is
 	// minted but discarded — re-enable check1 to consume it.
-	void process_phase1(BlockVec MAC[nP + 1], BlockVec KEY[nP + 1], int length) {
-		// Step 2 (COT-Extend): ext_len = length + csp random tuples per peer.
+	void process_phase1(BlockVec &MAC, BlockVec &KEY, int length) {
+		// Step 2 (COT-Extend): ext_len = length + csp random tuples.
 		// Positions [0, length) are output aShares; [length, ext_len) are
 		// s-tuples reserved for check1's gadget packing (currently unused —
 		// COT still mints them so the FS check covers the same width as
 		// before; we just don't pin/consume them).
 		int ext_len = length + csp;
-		{ const int i = 3 - party;
-			MAC[i].resize(ext_len);
-			KEY[i].resize(ext_len);
-		}
+		MAC.resize(ext_len);
+		KEY.resize(ext_len);
 
 		// Step 8/9 ELIDED: with the shared choice_prg seed set in the ctor,
 		// all of Pi's abit2 receivers commit the SAME choice bits
-		// across peer pairs. So bit0(MAC[peer1][k]) = bit0(MAC[peer2][k])
+		// across peer pairs. So bit0(MAC[k]) = bit0(MAC[k])
 		// = ... = x^me_k automatically — no need to sample x^me, exchange
 		// r_choice/d, or update K. The pinned-bit invariants (bit0(Δ)=1,
 		// bit0(K)=0, bit0(M)=choice) hold straight out of rcot's bit-0
@@ -208,12 +206,12 @@ class AuthSharePool { public:
 		vector<future<void>> res;
 		{ const int peer = 3 - party;
 			bool me_smaller = party < peer;
-			res.push_back(pool->enqueue([this, KEY, ext_len, peer, me_smaller]() {
-				abit1->rcot(KEY[peer].data(), ext_len);
+			res.push_back(pool->enqueue([this, &KEY, ext_len, me_smaller]() {
+				abit1->rcot(KEY.data(), ext_len);
 				((me_smaller ? false : true) ? io1 : io2)->flush();
 			}));
-			res.push_back(pool->enqueue([this, MAC, ext_len, peer, me_smaller]() {
-				abit2->rcot(MAC[peer].data(), ext_len);
+			res.push_back(pool->enqueue([this, &MAC, ext_len, me_smaller]() {
+				abit2->rcot(MAC.data(), ext_len);
 				((me_smaller ? true : false) ? io1 : io2)->flush();
 			}));
 		}
@@ -223,10 +221,8 @@ class AuthSharePool { public:
 #endif
 
 		// Drop the sacrificial tail; output region is [0, length).
-		{ const int i = 3 - party;
-			MAC[i].resize(length);
-			KEY[i].resize(length);
-		}
+		MAC.resize(length);
+		KEY.resize(length);
 	}
 
 	// Begin a streaming check2 session of `length` aShares with the given
@@ -250,28 +246,23 @@ class AuthSharePool { public:
 	// sub-ranges of [0, length); result before finalize is the sum over all
 	// invoked ranges. Streaming use-case: TriplePool walks each region of
 	// its 3*LB aShare batch and feeds a chunk per region.
-	void check2_chunk(int start, int n,
-			BlockVec MAC[nP + 1], BlockVec KEY[nP + 1]) {
-		// w^me partial: bw += Σ_{k in chunk} coeff[k] · bit0(MAC[any_peer][k]).
-		// Branchless tab[bit] mirrors the original loop; bit0(MAC) is the
-		// same across peers post-step-9, so we only need one peer's MAC.
-		int any_peer = (party == 1) ? 2 : 1;
+	void check2_chunk(int start, int n, BlockVec &MAC, BlockVec &KEY) {
+		// w^me partial: bw += Σ_{k in chunk} coeff[k] · bit0(MAC[k]).
+		// Branchless tab[bit] mirrors the original loop.
 		block tab[2] = {zero_block, zero_block};
 		for (int k = start; k < start + n; ++k) {
 			tab[1] = check2_coeff[k];
-			check2_bw = check2_bw ^ tab[LSB(MAC[any_peer][k])];
+			check2_bw = check2_bw ^ tab[LSB(MAC[k])];
 		}
 		// Mw/Kw partial: vector_inn_prdt_sum_red writes Σ coeff·v into a
 		// fresh block; XOR into running accumulator.
 		block partial;
-		{ const int i = 3 - party;
-			vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
-					MAC[i].data() + start, n);
-			check2_Mw = check2_Mw ^ partial;
-			vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
-					KEY[i].data() + start, n);
-			check2_Kw = check2_Kw ^ partial;
-		}
+		vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
+				MAC.data() + start, n);
+		check2_Mw = check2_Mw ^ partial;
+		vector_inn_prdt_sum_red(&partial, check2_coeff.data() + start,
+				KEY.data() + start, n);
+		check2_Kw = check2_Kw ^ partial;
 	}
 
 	// Close the check2 session: broadcast bw via FBC, exchange Mw with each
@@ -312,17 +303,13 @@ class AuthSharePool { public:
 	// large draw to many small ones — the per-call fixed cost amortizes.
 	// No persistent pool: scratch is stack-local to the call.
 	void draw(int n, AShareBundleVec<nP> &out_bundle) {
-		BlockVec tmac[nP + 1], tkey[nP + 1];
+		BlockVec tmac, tkey;
 		compute(tmac, tkey, n);
 		out_bundle.resize(n);
 		for (int i = 0; i < n; ++i) {
 			AShareBundle<nP> &wb = out_bundle[i];
-			for (int j = 1, k = 0; j <= nP; ++j) {
-				if (j == party) continue;
-				wb.mac(k) = tmac[j][i];
-				wb.key(k) = tkey[j][i];
-				++k;
-			}
+			wb.mac(0) = tmac[i];  // single peer slot
+			wb.key(0) = tkey[i];
 		}
 	}
 };

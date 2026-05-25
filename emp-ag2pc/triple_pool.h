@@ -123,13 +123,13 @@ public:
   // correlation (aMAC/aKEY under Δ) as the correlation-robust hash input.
   // Produces UNAUTHENTICATED product bit-shares z with ⊕_p z^p = (⊕_p a^p) ∧
   // (⊕_p b^p). One communication round (each party ships an s vector per peer).
-  //   a^me = bit0(aMAC[any-peer][k]). For peer j:
-  //     aMAC[j][k] = M_j[a^me] = K_j[a^me] ⊕ a^me·Δ_j   (me = OT receiver to j)
-  //     aKEY[j][k] = K_me[a^j]                            (me = OT sender to j)
+  //   a^me = bit0(aMAC[k]). For peer j:
+  //     aMAC[k] = M_j[a^me] = K_j[a^me] ⊕ a^me·Δ_j   (me = OT receiver to j)
+  //     aKEY[k] = K_me[a^j]                            (me = OT sender to j)
   //   send-role (a^j·b^me): s = H(K_me[a^j]) ⊕ H(K_me[a^j]⊕Δ_me) ⊕ b^me; keep v0=H(K_me[a^j])
   //   recv-role (a^me·b^j): n = H(M_j[a^me]) ⊕ a^me·s_recv = H(K_j[a^me]) ⊕ a^me·b^j
   //   z^me = a^me·b^me ⊕ ⊕_{j≠me} ( v0_send ⊕ n_recv )   (the ⊕H terms cancel in Σ_p)
-  void multiply_unauth(BlockVec aMAC[nP + 1], BlockVec aKEY[nP + 1],
+  void multiply_unauth(BlockVec &aMAC, BlockVec &aKEY,
                        const std::vector<uint8_t> &b, int len,
                        std::vector<uint8_t> &z) {
     PRP prp;  // fixed public key → same correlation-robust H on all parties
@@ -142,10 +142,10 @@ public:
     z.assign(len, 0);
     const int peer = 3 - party;
     std::vector<uint8_t> s_send(len), s_recv(len);
-    for (int k = 0; k < len; ++k) z[k] = (uint8_t)(LSB(aMAC[ap][k]) & b[k]);
+    for (int k = 0; k < len; ++k) z[k] = (uint8_t)(LSB(aMAC[k]) & b[k]);
     for (int k = 0; k < len; ++k) {
-      uint8_t v0 = H(aKEY[peer][k]);
-      s_send[k] = (uint8_t)(v0 ^ H(aKEY[peer][k] ^ Delta) ^ b[k]);
+      uint8_t v0 = H(aKEY[k]);
+      s_send[k] = (uint8_t)(v0 ^ H(aKEY[k] ^ Delta) ^ b[k]);
       z[k] ^= v0;
     }
     std::vector<std::future<void>> res;
@@ -158,20 +158,20 @@ public:
     }));
     joinNclean(res);
     for (int k = 0; k < len; ++k) {
-      uint8_t ame = (uint8_t)LSB(aMAC[ap][k]);
-      z[k] ^= (uint8_t)(H(aMAC[peer][k]) ^ (ame & s_recv[k]));
+      uint8_t ame = (uint8_t)LSB(aMAC[k]);
+      z[k] ^= (uint8_t)(H(aMAC[k]) ^ (ame & s_recv[k]));
     }
   }
 
   // Self-test: gen random authenticated a, b; multiply; open a,b,z to P1 and
   // check ⊕z == (⊕a)∧(⊕b). Prints GOOD/BAD at party 1.
   void cutchoose_mult_selftest(int len) {
-    BlockVec aMAC[nP + 1], aKEY[nP + 1], bMAC[nP + 1], bKEY[nP + 1];
+    BlockVec aMAC, aKEY, bMAC, bKEY;
     abit.process_phase1(aMAC, aKEY, len);
     abit.process_phase1(bMAC, bKEY, len);
     int ap = (party == 1) ? 2 : 1;
     std::vector<uint8_t> a(len), b(len), z;
-    for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[ap][k]); b[k] = (uint8_t)LSB(bMAC[ap][k]); }
+    for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[k]); b[k] = (uint8_t)LSB(bMAC[k]); }
     multiply_unauth(aMAC, aKEY, b, len, z);
     if (party != 1) {
       io_send(io1, io2, party, 1, a.data(), len); io_send(io1, io2, party, 1, b.data(), len);
@@ -196,16 +196,16 @@ public:
   // Lean authentication (no doubling): c = r ⊕ d with d = (a∧b)⊕r opened public,
   // reusing the half-gate's r→c flip (d here comes from the OT multiplication).
   // Honest-correct; a malicious wrong product is caught by Stage 3's sacrifice.
-  void make_leaky_triples_cutchoose(BlockVec tMAC[nP + 1], BlockVec tKEY[nP + 1],
+  void make_leaky_triples_cutchoose(BlockVec &tMAC, BlockVec &tKEY,
                                     int LB) {
     int ap = (party == 1) ? 2 : 1;
     std::vector<uint8_t> b(LB), z;
-    for (int k = 0; k < LB; ++k) b[k] = (uint8_t)LSB(tMAC[ap][LB + k]);
+    for (int k = 0; k < LB; ++k) b[k] = (uint8_t)LSB(tMAC[LB + k]);
     multiply_unauth(tMAC, tKEY, b, LB, z);  // a-region at offset 0; ⊕z = a∧b
     // d^me = z^me ⊕ r^me; open d = ⊕_p d^p (all-to-all XOR).
     std::vector<uint8_t> dme(LB);
     for (int k = 0; k < LB; ++k)
-      dme[k] = (uint8_t)(z[k] ^ LSB(tMAC[ap][2 * LB + k]));
+      dme[k] = (uint8_t)(z[k] ^ LSB(tMAC[2 * LB + k]));
     std::vector<uint8_t> dr(LB);
     const int peer = 3 - party;
     std::vector<std::future<void>> res;
@@ -225,9 +225,9 @@ public:
     for (int k = 0; k < LB; ++k) {
       if (!d[k]) continue;
       if (party == 1) {
-        tMAC[2][2 * LB + k] = tMAC[2][2 * LB + k] ^ bit0_mask;
+        tMAC[2 * LB + k] = tMAC[2 * LB + k] ^ bit0_mask;
       } else {
-        tKEY[1][2 * LB + k] = tKEY[1][2 * LB + k] ^ dxor;
+        tKEY[2 * LB + k] = tKEY[2 * LB + k] ^ dxor;
       }
     }
   }
@@ -238,7 +238,7 @@ public:
   // (abort on a bad triple), then COMPACT the LB row-0 heads into a=[0,LB)
   // b=[LB,2LB) c=[2LB,3LB) so the existing Π_Prep combine consumes them. tr is
   // rebuilt over [0,3LB) for the bucketing's b-region reads.
-  void cutchoose_leaky(BlockVec tMAC[nP + 1], BlockVec tKEY[nP + 1],
+  void cutchoose_leaky(BlockVec &tMAC, BlockVec &tKEY,
                        std::vector<unsigned char> &tr, int LB) {
     const int T = cutchoose_T, N = T * LB;
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
@@ -247,7 +247,7 @@ public:
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
-    auto bit = [&](int region, int g) { return (uint8_t)LSB(tMAC[ap][region * N + g]); };
+    auto bit = [&](int region, int g) { return (uint8_t)LSB(tMAC[region * N + g]); };
     int P = LB * (T - 1);
     std::vector<uint8_t> rho(P), sig(P);
     for (int i = 0; i < LB; ++i)
@@ -269,31 +269,31 @@ public:
       if (Vpub[e]) error("cut-and-choose sacrifice: incorrect AND triple");
     // Compact row-0 heads: a already at [0,LB); move b,c heads down.
     { const int j = 3 - party;
-      memcpy(&tMAC[j][LB], &tMAC[j][N], LB * sizeof(block));
-      memcpy(&tMAC[j][2 * LB], &tMAC[j][2 * N], LB * sizeof(block));
-      memcpy(&tKEY[j][LB], &tKEY[j][N], LB * sizeof(block));
-      memcpy(&tKEY[j][2 * LB], &tKEY[j][2 * N], LB * sizeof(block));
+      memcpy(&tMAC[LB], &tMAC[N], LB * sizeof(block));
+      memcpy(&tMAC[2 * LB], &tMAC[2 * N], LB * sizeof(block));
+      memcpy(&tKEY[LB], &tKEY[N], LB * sizeof(block));
+      memcpy(&tKEY[2 * LB], &tKEY[2 * N], LB * sizeof(block));
     }
     tr.resize(3 * LB);
-    for (int k = 0; k < 3 * LB; ++k) tr[k] = (uint8_t)LSB(tMAC[ap][k]);
+    for (int k = 0; k < 3 * LB; ++k) tr[k] = (uint8_t)LSB(tMAC[k]);
   }
 
   // Self-test: gen 3·LB aShares (a,b,r); build the leaky triple; verify the
   // c-region MAC is valid (check_MAC aborts on tamper) and ⊕c == (⊕a)∧(⊕b).
   void cutchoose_triple_selftest(int LB) {
-    BlockVec tMAC[nP + 1], tKEY[nP + 1];
+    BlockVec tMAC, tKEY;
     abit.process_phase1(tMAC, tKEY, 3 * LB);
     int ap = (party == 1) ? 2 : 1;
     std::vector<uint8_t> a(LB), b(LB);
-    for (int k = 0; k < LB; ++k) { a[k] = (uint8_t)LSB(tMAC[ap][k]); b[k] = (uint8_t)LSB(tMAC[ap][LB + k]); }
+    for (int k = 0; k < LB; ++k) { a[k] = (uint8_t)LSB(tMAC[k]); b[k] = (uint8_t)LSB(tMAC[LB + k]); }
     make_leaky_triples_cutchoose(tMAC, tKEY, LB);
     std::vector<uint8_t> c(LB);
-    for (int k = 0; k < LB; ++k) c[k] = (uint8_t)LSB(tMAC[ap][2 * LB + k]);
+    for (int k = 0; k < LB; ++k) c[k] = (uint8_t)LSB(tMAC[2 * LB + k]);
     // Authentication check on the c-region (aborts via error() on bad MAC).
-    BlockVec cMAC[nP + 1], cKEY[nP + 1];
+    BlockVec cMAC, cKEY;
     { const int j = 3 - party;
-      cMAC[j].assign(tMAC[j].begin() + 2 * LB, tMAC[j].begin() + 3 * LB);
-      cKEY[j].assign(tKEY[j].begin() + 2 * LB, tKEY[j].begin() + 3 * LB);
+      cMAC.assign(tMAC.begin() + 2 * LB, tMAC.begin() + 3 * LB);
+      cKEY.assign(tKEY.begin() + 2 * LB, tKEY.begin() + 3 * LB);
     }
     check_MAC<nP>(io1, io2, cMAC, cKEY, Delta, LB, party);
     if (party != 1) {
@@ -343,12 +343,12 @@ public:
   //   and Phase-I cut-and-choose are the remaining hardening (see plan ⚠).
   void cutchoose_sacrifice_selftest(int LB, int T, int tamper = -1) {
     int N = T * LB;
-    BlockVec tMAC[nP + 1], tKEY[nP + 1];
+    BlockVec tMAC, tKEY;
     abit.process_phase1(tMAC, tKEY, 3 * N);
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // a=[0,N) b=[N,2N) c=[2N,3N)
     int ap = (party == 1) ? 2 : 1;
     if (tamper >= 0 && party == 1)  // flip ⊕c by flipping bit0 of c-MAC on P1
-      tMAC[2][2 * N + tamper] = tMAC[2][2 * N + tamper] ^ bit0_mask;
+      tMAC[2 * N + tamper] = tMAC[2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
     block S = sampleRandom<nP>(io1, io2, &prg, pool, party);
@@ -356,7 +356,7 @@ public:
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
 
-    auto bit = [&](int region, int g) { return (uint8_t)LSB(tMAC[ap][region * N + g]); };
+    auto bit = [&](int region, int g) { return (uint8_t)LSB(tMAC[region * N + g]); };
     int P = LB * (T - 1);  // number of sacrifice pairs
     std::vector<uint8_t> rho(P), sig(P);
     for (int i = 0; i < LB; ++i)
@@ -385,7 +385,7 @@ public:
              LB, T, tamper, bad == 0 ? "ALL PASS" : "CHEAT DETECTED", bad, P);
   }
 
-  // The output share-bits are implicit: bit0(MAC[any non-self peer][k])
+  // The output share-bits are implicit: bit0(MAC[k])
   // gives the k-th share-bit for slot k/length (a / b / c at offsets
   // 0 / length / 2*length). bit0(KEY[*]) = 0 throughout.
   // Stage 4d: optional out_aos. When non-null, bucketing also writes its
@@ -393,7 +393,7 @@ public:
   // (one TripleBundle per output index), eliminating the standalone
   // transpose pass at refill. SoA MAC/KEY writes are still produced for
   // the debug check_MAC / check_correctness path.
-  void compute(block *MAC[nP + 1], block *KEY[nP + 1], int length,
+  void compute(block *MAC, block *KEY, int length,
                TripleBundle<nP> *out_aos = nullptr) {
     int bucket_size = get_bucket_size(length);
     int LB = length * bucket_size;
@@ -404,7 +404,7 @@ public:
     // over-reserve MAC/KEY by csp to avoid the realloc when abit grows.
     int abit_len = leaky_abit_len(LB);
 
-    BlockVec tMAC[nP + 1], tKEY[nP + 1];
+    BlockVec tMAC, tKEY;
     BlockVec tKEYphi[nP + 1], tMACphi[nP + 1];
     BlockVec phi(LB);
     vector<unsigned char> s[nP + 1];
@@ -416,8 +416,8 @@ public:
     // tMACphi[party] is never written or read (sender writes tKEYphi[peer],
     // receiver writes tMACphi[peer]), so we skip its allocation.
     for (int i = 1; i <= nP; ++i) {
-      tMAC[i].reserve(abit_len + abit.csp);
-      tKEY[i].reserve(abit_len + abit.csp);
+      tMAC.reserve(abit_len + abit.csp);
+      tKEY.reserve(abit_len + abit.csp);
       tKEYphi[i].resize(LB);
       if (i != party) tMACphi[i].resize(LB);
     }
@@ -441,7 +441,7 @@ public:
       int any_peer = (party == 1) ? 2 : 1;
       tr.resize(abit_len);
       for (int k = 0; k < abit_len; ++k)
-        tr[k] = LSB(tMAC[any_peer][k]);
+        tr[k] = LSB(tMAC[k]);
     }
 
     // aShare consistency check (check2), run as one shared pass over the
@@ -485,8 +485,8 @@ public:
         for (int k = st; k < ed; ++k) {
           phi[k] ^= (select_mask[tr[LB + k]] & Delta);
           { const int j = 3 - party;
-            phi[k] ^= tKEY[j][LB + k];
-            phi[k] ^= tMAC[j][LB + k];
+            phi[k] ^= tKEY[LB + k];
+            phi[k] ^= tMAC[LB + k];
           }
         }
       }));
@@ -521,7 +521,7 @@ public:
           for (int k0 = st; k0 < ed; k0 += 8) {
             int batch = std::min(8, ed - k0);
             for (int j = 0; j < 8; ++j) {
-              block key = (j < batch) ? tKEY[peer][k0 + j] : zero_block;
+              block key = (j < batch) ? tKEY[k0 + j] : zero_block;
               pad[2 * j]     = key;
               pad[2 * j + 1] = key ^ Delta;
             }
@@ -546,7 +546,7 @@ public:
           for (int k0 = st; k0 < ed; k0 += 8) {
             int batch = std::min(8, ed - k0);
             for (int j = 0; j < 8; ++j)
-              pad[j] = (j < batch) ? tMAC[peer][k0 + j] : zero_block;
+              pad[j] = (j < batch) ? tMAC[k0 + j] : zero_block;
             mitc.hash<8, 1>(pad);
             for (int j = 0; j < batch; ++j) {
               block w = wire[k0 + j - st] & select_mask[tr[k0 + j]];
@@ -575,8 +575,8 @@ public:
           { const int j = 3 - party;
             tKEYphi[party][k] = tKEYphi[party][k] ^ tKEYphi[j][k];
             tKEYphi[party][k] = tKEYphi[party][k] ^ tMACphi[j][k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tKEY[j][2 * LB + k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tMAC[j][2 * LB + k];
+            tKEYphi[party][k] = tKEYphi[party][k] ^ tKEY[2 * LB + k];
+            tKEYphi[party][k] = tKEYphi[party][k] ^ tMAC[2 * LB + k];
           }
           tKEYphi[party][k] = tKEYphi[party][k] ^ (phi[k] & select_mask[tr[k]]);
           tKEYphi[party][k] = tKEYphi[party][k] ^ (Delta  & select_mask[tr[2 * LB + k]]);
@@ -611,7 +611,7 @@ public:
     //
     // Bit-0 pinned variant (matches AuthSharePool fix): peer j uses
     // (Δ_j ⊕ e_0) so bit 0 of tKEY[1] stays at 0; P1 instead flips bit 0
-    // of tMAC[peer][2*LB + k] by d so bit0(tMAC) tracks c^1 = r^1 ⊕ d
+    // of tMAC[2*LB + k] by d so bit0(tMAC) tracks c^1 = r^1 ⊕ d
     // across all peers. tr[2*LB + k] is mirrored to keep the legacy byte
     // vector in sync (Step E removes it).
     {
@@ -623,9 +623,9 @@ public:
         if (party == 1) {
           tr[2 * LB + k] = (s[0][k] != tr[2 * LB + k]);
           if (s[0][k])
-            tMAC[2][2 * LB + k] = tMAC[2][2 * LB + k] ^ bit0_mask;
+            tMAC[2 * LB + k] = tMAC[2 * LB + k] ^ bit0_mask;
         } else {
-          tKEY[1][2 * LB + k] = tKEY[1][2 * LB + k] ^ (dxor & mask_s);
+          tKEY[2 * LB + k] = tKEY[2 * LB + k] ^ (dxor & mask_s);
         }
         T[k] = T[k] ^ (Delta & mask_s);
       }
@@ -716,24 +716,24 @@ public:
       int st = width3 * ti, ed = std::min(length, width3 * (ti + 1));
       res.push_back(pool->enqueue([this, bucket_size, length, LB, &d, MAC, KEY, &tMAC, &tKEY, &rk, &tr, st, ed, out_aos]() {
         // Row 0 (no shift): bucket i's representative is leaky triple i.
-        // Slot-major layout: slot s of dst at MAC[j][s*length + i], slot s
-        // of src at tMAC[j][s*LB + i]. When out_aos is non-null, also
+        // Slot-major layout: slot s of dst at MAC[s*length + i], slot s
+        // of src at tMAC. When out_aos is non-null, also
         // initialize the AoS bundle for each i (Stage 4d: fuses the
         // SoA→AoS transpose into bucketing's existing per-i write).
         { const int j = 3 - party;
           for (int s = 0; s < 3; ++s) {
-            memcpy(MAC[j] + s * length + st, tMAC[j].data() + s * LB + st, (ed - st) * sizeof(block));
-            memcpy(KEY[j] + s * length + st, tKEY[j].data() + s * LB + st, (ed - st) * sizeof(block));
+            memcpy(MAC + s * length + st, tMAC.data() + s * LB + st, (ed - st) * sizeof(block));
+            memcpy(KEY + s * length + st, tKEY.data() + s * LB + st, (ed - st) * sizeof(block));
           }
           if (out_aos) {
             int slot = peer_slot(party, j);
             for (int i = st; i < ed; ++i) {
-              out_aos[i].b[0].mac(slot) = tMAC[j][i];
-              out_aos[i].b[0].key(slot) = tKEY[j][i];
-              out_aos[i].b[1].mac(slot) = tMAC[j][LB + i];
-              out_aos[i].b[1].key(slot) = tKEY[j][LB + i];
-              out_aos[i].b[2].mac(slot) = tMAC[j][2 * LB + i];
-              out_aos[i].b[2].key(slot) = tKEY[j][2 * LB + i];
+              out_aos[i].b[0].mac(slot) = tMAC[i];
+              out_aos[i].b[0].key(slot) = tKEY[i];
+              out_aos[i].b[1].mac(slot) = tMAC[LB + i];
+              out_aos[i].b[1].key(slot) = tKEY[LB + i];
+              out_aos[i].b[2].mac(slot) = tMAC[2 * LB + i];
+              out_aos[i].b[2].key(slot) = tKEY[2 * LB + i];
             }
           }
         }
@@ -752,28 +752,28 @@ public:
             int slot = out_aos ? peer_slot(party, j) : 0;
             for (int i = st; i < cut; ++i) {
               int src = base + i + shift;
-              MAC[j][i]              = MAC[j][i]              ^ tMAC[j][src];
-              MAC[j][2 * length + i] = MAC[j][2 * length + i] ^ tMAC[j][2 * LB + src];
-              KEY[j][i]              = KEY[j][i]              ^ tKEY[j][src];
-              KEY[j][2 * length + i] = KEY[j][2 * length + i] ^ tKEY[j][2 * LB + src];
+              MAC[i]              = MAC[i]              ^ tMAC[src];
+              MAC[2 * length + i] = MAC[2 * length + i] ^ tMAC[2 * LB + src];
+              KEY[i]              = KEY[i]              ^ tKEY[src];
+              KEY[2 * length + i] = KEY[2 * length + i] ^ tKEY[2 * LB + src];
               if (out_aos) {
-                out_aos[i].b[0].mac(slot) = out_aos[i].b[0].mac(slot) ^ tMAC[j][src];
-                out_aos[i].b[0].key(slot) = out_aos[i].b[0].key(slot) ^ tKEY[j][src];
-                out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ tMAC[j][2 * LB + src];
-                out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ tKEY[j][2 * LB + src];
+                out_aos[i].b[0].mac(slot) = out_aos[i].b[0].mac(slot) ^ tMAC[src];
+                out_aos[i].b[0].key(slot) = out_aos[i].b[0].key(slot) ^ tKEY[src];
+                out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ tMAC[2 * LB + src];
+                out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ tKEY[2 * LB + src];
               }
             }
             for (int i = cut; i < ed; ++i) {
               int src = base + i + shift - length;
-              MAC[j][i]              = MAC[j][i]              ^ tMAC[j][src];
-              MAC[j][2 * length + i] = MAC[j][2 * length + i] ^ tMAC[j][2 * LB + src];
-              KEY[j][i]              = KEY[j][i]              ^ tKEY[j][src];
-              KEY[j][2 * length + i] = KEY[j][2 * length + i] ^ tKEY[j][2 * LB + src];
+              MAC[i]              = MAC[i]              ^ tMAC[src];
+              MAC[2 * length + i] = MAC[2 * length + i] ^ tMAC[2 * LB + src];
+              KEY[i]              = KEY[i]              ^ tKEY[src];
+              KEY[2 * length + i] = KEY[2 * length + i] ^ tKEY[2 * LB + src];
               if (out_aos) {
-                out_aos[i].b[0].mac(slot) = out_aos[i].b[0].mac(slot) ^ tMAC[j][src];
-                out_aos[i].b[0].key(slot) = out_aos[i].b[0].key(slot) ^ tKEY[j][src];
-                out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ tMAC[j][2 * LB + src];
-                out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ tKEY[j][2 * LB + src];
+                out_aos[i].b[0].mac(slot) = out_aos[i].b[0].mac(slot) ^ tMAC[src];
+                out_aos[i].b[0].key(slot) = out_aos[i].b[0].key(slot) ^ tKEY[src];
+                out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ tMAC[2 * LB + src];
+                out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ tKEY[2 * LB + src];
               }
             }
           }
@@ -815,14 +815,14 @@ public:
         for (int k = 1; k < bucket_size; ++k) {
           int src = k * length + (i + rk[k]) % length;
           block mask = select_mask[d[1][(bucket_size - 1) * i + k - 1]];
-          MAC[j][2 * length + i] = MAC[j][2 * length + i] ^ (tMAC[j][src] & mask);
-          KEY[j][2 * length + i] = KEY[j][2 * length + i] ^ (tKEY[j][src] & mask);
+          MAC[2 * length + i] = MAC[2 * length + i] ^ (tMAC[src] & mask);
+          KEY[2 * length + i] = KEY[2 * length + i] ^ (tKEY[src] & mask);
           if (out_aos) {
             // Mirror the SoA c-slot XOR into AoS slot 2. The masked value
             // is the b-region row k contribution to c (Figure 16's r⊕d
             // in-place flip).
-            out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ (tMAC[j][src] & mask);
-            out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ (tKEY[j][src] & mask);
+            out_aos[i].b[2].mac(slot) = out_aos[i].b[2].mac(slot) ^ (tMAC[src] & mask);
+            out_aos[i].b[2].key(slot) = out_aos[i].b[2].key(slot) ^ (tKEY[src] & mask);
           }
         }
       }
@@ -834,14 +834,8 @@ public:
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] check2", party);
 
-    BlockVec MAC_dbg[nP + 1];
-    { const int i = 3 - party;
-      MAC_dbg[i].assign(MAC[i], MAC[i] + 3 * length);
-    }
-    BlockVec KEY_dbg[nP + 1];
-    { const int i = 3 - party;
-      KEY_dbg[i].assign(KEY[i], KEY[i] + 3 * length);
-    }
+    BlockVec MAC_dbg(MAC, MAC + 3 * length);
+    BlockVec KEY_dbg(KEY, KEY + 3 * length);
     check_MAC<nP>(io1, io2, MAC_dbg, KEY_dbg, Delta, length * 3, party);
     check_correctness<nP>(io1, io2, MAC_dbg, length, party);
 #endif
@@ -850,19 +844,12 @@ public:
   // Vector overload: resize output buffers and dispatch to the pointer-array
   // implementation. MAC/KEY peer-slots are sized length*3 (slot-major a/b/c).
   // MAC[party]/KEY[party] are unused; share-bits are recoverable as
-  // bit0(MAC[any non-self peer][k]). out_aos forwards as-is.
-  void compute(BlockVec MAC[nP + 1], BlockVec KEY[nP + 1], int length,
+  // bit0(MAC[k]). out_aos forwards as-is.
+  void compute(BlockVec &MAC, BlockVec &KEY, int length,
                TripleBundle<nP> *out_aos = nullptr) {
-    { const int i = 3 - party;
-      MAC[i].resize(length * 3);
-      KEY[i].resize(length * 3);
-    }
-    block *MAC_p[nP + 1], *KEY_p[nP + 1];
-    { const int i = 3 - party;
-      MAC_p[i] = MAC[i].data();
-      KEY_p[i] = KEY[i].data();
-    }
-    compute(MAC_p, KEY_p, length, out_aos);
+    MAC.resize(length * 3);
+    KEY.resize(length * 3);
+    compute(MAC.data(), KEY.data(), length, out_aos);
   }
 
   // ==== Pool API (Phase C) ====
@@ -907,7 +894,7 @@ private:
     }
     size_t base = pool_triples.size();
     pool_triples.resize(base + batch);
-    BlockVec tmac[nP + 1], tkey[nP + 1];
+    BlockVec tmac, tkey;
     compute(tmac, tkey, (int)batch, pool_triples.data() + base);
   }
 };

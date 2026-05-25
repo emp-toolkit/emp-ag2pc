@@ -16,12 +16,8 @@ int main(int argc, char **argv) {
   TriplePool<nP> mp(io1, io2, &pool, party);
 
   int num_ands = 280000;
-  block *mac[nP + 1];
-  block *key[nP + 1];
-  for (int i = 1; i <= nP; ++i) {
-    key[i] = new block[num_ands * 3];
-    mac[i] = new block[num_ands * 3];
-  }
+  block *mac = new block[num_ands * 3];
+  block *key = new block[num_ands * 3];
 
   // Warm up.
   mp.compute(mac, key, num_ands);
