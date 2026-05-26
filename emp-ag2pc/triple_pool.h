@@ -121,20 +121,19 @@ public:
     int abit_len = leaky_abit_len(LB);
 
     BlockVec tMAC, tKEY;
-    // Half-gate scratch: tKEYphi[peer] is the sender-side output, tKEYphi[party]
-    // the s/t accumulator, tMACphi the receiver-side output (one peer, one
-    // buffer). s[party]/s[peer] are the two garbling-parity shares, s[0] = XOR.
-    BlockVec tKEYphi[3], tMACphi;
-    BlockVec phi(LB);
+    // Half-gate output: the eval thread writes S^me per leaky triple into Sout
+    // (folded in place to L^me for the F_eq check). The garbler thread is
+    // read-only over the aShares; C^me and the sender pad H(K) are recomputed
+    // on the eval thread, so the two threads share only read-only data (no
+    // lock). s[party]/s[peer] are the garbling-parity shares, s[0] = XOR.
+    BlockVec Sout;
     vector<unsigned char> s[3];
     vector<unsigned char> tr;
 
     tr.reserve(abit_len);
     tMAC.reserve(abit_len + abit.csp);
     tKEY.reserve(abit_len + abit.csp);
-    tMACphi.resize(LB);
-    for (int i = 1; i <= 2; ++i)
-      tKEYphi[i].resize(LB);
+    Sout.resize(LB);
     for (int i = 0; i <= 2; ++i) s[i].resize(LB);
 
 #ifdef EMP_DEBUG_PHASE
@@ -157,26 +156,18 @@ public:
     // a/b/c layout the bucketing reads (r -> c). The CutChoose sibling has the
     // same contract + its own leaky_abit_len.
     auto produce_leaky_ands_halfgate = [&]() {
-    // C^me = y^me·Δ_me ⊕ K[y^peer] ⊕ M[y^me] over the b-region; C^A ⊕ C^B =
-    // y·(Δ_A⊕Δ_B) from the MAC relation. The half-gate hash hides C on the
-    // wire, so phi = C directly (no extra mask).
-    int width = (LB + pool->size() - 1) / pool->size();
-    for (int wi = 0; wi < pool->size(); ++wi) {
-      int st = wi * width, ed = std::min((wi + 1) * width, LB);
-      res.push_back(pool->enqueue([this, st, ed, LB, &tKEY, &tMAC, &phi, &tr]() {
-        for (int k = st; k < ed; ++k)
-          phi[k] = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
-      }));
-    }
-    joinNclean(res);
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] C (phi)", party);
-#endif
+    // Two threads sharing only the read-only aShares. C^me = y·Δ ⊕ K[y] ⊕ M[y]
+    // (so C^A ⊕ C^B = y·(Δ_A⊕Δ_B)); the half-gate hash hides C, so phi = C
+    // directly. C^me and the sender pad H(K) are recomputed on the eval thread
+    // rather than shared with the garbler thread, which is what lets the two
+    // threads run with no per-element lock or cross-thread handoff.
 
-    // Half-gate φ-exchange via MITCCRH<8>: both sides key from the same public
-    // pair_seed so their AES keys advance in lockstep; the sender hashes
-    // (key, key⊕Δ) with hash<8,2>, the receiver hashes (mac) with hash<8,1>,
-    // giving pad = H(x) = AES(x)⊕x. Streamed in hg_chunk blocks.
+    // φ-exchange via MITCCRH<8>: both threads key from the same public pair_seed
+    // so their AES keys advance in lockstep. The garbler hashes (K, K⊕Δ) with
+    // hash<8,2> and ships G = H(K) ⊕ H(K⊕Δ) ⊕ C. The eval hashes (M, K) with
+    // hash<8,2> — H(M) and H(K) land under the same AES key as the garbler's
+    // H(K), so the eval reconstructs the sender pad H(K) without a handoff.
+    // pad = H(x) = AES(x)⊕x. Streamed in hg_chunk blocks.
     int hg_chunk = 1 << 16;
 #ifdef AG2PC_PROFILE
     int64_t _phi0 = io_count(send_io, recv_io);
@@ -184,7 +175,8 @@ public:
     { const int peer = 3 - party;
       block pair_seed = makeBlock((uint64_t)std::min(party, peer),
                                   (uint64_t)std::max(party, peer));
-      res.push_back(pool->enqueue([this, &tKEY, &tKEYphi, &phi, LB, peer, pair_seed, hg_chunk]() {
+      // Garbler thread: reads tKEY/tMAC/tr (read-only), writes only the wire.
+      res.push_back(pool->enqueue([this, &tKEY, &tMAC, &tr, LB, pair_seed, hg_chunk]() {
         MITCCRH<8> mitc;
         mitc.setS(pair_seed);
         block pad[16];
@@ -200,30 +192,42 @@ public:
             }
             mitc.hash<8, 2>(pad);
             for (int j = 0; j < batch; ++j) {
-              tKEYphi[peer][k0 + j] = pad[2 * j];
-              tmp[k0 + j - st]      = pad[2 * j] ^ pad[2 * j + 1] ^ phi[k0 + j];
+              int k = k0 + j;
+              block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
+              tmp[k - st] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
             }
           }
           send_io->send_data(tmp.data(), (ed - st) * sizeof(block));
           send_io->flush();
         }
       }));
-      res.push_back(pool->enqueue([this, &tMAC, &tMACphi, &tr, LB, peer, pair_seed, hg_chunk]() {
+      // Eval thread: recvs the peer G, recomputes H(M), H(K) and C, and writes
+      // S^me = H(K) ⊕ E ⊕ (K[r]⊕M[r]) ⊕ x·C ⊕ r·Δ, with E = H(M) ⊕ x·G. The
+      // (M, K) pair feeds one hash<8,2> so H(K) matches the garbler's pad.
+      res.push_back(pool->enqueue([this, &tKEY, &tMAC, &tr, &Sout, LB, pair_seed, hg_chunk]() {
         MITCCRH<8> mitc;
         mitc.setS(pair_seed);
-        block pad[8];
+        block pad[16];
         BlockVec wire(std::min(hg_chunk, LB));
         for (int ci = 0; ci < (LB + hg_chunk - 1) / hg_chunk; ++ci) {
           int st = hg_chunk * ci, ed = std::min(hg_chunk * (ci + 1), LB);
           recv_io->recv_data(wire.data(), (ed - st) * sizeof(block));
           for (int k0 = st; k0 < ed; k0 += 8) {
             int batch = std::min(8, ed - k0);
-            for (int j = 0; j < 8; ++j)
-              pad[j] = (j < batch) ? tMAC[k0 + j] : zero_block;
-            mitc.hash<8, 1>(pad);
+            for (int j = 0; j < 8; ++j) {
+              pad[2 * j]     = (j < batch) ? tMAC[k0 + j] : zero_block;  // -> H(M)
+              pad[2 * j + 1] = (j < batch) ? tKEY[k0 + j] : zero_block;  // -> H(K)
+            }
+            mitc.hash<8, 2>(pad);
             for (int j = 0; j < batch; ++j) {
-              block w = wire[k0 + j - st] & select_mask[tr[k0 + j]];
-              tMACphi[k0 + j] = pad[j] ^ w;
+              int k = k0 + j;
+              block HM = pad[2 * j], HK = pad[2 * j + 1];
+              block E = HM ^ (wire[k - st] & select_mask[tr[k]]);
+              block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
+              Sout[k] = HK ^ E
+                      ^ tKEY[2 * LB + k] ^ tMAC[2 * LB + k]
+                      ^ (C & select_mask[tr[k]])
+                      ^ (Delta & select_mask[tr[2 * LB + k]]);
             }
           }
         }
@@ -237,30 +241,10 @@ public:
     _phase("[triple] half-gate exchange", party);
 #endif
 
-    // Accumulate s^me into tKEYphi[party]: a·φ ⊕ (half-gate outputs for the
-    // peer) ⊕ (r-region K ⊕ M) ⊕ r·Δ.
-    for (int wi = 0; wi < pool->size(); ++wi) {
-      int st = wi * width, ed = std::min((wi + 1) * width, LB);
-      res.push_back(pool->enqueue([this, st, ed, LB, &tKEYphi, &tMACphi, &tKEY, &tMAC, &phi, &tr]() {
-        for (int k = st; k < ed; ++k) {
-          tKEYphi[party][k] = zero_block;
-          { const int j = 3 - party;
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tKEYphi[j][k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tMACphi[k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tKEY[2 * LB + k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tMAC[2 * LB + k];
-          }
-          tKEYphi[party][k] = tKEYphi[party][k] ^ (phi[k] & select_mask[tr[k]]);
-          tKEYphi[party][k] = tKEYphi[party][k] ^ (Delta  & select_mask[tr[2 * LB + k]]);
-        }
-      }));
-    }
-    joinNclean(res);
-
     // Open d^me = LSB1(s^me) to the peer (bit 1 carries the garbling parity
     // under the bit-0/bit-1 Δ convention); d = d^A ⊕ d^B.
     for (int k = 0; k < LB; ++k)
-      s[party][k] = LSB1(tKEYphi[party][k]);
+      s[party][k] = LSB1(Sout[k]);
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
         send_io->send_bool((const bool *)s[party].data(), LB);  // 1 bit/elt, packed
@@ -273,7 +257,7 @@ public:
     joinNclean(res);
 
     // steps 7 + (part of) 11: combine d = ⊕_i d^i; compute t^i = s^i ⊕ d·Δ_i
-    // (folded into T = tKEYphi[party]).  We also fold d into the r-share
+    // (folded into T = Sout).  We also fold d into the r-share
     // in-place so r becomes c = r ⊕ d (paper step 11): only P1 flips its
     // r-bit, and every P_(j≠1) flips K_j[c^1] = K_j[r^1] ⊕ d·Δ_j to
     // maintain MAC consistency on the new c^1 bit.
@@ -284,15 +268,14 @@ public:
     // across all peers. tr[2*LB + k] is mirrored to keep the legacy byte
     // vector in sync (Step E removes it).
     {
-      block *T = tKEYphi[party].data();
+      block *T = Sout.data();
       block dxor = Delta ^ bit0_mask;
       for (int k = 0; k < LB; ++k) {
         s[0][k] = (s[1][k] != s[2][k]);
         block mask_s = select_mask[s[0][k]];
         if (party == 1) {
           tr[2 * LB + k] = (s[0][k] != tr[2 * LB + k]);
-          if (s[0][k])
-            tMAC[2 * LB + k] = tMAC[2 * LB + k] ^ bit0_mask;
+          tMAC[2 * LB + k] = tMAC[2 * LB + k] ^ (bit0_mask & mask_s);
         } else {
           tKEY[2 * LB + k] = tKEY[2 * LB + k] ^ (dxor & mask_s);
         }
@@ -304,7 +287,7 @@ public:
 #endif
 
     // step 5 (F_eq): the leaky-AND consistency check. After the step-7 fold,
-    // tKEYphi[party][k] = S^me_k ⊕ d_k·Δ_me = L^me_k (eprint 2018/578, Fig. 5). On honest
+    // Sout[k] = S^me_k ⊕ d_k·Δ_me = L^me_k (eprint 2018/578, Fig. 5). On honest
     // execution L^A_k = L^B_k for every k, so a batched equality of D = H(L)
     // catches a cheating multiplication.
     //
@@ -318,7 +301,7 @@ public:
     // values stay digest-sized; D^A == D^B iff the L-vectors match. Only the
     // equality verdict leaks (the leaky-AND's allowed ≤1 bit).
     char Dme[Hash::DIGEST_SIZE], Dpeer[Hash::DIGEST_SIZE];
-    Hash::hash_once(Dme, tKEYphi[party].data(), (size_t)LB * sizeof(block));
+    Hash::hash_once(Dme, Sout.data(), (size_t)LB * sizeof(block));
     if (party == 1) {                                 // A
       block r; PRG().random_block(&r, 1);
       char com[Hash::DIGEST_SIZE];
