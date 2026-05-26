@@ -13,24 +13,22 @@ using namespace emp;
 inline uint64_t g_wrk_phi_bytes = 0;
 #endif
 
-// Π_LaAND followed by Π_Prep bucketing + amortized pool: AND-triple
-// generation via half-gate garbled-AND + phi-based triple check (P:LaAND),
-// then circular-shift bucketing to remove leakage (P:aAND). See triple.tex.
+// Leaky-AND (KRRW18, eprint 2018/578, Fig. 5) followed by Π_Prep bucketing +
+// amortized pool: per-triple half-gate garbled-AND with an F_eq consistency
+// check, then circular-shift bucketing to remove leakage (P:aAND). The
+// leaky-AND is batched over LB triples; see produce_leaky_ands_halfgate.
 //
-// Deviations from the paper:
+// Notes on the 2-party leaky-AND (vs the n-party WRK protocol):
 //
-// (1) FZero (P:LaAND step 3) is implemented via pairwise seed-and-expand
-//     under the ICM assumption on the AES-based PRG: each pair shares a
-//     λ-bit seed, both expand into LB+1 blocks via PRG, XOR into local
-//     (z^i, u^i). Each seed contributes to exactly two parties so
-//     Σ_p z^p_k = 0 and Σ_p u^p = 0. (Same construction as
-//     AuthSharePool::check1.)
+// (1) No FZero. The y-contribution C^me = y·Δ_me ⊕ K[y] ⊕ M[y] is computed
+//     locally; C^A ⊕ C^B = y·(Δ_A⊕Δ_B) holds from the MAC relation, and the
+//     half-gate hash already hides C on the wire, so the n-party shared-zero
+//     mask is unnecessary.
 //
-// (2) F_Com is collapsed to a single send for both d^i (steps 6→7) and
-//     α^i (steps 9→10).  No value derived from the committed bits is
-//     sent before the matching open, so equivocation is impossible —
-//     the commitment phase is redundant.  α^i is hash-committed first
-//     (one round) and then opened, since the α-check needs binding.
+// (2) The consistency check is KRRW's F_eq on L^me = S^me ⊕ d·Δ_me: hash the
+//     L-vector to one digest and run a rush-secure equality (commit H(D) then
+//     open D). This replaces the n-party FRand/universal-hash α-check (no coin,
+//     no inner product, no u-mask).
 //
 // (3) The B-1 sequential OpenToAll calls in P:aAND step 4 (one per
 //     non-first leaky triple in each bucket) are batched into a single
@@ -54,7 +52,6 @@ public:
   NetIO *send_io, *recv_io;   // my outgoing / incoming channel to the peer
   AuthSharePool abit;
   block Delta;
-  PRG prg;
 
   // ==== Pool storage (Phase C) ====
   // AoS-by-triple layout: pool_triples[t] holds three AShareBundles (slots
@@ -189,36 +186,22 @@ public:
     // the same contract + its own leaky_abit_len, and dispatch at the call.
     // ======================================================================
     auto produce_leaky_ands_halfgate = [&]() {
-    // step 3 (FZero): produce (z^i ∈ F_{2^λ}^LB, u^i ∈ F_{2^λ}) with
-    // Σ_p z^p_k = 0 (column-wise) and Σ_p u^p = 0. See fzero_xor in
-    // helper.h. We pack into a single LB+1-block buffer; step 4 then
-    // XORs the b·Δ ⊕ K ⊕ M terms into phi[0..LB) on top of z^i.
-    BlockVec z_u(LB + 1, zero_block);
-    fzero_xor(send_io, recv_io, &prg, pool, party, z_u.data(), LB + 1);
-    for (int k = 0; k < LB; ++k) phi[k] = z_u[k];
-    block u_zero = z_u[LB];
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] zero", party);
-#endif
-
-    // step 4: Φ^i_k = b^i·Δ_i ⊕ ⊕_{j≠i} (K_i[b^j] ⊕ M_j[b^i]) ⊕ z^i_k.
-    // z^i_k is already in phi[k] from step 3, so we XOR-in the rest.
+    // step 1 (KRRW Fig. 5): C^me_k = y^me·Δ_me ⊕ K_me[y^peer] ⊕ M_me[y^me]
+    // over the b-region. C^A_k ⊕ C^B_k = y_k·(Δ_A⊕Δ_B) holds straight from the
+    // MAC relation, so the n-party FZero mask z (Σ_p z^p = 0) is unnecessary at
+    // two parties -- phi IS C, and the half-gate hash already hides it on the
+    // wire. (This drops fzero_xor and the u-mask the old α-check needed.)
     int width = (LB + pool->size() - 1) / pool->size();
     for (int wi = 0; wi < pool->size(); ++wi) {
       int st = wi * width, ed = std::min((wi + 1) * width, LB);
       res.push_back(pool->enqueue([this, st, ed, LB, &tKEY, &tMAC, &phi, &tr]() {
-        for (int k = st; k < ed; ++k) {
-          phi[k] ^= (select_mask[tr[LB + k]] & Delta);
-          { const int j = 3 - party;
-            phi[k] ^= tKEY[LB + k];
-            phi[k] ^= tMAC[LB + k];
-          }
-        }
+        for (int k = st; k < ed; ++k)
+          phi[k] = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
       }));
     }
     joinNclean(res);
 #ifdef EMP_DEBUG_PHASE
-    _phase("[triple] phi compute", party);
+    _phase("[triple] C (phi)", party);
 #endif
 
     // step 5(a): half-gate phi exchange via MITCCRH.
@@ -359,58 +342,46 @@ public:
     _phase("[triple] combine s", party);
 #endif
 
-    // steps 8+9+10: FRand → H'; commit-open α^i = H'(t^i) ⊕ u^i; check
-    // Σ_i α^i = 0 in F_{2^λ}.  We reuse `phi` as scratch for the
-    // λ-coefficients (already sized LB).  No-reduction inner-product
-    // gives a 2-block α^i (univ. hash output before mod reduction); u^i
-    // is folded into the low half — Σ_p u^p = 0 keeps the column sum
-    // invariant after the cross-party XOR.
-    // Public coin: absorb the two channel digests in canonical (1->2, 2->1)
-    // order so both parties derive the same S regardless of local send/recv role.
-    block S = RO("WRK RO", zero_block)
-                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
-                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
-                  .squeeze_block();
-    PRG jprg(&S);
-    jprg.random_block(phi.data(), LB);
-    BlockVec ip[3];
-    for (int i = 0; i <= 2; ++i) ip[i].resize(2);
-    vector_inn_prdt_sum_no_red(ip[party].data(), phi.data(), tKEYphi[party].data(), LB);
-    ip[party][0] ^= u_zero;
-
-    char dgst_me[Hash::DIGEST_SIZE], dgst_peer[Hash::DIGEST_SIZE];
-    Hash::hash_once(dgst_me, ip[party].data(), sizeof(block) * 2);
-
-    { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &dgst_me, peer]() {
-        send_io->send_data(dgst_me, Hash::DIGEST_SIZE);
-        send_io->flush();
-      }));
-      res.push_back(pool->enqueue([this, &dgst_peer, peer]() {
-        recv_io->recv_data(dgst_peer, Hash::DIGEST_SIZE);
-      }));
+    // step 5 (F_eq): the leaky-AND consistency check. After the step-7 fold,
+    // tKEYphi[party][k] = S^me_k ⊕ d_k·Δ_me = L^me_k (KRRW Fig. 5). On honest
+    // execution L^A_k = L^B_k for every k, so a batched equality of D = H(L)
+    // catches a cheating multiplication.
+    //
+    // The check is an equality, so it is realized as the RO-model EQ protocol
+    // of eprint 2018/578: party A commits c = H(x‖r) with a fresh random nonce
+    // r, party B then sends its value y, and only then A opens (x, r); B
+    // verifies H(x‖r)==c and x==y. The asymmetric order makes it rush-safe (a
+    // symmetric "both commit, both open" lets a rushing party echo the peer's
+    // commitment and opening to pass with a bad triple), and the nonce keeps
+    // the commitment hiding. We run EQ on x := D = H(L-vector), so the revealed
+    // values stay digest-sized; D^A == D^B iff the L-vectors match. Only the
+    // equality verdict leaks (the leaky-AND's allowed ≤1 bit).
+    char Dme[Hash::DIGEST_SIZE], Dpeer[Hash::DIGEST_SIZE];
+    Hash::hash_once(Dme, tKEYphi[party].data(), (size_t)LB * sizeof(block));
+    if (party == 1) {                                 // A
+      block r; PRG().random_block(&r, 1);
+      char com[Hash::DIGEST_SIZE];
+      { Hash h; h.put(Dme, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(com); }
+      send_io->send_data(com, Hash::DIGEST_SIZE);     // 1. c = H(x‖r)
+      send_io->flush();
+      recv_io->recv_data(Dpeer, Hash::DIGEST_SIZE);   // 2. B sends y
+      send_io->send_data(Dme, Hash::DIGEST_SIZE);     // 3. A opens x, r
+      send_io->send_data(&r, sizeof(block));
+      send_io->flush();
+    } else {                                          // B
+      char com[Hash::DIGEST_SIZE], chk[Hash::DIGEST_SIZE];
+      block r;
+      recv_io->recv_data(com, Hash::DIGEST_SIZE);     // 1.
+      send_io->send_data(Dme, Hash::DIGEST_SIZE);     // 2. send y (before A opens)
+      send_io->flush();
+      recv_io->recv_data(Dpeer, Hash::DIGEST_SIZE);   // 3. recv x
+      recv_io->recv_data(&r, sizeof(block));          //    and r
+      { Hash h; h.put(Dpeer, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(chk); }
+      if (memcmp(chk, com, Hash::DIGEST_SIZE) != 0)
+        error("LaAND F_eq: commit-open mismatch");
     }
-    joinNclean(res);
-
-    vector<future<bool>> res2;
-    { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &ip, peer]() {
-        send_io->send_data(ip[party].data(), sizeof(block) * 2);
-        send_io->flush();
-      }));
-      res2.push_back(pool->enqueue([this, &ip, &dgst_peer, peer]() -> bool {
-        recv_io->recv_data(ip[peer].data(), sizeof(block) * 2);
-        char chk[Hash::DIGEST_SIZE];
-        Hash::hash_once(chk, ip[peer].data(), sizeof(block) * 2);
-        return memcmp(chk, dgst_peer, Hash::DIGEST_SIZE) != 0;
-      }));
-    }
-    joinNclean(res);
-    if (joinNcleanCheat(res2)) error("LaAND alpha: commit-open mismatch");
-
-    xorBlocks_arr(ip[1].data(), ip[1].data(), ip[2].data(), 2);
-    if (!cmpBlock(&ip[1][0], &zero_block, 1) || !cmpBlock(&ip[1][1], &zero_block, 1))
-      error("LaAND alpha: Sigma alpha != 0");
+    if (memcmp(Dme, Dpeer, Hash::DIGEST_SIZE) != 0)
+      error("LaAND F_eq: leaky-AND check failed");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] LAND check", party);
 #endif

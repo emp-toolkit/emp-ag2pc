@@ -86,36 +86,6 @@ inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 // (see share_bundle.h).
 inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1; }
 
-// Π_FZero: shared-zero block-vector via pairwise seed-and-expand under
-// the ICM assumption on the AES-based PRG. Each peer-pair shares a
-// λ-bit seed (the larger-indexed party samples and sends to the
-// smaller); both expand the seed via PRG into n blocks and XOR into
-// `out`. Each seed contributes to exactly two parties so Σ_p out^p[k]
-// = 0 for every k. Communication: λ bits for the single pair. Caller is
-// responsible for zero-init — the contributions are XORed in so this composes
-// with caller buffers that already have content (e.g. TriplePool loads z
-// directly into phi).
-void fzero_xor(NetIO *send_io, NetIO *recv_io, PRG *prg, ThreadPool *pool,
-               int party, block *out, int n) {
-  block seed_by_peer[3];
-  prg->random_block(&seed_by_peer[1], 2);
-
-  // Single pair: the larger-indexed party samples + sends the shared seed,
-  // the smaller receives it (only one direction happens per party).
-  const int peer = 3 - party;
-  if (peer < party) {
-    send_io->send_data(&seed_by_peer[peer], sizeof(block));
-    send_io->flush();
-  } else {
-    recv_io->recv_data(&seed_by_peer[peer], sizeof(block));
-  }
-
-  BlockVec contribution(n);
-  PRG expand(&seed_by_peer[peer]);
-  expand.random_block(contribution.data(), n);
-  xorBlocks_arr(out, out, contribution.data(), n);
-}
-
 void check_MAC(NetIO *send_io, NetIO *recv_io, block *MAC, block *KEY, bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
