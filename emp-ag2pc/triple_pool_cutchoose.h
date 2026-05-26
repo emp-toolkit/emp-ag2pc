@@ -41,11 +41,11 @@
     }
     std::vector<std::future<void>> res;
     res.push_back(pool->enqueue([this, &s_send, len, peer]() {
-      send_ch(peer)->send_bool((const bool *)s_send.data(), len);
-      send_ch(peer)->flush();
+      send_io->send_bool((const bool *)s_send.data(), len);
+      send_io->flush();
     }));
     res.push_back(pool->enqueue([this, &s_recv, len, peer]() {
-      recv_ch(peer)->recv_bool((bool *)s_recv.data(), len);
+      recv_io->recv_bool((bool *)s_recv.data(), len);
     }));
     joinNclean(res);
     for (int k = 0; k < len; ++k) {
@@ -65,15 +65,15 @@
     for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[k]); b[k] = (uint8_t)LSB(bMAC[k]); }
     multiply_unauth(aMAC, aKEY, b, len, z);
     if (party != 1) {
-      io_send(io1, io2, party, 1, a.data(), len); io_send(io1, io2, party, 1, b.data(), len);
-      io_send(io1, io2, party, 1, z.data(), len); io_flush(io1, io2, party, 1);
+      send_io->send_data(a.data(), len); send_io->send_data(b.data(), len);
+      send_io->send_data(z.data(), len); send_io->flush();
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), Z(z);
       { const int p = 2;
         std::vector<uint8_t> ta(len), tb(len), tz(len);
-        io_recv(io1, io2, party, p, ta.data(), len); io_recv(io1, io2, party, p, tb.data(), len);
-        io_recv(io1, io2, party, p, tz.data(), len);
+        recv_io->recv_data(ta.data(), len); recv_io->recv_data(tb.data(), len);
+        recv_io->recv_data(tz.data(), len);
         for (int k = 0; k < len; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; Z[k] ^= tz[k]; }
       }
       for (int k = 0; k < len; ++k) if (Z[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -101,11 +101,11 @@
     const int peer = 3 - party;
     std::vector<std::future<void>> res;
     res.push_back(pool->enqueue([this, &dme, LB, peer]() {
-      send_ch(peer)->send_bool((const bool *)dme.data(), LB);
-      send_ch(peer)->flush();
+      send_io->send_bool((const bool *)dme.data(), LB);
+      send_io->flush();
     }));
     res.push_back(pool->enqueue([this, &dr, LB, peer]() {
-      recv_ch(peer)->recv_bool((bool *)dr.data(), LB);
+      recv_io->recv_bool((bool *)dr.data(), LB);
     }));
     joinNclean(res);
     std::vector<uint8_t> d(dme);
@@ -134,7 +134,10 @@
     const int T = cutchoose_T, N = T * LB;
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
     int ap = (party == 1) ? 2 : 1;
-    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
+    block S = RO("WRK RO", zero_block)
+                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
+                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }
@@ -186,17 +189,17 @@
       cMAC.assign(tMAC.begin() + 2 * LB, tMAC.begin() + 3 * LB);
       cKEY.assign(tKEY.begin() + 2 * LB, tKEY.begin() + 3 * LB);
     }
-    check_MAC(io1, io2, cMAC, cKEY, Delta, LB, party);
+    check_MAC(send_io, recv_io, cMAC, cKEY, Delta, LB, party);
     if (party != 1) {
-      io_send(io1, io2, party, 1, a.data(), LB); io_send(io1, io2, party, 1, b.data(), LB);
-      io_send(io1, io2, party, 1, c.data(), LB); io_flush(io1, io2, party, 1);
+      send_io->send_data(a.data(), LB); send_io->send_data(b.data(), LB);
+      send_io->send_data(c.data(), LB); send_io->flush();
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), C(c);
       { const int p = 2;
         std::vector<uint8_t> ta(LB), tb(LB), tc(LB);
-        io_recv(io1, io2, party, p, ta.data(), LB); io_recv(io1, io2, party, p, tb.data(), LB);
-        io_recv(io1, io2, party, p, tc.data(), LB);
+        recv_io->recv_data(ta.data(), LB); recv_io->recv_data(tb.data(), LB);
+        recv_io->recv_data(tc.data(), LB);
         for (int k = 0; k < LB; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; C[k] ^= tc[k]; }
       }
       for (int k = 0; k < LB; ++k) if (C[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -211,11 +214,11 @@
     const int peer = 3 - party;
     std::vector<std::future<void>> res;
     res.push_back(pool->enqueue([this, &share, len, peer]() {
-      send_ch(peer)->send_bool((const bool *)share.data(), len);
-      send_ch(peer)->flush();
+      send_io->send_bool((const bool *)share.data(), len);
+      send_io->flush();
     }));
     res.push_back(pool->enqueue([this, &r, len, peer]() {
-      recv_ch(peer)->recv_bool((bool *)r.data(), len);
+      recv_io->recv_bool((bool *)r.data(), len);
     }));
     joinNclean(res);
     std::vector<uint8_t> pub(share);
@@ -242,7 +245,10 @@
       tMAC[2 * N + tamper] = tMAC[2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
-    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
+    block S = RO("WRK RO", zero_block)
+                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
+                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
       for (int r = 1; r < T; ++r) shift[r] = (int)(raw[r] % (uint32_t)LB); }

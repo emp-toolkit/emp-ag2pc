@@ -51,7 +51,7 @@ class TriplePool {
 public:
   ThreadPool *pool;
   int party;
-  NetIO *io1, *io2;
+  NetIO *send_io, *recv_io;   // my outgoing / incoming channel to the peer
   AuthSharePool abit;
   block Delta;
   PRG prg;
@@ -76,15 +76,9 @@ public:
   size_t min_refill = 3100;
 
   TriplePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party)
-      : pool(pool), party(party), io1(io1), io2(io2),
+      : pool(pool), party(party),
+        send_io(party == 1 ? io1 : io2), recv_io(party == 1 ? io2 : io1),
         abit(io1, io2, pool, party), Delta(abit.Delta) {}
-
-  // The duplex channel pair to the peer. io1 carries 1->2, io2 carries 2->1;
-  // send/recv pick by sign(idx - party). We reach them directly to send bit
-  // vectors via the channel's packed send_bool/recv_bool (8 bits/byte) rather
-  // than one byte per bit.
-  NetIO *send_ch(int dst) { return party < dst ? io1 : io2; }
-  NetIO *recv_ch(int src) { return src < party ? io1 : io2; }
 
   // Bucket size B vs. number of triples ℓ_2 — picked from the leak-rate bound
   // max(1/2^ssp + (2B+1)/ℓ^{B-1}, ...) (see triple.tex theorem for Π_aAND).
@@ -200,7 +194,7 @@ public:
     // helper.h. We pack into a single LB+1-block buffer; step 4 then
     // XORs the b·Δ ⊕ K ⊕ M terms into phi[0..LB) on top of z^i.
     BlockVec z_u(LB + 1, zero_block);
-    fzero_xor(io1, io2, &prg, pool, party, z_u.data(), LB + 1);
+    fzero_xor(send_io, recv_io, &prg, pool, party, z_u.data(), LB + 1);
     for (int k = 0; k < LB; ++k) phi[k] = z_u[k];
     block u_zero = z_u[LB];
 #ifdef EMP_DEBUG_PHASE
@@ -237,7 +231,7 @@ public:
     // buffer is allocated once and reused across chunks.
     int hg_chunk = 1 << 16;
 #ifdef WRK_PROFILE
-    int64_t _phi0 = io_count(io1, io2);
+    int64_t _phi0 = io_count(send_io, recv_io);
 #endif
     { const int peer = 3 - party;
       block pair_seed = makeBlock((uint64_t)std::min(party, peer),
@@ -262,8 +256,8 @@ public:
               tmp[k0 + j - st]      = pad[2 * j] ^ pad[2 * j + 1] ^ phi[k0 + j];
             }
           }
-          io_send(io1, io2, party, peer, tmp.data(), (ed - st) * sizeof(block));
-          io_flush(io1, io2, party, peer);
+          send_io->send_data(tmp.data(), (ed - st) * sizeof(block));
+          send_io->flush();
         }
       }));
       res.push_back(pool->enqueue([this, &tMAC, &tMACphi, &tr, LB, peer, pair_seed, hg_chunk]() {
@@ -273,7 +267,7 @@ public:
         BlockVec wire(std::min(hg_chunk, LB));
         for (int ci = 0; ci < (LB + hg_chunk - 1) / hg_chunk; ++ci) {
           int st = hg_chunk * ci, ed = std::min(hg_chunk * (ci + 1), LB);
-          io_recv(io1, io2, party, peer, wire.data(), (ed - st) * sizeof(block));
+          recv_io->recv_data(wire.data(), (ed - st) * sizeof(block));
           for (int k0 = st; k0 < ed; k0 += 8) {
             int batch = std::min(8, ed - k0);
             for (int j = 0; j < 8; ++j)
@@ -289,7 +283,7 @@ public:
     }
     joinNclean(res);
 #ifdef WRK_PROFILE
-    g_wrk_phi_bytes += (uint64_t)(io_count(io1, io2) - _phi0);
+    g_wrk_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _phi0);
 #endif
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] half-gate exchange", party);
@@ -325,11 +319,11 @@ public:
       s[party][k] = LSB1(tKEYphi[party][k]);
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        io_send(io1, io2, party, peer, s[party].data(), LB);
-        io_flush(io1, io2, party, peer);
+        send_io->send_data(s[party].data(), LB);
+        send_io->flush();
       }));
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        io_recv(io1, io2, party, peer, s[peer].data(), LB);
+        recv_io->recv_data(s[peer].data(), LB);
       }));
     }
     joinNclean(res);
@@ -371,7 +365,12 @@ public:
     // gives a 2-block α^i (univ. hash output before mod reduction); u^i
     // is folded into the low half — Σ_p u^p = 0 keeps the column sum
     // invariant after the cross-party XOR.
-    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
+    // Public coin: absorb the two channel digests in canonical (1->2, 2->1)
+    // order so both parties derive the same S regardless of local send/recv role.
+    block S = RO("WRK RO", zero_block)
+                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
+                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .squeeze_block();
     PRG jprg(&S);
     jprg.random_block(phi.data(), LB);
     BlockVec ip[3];
@@ -384,11 +383,11 @@ public:
 
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &dgst_me, peer]() {
-        io_send(io1, io2, party, peer, dgst_me, Hash::DIGEST_SIZE);
-        io_flush(io1, io2, party, peer);
+        send_io->send_data(dgst_me, Hash::DIGEST_SIZE);
+        send_io->flush();
       }));
       res.push_back(pool->enqueue([this, &dgst_peer, peer]() {
-        io_recv(io1, io2, party, peer, dgst_peer, Hash::DIGEST_SIZE);
+        recv_io->recv_data(dgst_peer, Hash::DIGEST_SIZE);
       }));
     }
     joinNclean(res);
@@ -396,11 +395,11 @@ public:
     vector<future<bool>> res2;
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &ip, peer]() {
-        io_send(io1, io2, party, peer, ip[party].data(), sizeof(block) * 2);
-        io_flush(io1, io2, party, peer);
+        send_io->send_data(ip[party].data(), sizeof(block) * 2);
+        send_io->flush();
       }));
       res2.push_back(pool->enqueue([this, &ip, &dgst_peer, peer]() -> bool {
-        io_recv(io1, io2, party, peer, ip[peer].data(), sizeof(block) * 2);
+        recv_io->recv_data(ip[peer].data(), sizeof(block) * 2);
         char chk[Hash::DIGEST_SIZE];
         Hash::hash_once(chk, ip[peer].data(), sizeof(block) * 2);
         return memcmp(chk, dgst_peer, Hash::DIGEST_SIZE) != 0;
@@ -427,7 +426,12 @@ public:
     // bucket i's k-th slot is leaky triple (k * length + (i + r_k) mod length),
     // which is sequential in i (with at most one wraparound), so each row is
     // streamed once per bucket range.
-    block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
+    // Public coin: absorb the two channel digests in canonical (1->2, 2->1)
+    // order so both parties derive the same S regardless of local send/recv role.
+    block S = RO("WRK RO", zero_block)
+                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
+                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .squeeze_block();
     vector<unsigned char> d[3];
     for (int i = 1; i <= 2; ++i)
       d[i].resize(length * (bucket_size - 1));
@@ -527,11 +531,11 @@ public:
 
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        io_send(io1, io2, party, peer, d[party].data(), (bucket_size - 1) * length);
-        io_flush(io1, io2, party, peer);
+        send_io->send_data(d[party].data(), (bucket_size - 1) * length);
+        send_io->flush();
       }));
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        io_recv(io1, io2, party, peer, d[peer].data(), (bucket_size - 1) * length);
+        recv_io->recv_data(d[peer].data(), (bucket_size - 1) * length);
       }));
     }
     joinNclean(res);
@@ -564,8 +568,8 @@ public:
 
     BlockVec MAC_dbg(MAC, MAC + 3 * length);
     BlockVec KEY_dbg(KEY, KEY + 3 * length);
-    check_MAC(io1, io2, MAC_dbg, KEY_dbg, Delta, length * 3, party);
-    check_correctness(io1, io2, MAC_dbg, length, party);
+    check_MAC(send_io, recv_io, MAC_dbg, KEY_dbg, Delta, length * 3, party);
+    check_correctness(send_io, recv_io, MAC_dbg, length, party);
 #endif
   }
 

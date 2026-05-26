@@ -24,27 +24,18 @@ using std::max;
 inline constexpr block bit0_mask = makeBlock(0, 1);
 inline constexpr block bit1_mask = makeBlock(0, 2);
 
-// Two-party transport: parties {1, 2} hold a duplex pair of NetIO channels to
-// the single peer. io1 carries the 1->2 direction, io2 the 2->1 direction
-// (so party 1 sends on io1 / recvs on io2, party 2 the mirror); the OT layer
-// uses both channels by index. These free routers replace the old NetIOMP
-// object -- callers pass io1/io2/party directly. The dst/src == party guard
-// is kept so the (formerly no-op) self-addressed calls stay no-ops.
-inline void io_send(NetIO *io1, NetIO *io2, int party, int dst,
-                    const void *data, size_t len) {
-  if (dst != 0 && dst != party) (party < dst ? io1 : io2)->send_data(data, len);
-}
-inline void io_recv(NetIO *io1, NetIO *io2, int party, int src,
-                    void *data, size_t len) {
-  if (src != 0 && src != party) (src < party ? io1 : io2)->recv_data(data, len);
-}
-inline void io_flush(NetIO *io1, NetIO *io2, int party, int idx) {
-  if (idx == 0) { io1->flush(); io2->flush(); }
-  else if (idx != party) (party < idx ? io1 : io2)->flush();
-}
-inline int64_t io_count(NetIO *io1, NetIO *io2) {
-  return io1->send_counter + io1->recv_counter +
-         io2->send_counter + io2->recv_counter;
+// Two-party transport: each party holds a duplex pair of NetIO channels to the
+// single peer, named by role -- send_io for outgoing, recv_io for incoming.
+// They are two distinct sockets (party 1's send_io == party 2's recv_io and
+// vice versa), so a send task on send_io and a recv task on recv_io overlap
+// without head-of-line blocking, and the two COT instances run one per socket.
+// Code just uses send_io->send_data / recv_io->recv_data directly; there is no
+// dst/src routing because the only peer is implicit.
+//
+// Total bytes across both channels (for the WRK_PROFILE phase counters).
+inline int64_t io_count(NetIO *send_io, NetIO *recv_io) {
+  return send_io->send_counter + send_io->recv_counter +
+         recv_io->send_counter + recv_io->recv_counter;
 }
 
 
@@ -104,8 +95,8 @@ inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1
 // responsible for zero-init — the contributions are XORed in so this composes
 // with caller buffers that already have content (e.g. TriplePool loads z
 // directly into phi).
-void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
-               block *out, int n) {
+void fzero_xor(NetIO *send_io, NetIO *recv_io, PRG *prg, ThreadPool *pool,
+               int party, block *out, int n) {
   block seed_by_peer[3];
   prg->random_block(&seed_by_peer[1], 2);
 
@@ -113,10 +104,10 @@ void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
   // the smaller receives it (only one direction happens per party).
   const int peer = 3 - party;
   if (peer < party) {
-    io_send(io1, io2, party, peer, &seed_by_peer[peer], sizeof(block));
-    io_flush(io1, io2, party, peer);
+    send_io->send_data(&seed_by_peer[peer], sizeof(block));
+    send_io->flush();
   } else {
-    io_recv(io1, io2, party, peer, &seed_by_peer[peer], sizeof(block));
+    recv_io->recv_data(&seed_by_peer[peer], sizeof(block));
   }
 
   BlockVec contribution(n);
@@ -125,18 +116,18 @@ void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
   xorBlocks_arr(out, out, contribution.data(), n);
 }
 
-void check_MAC(NetIO *io1, NetIO *io2, block *MAC, block *KEY, bool *r,
+void check_MAC(NetIO *send_io, NetIO *recv_io, block *MAC, block *KEY, bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
   block tD;
   // Single pair (1, 2): party 1 sends Δ + its KEY for the peer, party 2 verifies.
   if (party == 1) {
-    io_send(io1, io2, party, 2, &Delta, sizeof(block));
-    io_send(io1, io2, party, 2, KEY, sizeof(block) * length);
-    io_flush(io1, io2, party, 2);
+    send_io->send_data(&Delta, sizeof(block));
+    send_io->send_data(KEY, sizeof(block) * length);
+    send_io->flush();
   } else {
-    io_recv(io1, io2, party, 1, &tD, sizeof(block));
-    io_recv(io1, io2, party, 1, tmp, sizeof(block) * length);
+    recv_io->recv_data(&tD, sizeof(block));
+    recv_io->recv_data(tmp, sizeof(block) * length);
     for (int k = 0; k < length; ++k)
       if (r[k]) tmp[k] = tmp[k] ^ tD;
     if (!cmpBlock(MAC, tmp, length))
@@ -147,30 +138,29 @@ void check_MAC(NetIO *io1, NetIO *io2, block *MAC, block *KEY, bool *r,
     cerr << "check_MAC pass!\n" << flush;
 }
 
-void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
+void check_MAC(NetIO *send_io, NetIO *recv_io, BlockVec &MAC,
                BlockVec &KEY, std::vector<unsigned char> &r, block Delta,
                int length, int party) {
-  check_MAC(io1, io2, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
+  check_MAC(send_io, recv_io, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
                 length, party);
 }
 
-// r-less overload: derive share bits from bit0(MAC[any peer]). Valid when
-// the pool invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x consistently
-// across peers).
-void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
+// r-less overload: derive share bits from bit0(MAC). Valid when the pool
+// invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x).
+void check_MAC(NetIO *send_io, NetIO *recv_io, BlockVec &MAC,
                BlockVec &KEY, block Delta, int length, int party) {
   std::vector<unsigned char> r(length);
   for (int k = 0; k < length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_MAC(io1, io2, MAC, KEY, r, Delta, length, party);
+  check_MAC(send_io, recv_io, MAC, KEY, r, Delta, length, party);
 }
 
-void check_correctness(NetIO *io1, NetIO *io2, bool *r, int length, int party) {
+void check_correctness(NetIO *send_io, NetIO *recv_io, bool *r, int length, int party) {
   if (party == 1) {
     bool *tmp1 = new bool[length * 3];
     bool *tmp2 = new bool[length * 3];
     memcpy(tmp1, r, length * 3);
-    io_recv(io1, io2, party, 2, tmp2, length * 3);
+    recv_io->recv_data(tmp2, length * 3);
     for (int k = 0; k < length * 3; ++k)
       tmp1[k] = (tmp1[k] != tmp2[k]);
     for (int k = 0; k < length; ++k) {
@@ -181,23 +171,23 @@ void check_correctness(NetIO *io1, NetIO *io2, bool *r, int length, int party) {
     delete[] tmp2;
     cerr << "check_correctness pass!\n" << flush;
   } else {
-    io_send(io1, io2, party, 1, r, length * 3);
-    io_flush(io1, io2, party, 1);
+    send_io->send_data(r, length * 3);
+    send_io->flush();
   }
 }
 
-void check_correctness(NetIO *io1, NetIO *io2, vector<unsigned char> &r, int length, int party) {
-  check_correctness(io1, io2, (bool *)r.data(), length, party);
+void check_correctness(NetIO *send_io, NetIO *recv_io, vector<unsigned char> &r, int length, int party) {
+  check_correctness(send_io, recv_io, (bool *)r.data(), length, party);
 }
 
 // r-less overload for AND-triple buffers: MAC[*] is sized 3*length (slot-major
 // a/b/c), so r[k] = bit0(MAC[k]) reconstructs the full 3*length
 // share vector before delegating to the bool* form.
-void check_correctness(NetIO *io1, NetIO *io2, BlockVec &MAC, int length, int party) {
+void check_correctness(NetIO *send_io, NetIO *recv_io, BlockVec &MAC, int length, int party) {
   std::vector<unsigned char> r(3 * length);
   for (int k = 0; k < 3 * length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_correctness(io1, io2, (bool *)r.data(), length, party);
+  check_correctness(send_io, recv_io, (bool *)r.data(), length, party);
 }
 
 inline const char *hex_char_to_bin(char c) {
