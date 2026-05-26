@@ -31,36 +31,35 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 int party, port;
 
 static void test_compute(NetIO *io1, NetIO *io2, ThreadPool *pool,
-                         AuthSharePool<nP> *ap, int length) {
+                         AuthSharePool *ap, int length) {
   if (party == 1) cout << "=== compute(" << length << ") ===" << endl;
   BlockVec MAC, KEY;
   ap->compute(MAC, KEY, length);
-  check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
+  check_MAC(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;
 }
 
 static void test_process_phase1(NetIO *io1, NetIO *io2, ThreadPool *pool,
-                                AuthSharePool<nP> *ap, int length) {
+                                AuthSharePool *ap, int length) {
   if (party == 1) cout << "=== process_phase1(" << length << ") ===" << endl;
   BlockVec MAC, KEY;
   ap->process_phase1(MAC, KEY, length);
-  check_MAC<nP>(io1, io2, MAC, KEY, ap->Delta, length, party);
+  check_MAC(io1, io2, MAC, KEY, ap->Delta, length, party);
   if (party == 1) cout << "  OK" << endl;
 }
 
 int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   NetIO *io1, *io2;
   make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
+  ThreadPool pool(4);
 
-  AuthSharePool<nP> ap(io1, io2, &pool, party);
+  AuthSharePool ap(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Lengths chosen to match TriplePool's process_phase1 ext_lens:

@@ -22,11 +22,11 @@ namespace emp {
 // The native wire type stays Bit_T<block>; the block is used only as a carrier
 // for an int wire id (low 4 bytes). Public constants are synthesized as ordinary
 // gates (c0 = XOR(w,w), c1 = NOT(c0)) so the protocol needs no special handling.
-template <int nP> class WRKBackend : public Backend {
+class WRKBackend : public Backend {
 public:
   WRKBackend(NetIO *io1_, NetIO *io2_, ThreadPool *pool_, int party_) {
     this->party = party_;
-    mpc = new C2PC<nP>(io1_, io2_, pool_, party_);
+    mpc = new C2PC(io1_, io2_, pool_, party_);
   }
   ~WRKBackend() override { delete mpc; }
 
@@ -83,7 +83,7 @@ public:
     std::vector<int> rev(n);
     for (size_t i = 0; i < n; ++i) rev[i] = id_of((const block *)in + i);
     flush_keep_all();  // carried_[k] = wire k's authenticated state, ids preserved
-    SecureWires<nP> sub = slice(carried_, rev);
+    SecureWires sub = slice(carried_, rev);
     std::vector<bool> bits = mpc->decode(sub, to_party);
     if (!bits.empty())
       for (size_t i = 0; i < n; ++i) out[i] = bits[i];
@@ -120,11 +120,11 @@ private:
     std::vector<int> ids;
   };
 
-  C2PC<nP> *mpc = nullptr;
+  C2PC *mpc = nullptr;
   int64_t gid = 0;
   std::vector<Gate> gates_;       // typed; moved into WireGraph at a boundary
   std::vector<InputRec> input_log;
-  SecureWires<nP> carried_;       // kept wires carried in from the previous chunk
+  SecureWires carried_;       // kept wires carried in from the previous chunk
   uint64_t ands_ = 0;
   bool used_c0 = false, used_c1 = false;
   static constexpr int kConst0 = -2, kConst1 = -3;  // public-constant sentinels
@@ -134,10 +134,10 @@ private:
   // SecureWires on later chunks), resolve constants + liveness, and run the WRK
   // protocol. out_ids: the wire ids that become this chunk's outputs (revealed
   // wires, or wires kept across a checkpoint). Returns their authenticated state.
-  SecureWires<nP> run_chunk(std::vector<int> &out_ids) {
+  SecureWires run_chunk(std::vector<int> &out_ids) {
     WireGraph g;
     g.gates = std::move(gates_);
-    std::vector<SecureWires<nP>> bundles;
+    std::vector<SecureWires> bundles;
 
     // Carried wires (authenticated from a prior span) occupy [0, n_carried);
     // new process_input inputs are grouped per owner immediately after, at
@@ -145,7 +145,7 @@ private:
     int n_carried = (int)carried_.size();
     if (n_carried > 0) {
       bundles.push_back(std::move(carried_));
-      carried_ = SecureWires<nP>{};
+      carried_ = SecureWires{};
     }
     int n_new = 0;
     for (auto &r : input_log) n_new += (int)r.ids.size();
@@ -234,9 +234,9 @@ private:
   }
   // Gather a sub-bundle (Lambda + wire shares, which is all decode needs) at the
   // given wire ids.
-  static SecureWires<nP> slice(const SecureWires<nP> &w,
+  static SecureWires slice(const SecureWires &w,
                                const std::vector<int> &ids) {
-    SecureWires<nP> s;
+    SecureWires s;
     s.Lambda.resize(ids.size());
     s.wire_bundle.resize(ids.size());
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -265,10 +265,9 @@ private:
   }
 };
 
-template <int nP>
-inline WRKBackend<nP> *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *pool,
+inline WRKBackend *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *pool,
                                          int party) {
-  auto *b = new WRKBackend<nP>(io1, io2, pool, party);
+  auto *b = new WRKBackend(io1, io2, pool, party);
   backend = b;
   return b;
 }
@@ -279,14 +278,12 @@ inline WRKBackend<nP> *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *poo
 // Reveal n wire carriers to ALL parties (returns the values, keeps all wires
 // live, continues). Use for values the host will branch on. A single Bit can
 // also use `x.reveal<bool>(PUBLIC)` directly.
-template <int nP>
 inline void wrk_reveal(bool *out, void *wires, int n) {
   backend->reveal(out, PUBLIC, wires, n);
 }
 
-template <int nP>
 inline void wrk_checkpoint(void *keep, int n) {
-  static_cast<WRKBackend<nP> *>(backend)->checkpoint(keep, n);
+  static_cast<WRKBackend *>(backend)->checkpoint(keep, n);
 }
 
 inline void finalize_wrk_backend() {

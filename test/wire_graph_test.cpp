@@ -7,24 +7,23 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  C2PC<nP> mpc(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  C2PC mpc(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Inputs: a from ALICE (party 1) at wire 0, b from BOB (party 2) at wire 1.
   // Each party supplies its own real bit; non-owners pass a dummy (ignored).
   bool a = (party == 1);   // ALICE's input = 1
   bool b = (party == 2);   // BOB's input   = 1
-  SecureWires<nP> ba = mpc.process_input(&a, 1, /*owner=*/1);
-  SecureWires<nP> bb = mpc.process_input(&b, 1, /*owner=*/2);
+  SecureWires ba = mpc.process_input(&a, 1, /*owner=*/1);
+  SecureWires bb = mpc.process_input(&b, 1, /*owner=*/2);
 
   // Hand-built circuit over wires [0,7):
   //   w2 = XOR(w0,w0) = 0          (constant-0 synthesized as a gate)
@@ -52,7 +51,7 @@ int main(int argc, char **argv) {
   g.output_ids = {6};
   g.output_to = {1};
 
-  SecureWires<nP> outw = mpc.compute(g, {ba, bb});
+  SecureWires outw = mpc.compute(g, {ba, bb});
   vector<bool> res = mpc.decode(outw, /*recipient=*/1);
 
   if (party == 1) {

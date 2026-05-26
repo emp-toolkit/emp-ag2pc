@@ -10,7 +10,6 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 
 template <typename Wire>
 static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
@@ -31,7 +30,7 @@ static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   // Fixed (arbitrary) test bits; same values used by WRK and the clear oracle.
   bool key_bits[128], pt_bits[128];
@@ -42,8 +41,8 @@ int main(int argc, char **argv) {
 
   NetIO *io1, *io2;
   make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  setup_wrk_backend(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // key owned by party 1, plaintext by party 2; each party feeds its own real

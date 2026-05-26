@@ -47,13 +47,12 @@ inline uint64_t g_wrk_phi_bytes = 0;
 //     internal pool, refilling via compute(min_refill) when short.
 //   - preprocess(n) eagerly mints up to n triples for measured-window
 //     benchmarks.
-template <int nP>
 class TriplePool {
 public:
   ThreadPool *pool;
   int party;
   NetIO *io1, *io2;
-  AuthSharePool<nP> abit;
+  AuthSharePool abit;
   block Delta;
   PRG prg;
 
@@ -63,7 +62,7 @@ public:
   // slot-major arrays — refill_internal transposes once on insert so
   // consumers read AoS via draw(). The triple's share bits live in
   // bit0(pool_triples[t].b[s].mac(any slot)) for slots a/b/c at s=0/1/2.
-  TripleBundleVec<nP> pool_triples;
+  TripleBundleVec pool_triples;
   size_t cursor = 0;
   // Floor for refill batch size. Any draw smaller than this still mints
   // `min_refill` triples to amortize the per-call protocol overhead
@@ -295,7 +294,7 @@ public:
       cMAC.assign(tMAC.begin() + 2 * LB, tMAC.begin() + 3 * LB);
       cKEY.assign(tKEY.begin() + 2 * LB, tKEY.begin() + 3 * LB);
     }
-    check_MAC<nP>(io1, io2, cMAC, cKEY, Delta, LB, party);
+    check_MAC(io1, io2, cMAC, cKEY, Delta, LB, party);
     if (party != 1) {
       io_send(io1, io2, party, 1, a.data(), LB); io_send(io1, io2, party, 1, b.data(), LB);
       io_send(io1, io2, party, 1, c.data(), LB); io_flush(io1, io2, party, 1);
@@ -394,7 +393,7 @@ public:
   // transpose pass at refill. SoA MAC/KEY writes are still produced for
   // the debug check_MAC / check_correctness path.
   void compute(block *MAC, block *KEY, int length,
-               TripleBundle<nP> *out_aos = nullptr) {
+               TripleBundle *out_aos = nullptr) {
     int bucket_size = get_bucket_size(length);
     int LB = length * bucket_size;
     // Authenticated bits per leaky-AND slot, set by the active leaky-AND method
@@ -405,23 +404,24 @@ public:
     int abit_len = leaky_abit_len(LB);
 
     BlockVec tMAC, tKEY;
-    BlockVec tKEYphi[nP + 1], tMACphi[nP + 1];
+    // tKEYphi[party] is the s^i / t^i accumulator (overwritten in step 5b);
+    // tKEYphi[peer] holds the sender-side half-gate output. tMACphi holds the
+    // single peer's receiver-side half-gate output (the would-be tMACphi[party]
+    // is never written or read, so it is just one buffer rather than a slot
+    // array). s[party]/s[peer] are the two parties' garbling-parity shares and
+    // s[0] their opened XOR.
+    BlockVec tKEYphi[3], tMACphi;
     BlockVec phi(LB);
-    vector<unsigned char> s[nP + 1];
+    vector<unsigned char> s[3];
     vector<unsigned char> tr;
 
     tr.reserve(abit_len);
-    // tKEYphi[party] is the s^i / t^i accumulator (overwritten in step 5b).
-    // tKEYphi[j], tMACphi[j] for j != party hold half-gate outputs from peer j;
-    // tMACphi[party] is never written or read (sender writes tKEYphi[peer],
-    // receiver writes tMACphi[peer]), so we skip its allocation.
-    for (int i = 1; i <= nP; ++i) {
-      tMAC.reserve(abit_len + abit.csp);
-      tKEY.reserve(abit_len + abit.csp);
+    tMAC.reserve(abit_len + abit.csp);
+    tKEY.reserve(abit_len + abit.csp);
+    tMACphi.resize(LB);
+    for (int i = 1; i <= 2; ++i)
       tKEYphi[i].resize(LB);
-      if (i != party) tMACphi[i].resize(LB);
-    }
-    for (int i = 0; i <= nP; ++i) s[i].resize(LB);
+    for (int i = 0; i <= 2; ++i) s[i].resize(LB);
 
 #ifdef EMP_DEBUG_PHASE
     _phase("", party);
@@ -460,7 +460,7 @@ public:
     // helper.h. We pack into a single LB+1-block buffer; step 4 then
     // XORs the b·Δ ⊕ K ⊕ M terms into phi[0..LB) on top of z^i.
     BlockVec z_u(LB + 1, zero_block);
-    fzero_xor<nP>(io1, io2, &prg, pool, party, z_u.data(), LB + 1);
+    fzero_xor(io1, io2, &prg, pool, party, z_u.data(), LB + 1);
     for (int k = 0; k < LB; ++k) phi[k] = z_u[k];
     block u_zero = z_u[LB];
 #ifdef EMP_DEBUG_PHASE
@@ -541,7 +541,7 @@ public:
             mitc.hash<8, 1>(pad);
             for (int j = 0; j < batch; ++j) {
               block w = wire[k0 + j - st] & select_mask[tr[k0 + j]];
-              tMACphi[peer][k0 + j] = pad[j] ^ w;
+              tMACphi[k0 + j] = pad[j] ^ w;
             }
           }
         }
@@ -565,7 +565,7 @@ public:
           tKEYphi[party][k] = zero_block;
           { const int j = 3 - party;
             tKEYphi[party][k] = tKEYphi[party][k] ^ tKEYphi[j][k];
-            tKEYphi[party][k] = tKEYphi[party][k] ^ tMACphi[j][k];
+            tKEYphi[party][k] = tKEYphi[party][k] ^ tMACphi[k];
             tKEYphi[party][k] = tKEYphi[party][k] ^ tKEY[2 * LB + k];
             tKEYphi[party][k] = tKEYphi[party][k] ^ tMAC[2 * LB + k];
           }
@@ -634,8 +634,8 @@ public:
     block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
     PRG jprg(&S);
     jprg.random_block(phi.data(), LB);
-    BlockVec ip[nP + 1];
-    for (int i = 0; i <= nP; ++i) ip[i].resize(2);
+    BlockVec ip[3];
+    for (int i = 0; i <= 2; ++i) ip[i].resize(2);
     vector_inn_prdt_sum_no_red(ip[party].data(), phi.data(), tKEYphi[party].data(), LB);
     ip[party][0] ^= u_zero;
 
@@ -688,8 +688,8 @@ public:
     // which is sequential in i (with at most one wraparound), so each row is
     // streamed once per bucket range.
     block S = RO("WRK RO", zero_block).absorb(io1->get_digest()).absorb(io2->get_digest()).squeeze_block();
-    vector<unsigned char> d[nP + 1];
-    for (int i = 1; i <= nP; ++i)
+    vector<unsigned char> d[3];
+    for (int i = 1; i <= 2; ++i)
       d[i].resize(length * (bucket_size - 1));
     vector<int> rk(bucket_size);
     rk[0] = 0;
@@ -827,8 +827,8 @@ public:
 
     BlockVec MAC_dbg(MAC, MAC + 3 * length);
     BlockVec KEY_dbg(KEY, KEY + 3 * length);
-    check_MAC<nP>(io1, io2, MAC_dbg, KEY_dbg, Delta, length * 3, party);
-    check_correctness<nP>(io1, io2, MAC_dbg, length, party);
+    check_MAC(io1, io2, MAC_dbg, KEY_dbg, Delta, length * 3, party);
+    check_correctness(io1, io2, MAC_dbg, length, party);
 #endif
   }
 
@@ -837,7 +837,7 @@ public:
   // MAC[party]/KEY[party] are unused; share-bits are recoverable as
   // bit0(MAC[k]). out_aos forwards as-is.
   void compute(BlockVec &MAC, BlockVec &KEY, int length,
-               TripleBundle<nP> *out_aos = nullptr) {
+               TripleBundle *out_aos = nullptr) {
     MAC.resize(length * 3);
     KEY.resize(length * 3);
     compute(MAC.data(), KEY.data(), length, out_aos);
@@ -862,12 +862,12 @@ public:
   // Pull n triples from the pool. out_triples[i] holds the three slot
   // bundles (mac, key for every peer) of triple i. Slot s's share-bit is
   // recoverable as bit0(out_triples[i].b[s].mac(0)).
-  void draw(int n, TripleBundleVec<nP> &out_triples) {
+  void draw(int n, TripleBundleVec &out_triples) {
     if (available() < (size_t)n)
       preprocess(n);
     out_triples.resize(n);
     memcpy(out_triples.data(), pool_triples.data() + cursor,
-           n * sizeof(TripleBundle<nP>));
+           n * sizeof(TripleBundle));
     cursor += n;
   }
 

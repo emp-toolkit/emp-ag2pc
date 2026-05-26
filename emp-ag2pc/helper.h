@@ -100,15 +100,14 @@ inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1
 // λ-bit seed (the larger-indexed party samples and sends to the
 // smaller); both expand the seed via PRG into n blocks and XOR into
 // `out`. Each seed contributes to exactly two parties so Σ_p out^p[k]
-// = 0 for every k. Communication: λ bits per pair (vs nP·λ for the
-// straightforward zero-share). Caller is responsible for zero-init —
-// the contributions are XORed in so this composes with caller buffers
-// that already have content (e.g. TriplePool loads z directly into phi).
-template <int nP>
+// = 0 for every k. Communication: λ bits for the single pair. Caller is
+// responsible for zero-init — the contributions are XORed in so this composes
+// with caller buffers that already have content (e.g. TriplePool loads z
+// directly into phi).
 void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
                block *out, int n) {
-  block seed_by_peer[nP + 1];
-  prg->random_block(&seed_by_peer[1], nP);
+  block seed_by_peer[3];
+  prg->random_block(&seed_by_peer[1], 2);
 
   // Single pair: the larger-indexed party samples + sends the shared seed,
   // the smaller receives it (only one direction happens per party).
@@ -126,7 +125,6 @@ void fzero_xor(NetIO *io1, NetIO *io2, PRG *prg, ThreadPool *pool, int party,
   xorBlocks_arr(out, out, contribution.data(), n);
 }
 
-template <int nP>
 void check_MAC(NetIO *io1, NetIO *io2, block *MAC, block *KEY, bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
@@ -149,27 +147,24 @@ void check_MAC(NetIO *io1, NetIO *io2, block *MAC, block *KEY, bool *r,
     cerr << "check_MAC pass!\n" << flush;
 }
 
-template <int nP>
 void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
                BlockVec &KEY, std::vector<unsigned char> &r, block Delta,
                int length, int party) {
-  check_MAC<nP>(io1, io2, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
+  check_MAC(io1, io2, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
                 length, party);
 }
 
 // r-less overload: derive share bits from bit0(MAC[any peer]). Valid when
 // the pool invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x consistently
 // across peers).
-template <int nP>
 void check_MAC(NetIO *io1, NetIO *io2, BlockVec &MAC,
                BlockVec &KEY, block Delta, int length, int party) {
   std::vector<unsigned char> r(length);
   for (int k = 0; k < length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_MAC<nP>(io1, io2, MAC, KEY, r, Delta, length, party);
+  check_MAC(io1, io2, MAC, KEY, r, Delta, length, party);
 }
 
-template <int nP>
 void check_correctness(NetIO *io1, NetIO *io2, bool *r, int length, int party) {
   if (party == 1) {
     bool *tmp1 = new bool[length * 3];
@@ -191,20 +186,18 @@ void check_correctness(NetIO *io1, NetIO *io2, bool *r, int length, int party) {
   }
 }
 
-template <int nP>
 void check_correctness(NetIO *io1, NetIO *io2, vector<unsigned char> &r, int length, int party) {
-  check_correctness<nP>(io1, io2, (bool *)r.data(), length, party);
+  check_correctness(io1, io2, (bool *)r.data(), length, party);
 }
 
 // r-less overload for AND-triple buffers: MAC[*] is sized 3*length (slot-major
 // a/b/c), so r[k] = bit0(MAC[k]) reconstructs the full 3*length
 // share vector before delegating to the bool* form.
-template <int nP>
 void check_correctness(NetIO *io1, NetIO *io2, BlockVec &MAC, int length, int party) {
   std::vector<unsigned char> r(3 * length);
   for (int k = 0; k < 3 * length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_correctness<nP>(io1, io2, (bool *)r.data(), length, party);
+  check_correctness(io1, io2, (bool *)r.data(), length, party);
 }
 
 inline const char *hex_char_to_bin(char c) {

@@ -11,7 +11,6 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 
 // C2 = AES(K2, AES(K1, P)). If do_ckpt, checkpoint between the two AES calls.
 template <typename Wire>
@@ -33,7 +32,7 @@ static void aes2(const bool k1b[128], const bool k2b[128], const bool pb[128],
     B keep[256];
     for (int i = 0; i < 128; ++i) keep[i] = c1[i];
     for (int i = 0; i < 128; ++i) keep[128 + i] = k2[i];
-    wrk_checkpoint<nP>(keep, 256);
+    wrk_checkpoint(keep, 256);
     for (int i = 0; i < 128; ++i) c1[i] = keep[i];
     for (int i = 0; i < 128; ++i) k2[i] = keep[128 + i];
   }
@@ -50,7 +49,7 @@ static void aes2(const bool k1b[128], const bool k2b[128], const bool pb[128],
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   bool k1[128], k2[128], pt[128];
   for (int i = 0; i < 128; ++i) {
@@ -60,8 +59,8 @@ int main(int argc, char **argv) {
   }
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  setup_wrk_backend(io1, io2, &pool, party);
   io1->flush(); io2->flush();
   bool k1a[128], k2a[128], pb[128];
   for (int i = 0; i < 128; ++i) {

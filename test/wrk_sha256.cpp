@@ -17,7 +17,6 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 using U = UnsignedInt_T<block, 32>;
 
 // Compress one pre-fed message into 256 output wire-carriers. The public IV is
@@ -35,7 +34,7 @@ static void sha_compress(const U msg[16], block buf[256]) {
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   const char *env = getenv("SHA_BLOCKS");
   const int N = env ? atoi(env) : 1;
@@ -47,8 +46,8 @@ int main(int argc, char **argv) {
       blk[n][j] = 0x9e3779b9u * (uint32_t)(j + 1) + 0x01000193u * (uint32_t)n;
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  setup_wrk_backend(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Feed ALL secret inputs first (party 2 owns the messages; others feed dummies),

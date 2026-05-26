@@ -7,16 +7,15 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  TriplePool<nP> tp(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  TriplePool tp(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   tp.cutchoose_mult_selftest(1024);

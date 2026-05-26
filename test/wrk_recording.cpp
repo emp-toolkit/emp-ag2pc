@@ -10,16 +10,15 @@ using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>
 
-const static int nP = 2;
 
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  setup_wrk_backend(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Inputs: a owned by party 1, b owned by party 2 (a=b=1).

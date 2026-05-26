@@ -58,7 +58,6 @@ inline uint64_t g_wrk_cot_bytes = 0;
 //     SoA scratch, transpose into caller's AoS bundles. No persistent
 //     pool — each call eats csp = 128 sacrificial bits regardless of
 //     n, so prefer one large draw to many small ones.
-template <int nP>
 class AuthSharePool { public:
 	// Each party holds COT instances against every peer: abit1 is used as
 	// sender when party < peer and as receiver otherwise (abit2 is the
@@ -99,15 +98,14 @@ class AuthSharePool { public:
 			// Step 1 (Fig.13 Init): pick Δ_me with two pinned bits:
 			//   bit 0 of Δ — share-value encoding (always 1; lets bit0(M) carry
 			//                the authenticated bit when bit0(K)=0).
-			//   bit 1 of Δ — half-gate Λ_γ recovery: bit1(Δ_j)=1 for j≠1,
-			//                bit1(Δ_1) = nP mod 2. So bit1(⊕_p Δ_p) = 1, which
+			//   bit 1 of Δ — half-gate Λ_γ recovery: bit1(Δ_2)=1 and
+			//                bit1(Δ_1)=0, so bit1(Δ_1 ⊕ Δ_2) = 1, which
 			//                TriplePool's LaAND decoding d = LSB1(⊕ s^p) and
-			//                mpc.h's b_γ = LSB1(m_{γ,0}^2) both rely on.
+			//                2pc.h's b_γ = LSB1(m_{γ,0}^2) both rely on.
 			bool tmp[128];
 			prg.random_bool(tmp, 128);
 			tmp[0] = true;
-			if (party == 1) tmp[1] = (nP % 2 == 1);
-			else tmp[1] = true;
+			tmp[1] = (party != 1);
 
 			// Wire each Cot to its peer's IO channel. For the (party < peer)
 			// pair, party acts as sender on channel 0 (abit1) and receiver on
@@ -158,7 +156,7 @@ class AuthSharePool { public:
 
 #ifdef EMP_DEBUG_PHASE
 		_phase("[abit] aShare", party);
-		check_MAC<nP>(io1, io2, MAC, KEY, Delta, length, party);
+		check_MAC(io1, io2, MAC, KEY, Delta, length, party);
 		_phase("", party);
 #endif
 	}
@@ -220,12 +218,12 @@ class AuthSharePool { public:
 	// (csp tail + sampleRandom + check2 closing exchange), so prefer one
 	// large draw to many small ones — the per-call fixed cost amortizes.
 	// No persistent pool: scratch is stack-local to the call.
-	void draw(int n, AShareBundleVec<nP> &out_bundle) {
+	void draw(int n, AShareBundleVec &out_bundle) {
 		BlockVec tmac, tkey;
 		compute(tmac, tkey, n);
 		out_bundle.resize(n);
 		for (int i = 0; i < n; ++i) {
-			AShareBundle<nP> &wb = out_bundle[i];
+			AShareBundle &wb = out_bundle[i];
 			wb.mac(0) = tmac[i];  // single peer slot
 			wb.key(0) = tkey[i];
 		}

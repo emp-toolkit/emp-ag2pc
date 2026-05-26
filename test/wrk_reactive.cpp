@@ -9,7 +9,6 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 
 // a from party 1, b from party 2, d from party 1. Returns {v, r, ru}.
 template <typename Wire>
@@ -40,7 +39,7 @@ static void reactive(bool a_in, bool b_in, bool d_in, bool *out3) {
 int main(int argc, char **argv) {
   int port, party;
   parse_party_and_port(argv, &party, &port);
-  if (party > nP) return 0;
+  if (party > 2) return 0;
 
   // Each party supplies its own real bit; dummies for inputs it doesn't own.
   bool A = true, Bv = true, D = true;             // logical values
@@ -49,8 +48,8 @@ int main(int argc, char **argv) {
   bool d_in = (party == 1) ? D : false;
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
-  ThreadPool pool(2 * (nP - 1) + 2);
-  setup_wrk_backend<nP>(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  setup_wrk_backend(io1, io2, &pool, party);
   io1->flush(); io2->flush();
   bool got[3];
   reactive<block>(a_in, b_in, d_in, got);   // all parties branch on revealed v

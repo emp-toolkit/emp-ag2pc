@@ -19,16 +19,15 @@
 using namespace std;
 using namespace emp;
 
-const static int nP = 2;
 int party, port;
 int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
-  if (party > nP)
+  if (party > 2)
     return 0;
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
 
-  ThreadPool pool(2 * (nP - 1) + 2);
-  TriplePool<nP> mp(io1, io2, &pool, party);
+  ThreadPool pool(4);
+  TriplePool mp(io1, io2, &pool, party);
 
   int num_ands = 1 << 15;
   block *mac = new block[num_ands * 3];
