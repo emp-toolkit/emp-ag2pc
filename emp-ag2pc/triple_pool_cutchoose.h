@@ -65,15 +65,15 @@
     for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[k]); b[k] = (uint8_t)LSB(bMAC[k]); }
     multiply_unauth(aMAC, aKEY, b, len, z);
     if (party != 1) {
-      send_io->send_data(a.data(), len); send_io->send_data(b.data(), len);
-      send_io->send_data(z.data(), len); send_io->flush();
+      io->send_data(a.data(), len); io->send_data(b.data(), len);
+      io->send_data(z.data(), len); io->flush();
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), Z(z);
       { const int p = 2;
         std::vector<uint8_t> ta(len), tb(len), tz(len);
-        recv_io->recv_data(ta.data(), len); recv_io->recv_data(tb.data(), len);
-        recv_io->recv_data(tz.data(), len);
+        io->recv_data(ta.data(), len); io->recv_data(tb.data(), len);
+        io->recv_data(tz.data(), len);
         for (int k = 0; k < len; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; Z[k] ^= tz[k]; }
       }
       for (int k = 0; k < len; ++k) if (Z[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -135,8 +135,8 @@
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
     int ap = (party == 1) ? 2 : 1;
     block S = RO("AG2PC RO", zero_block)
-                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
-                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .absorb(io->get_digest())
+                  .absorb(sib->get_digest())
                   .squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));
@@ -189,17 +189,17 @@
       cMAC.assign(tMAC.begin() + 2 * LB, tMAC.begin() + 3 * LB);
       cKEY.assign(tKEY.begin() + 2 * LB, tKEY.begin() + 3 * LB);
     }
-    check_MAC(send_io, recv_io, cMAC, cKEY, Delta, LB, party);
+    check_MAC(io, cMAC, cKEY, Delta, LB, party);
     if (party != 1) {
-      send_io->send_data(a.data(), LB); send_io->send_data(b.data(), LB);
-      send_io->send_data(c.data(), LB); send_io->flush();
+      io->send_data(a.data(), LB); io->send_data(b.data(), LB);
+      io->send_data(c.data(), LB); io->flush();
     } else {
       bool ok = true;
       std::vector<uint8_t> A(a), B(b), C(c);
       { const int p = 2;
         std::vector<uint8_t> ta(LB), tb(LB), tc(LB);
-        recv_io->recv_data(ta.data(), LB); recv_io->recv_data(tb.data(), LB);
-        recv_io->recv_data(tc.data(), LB);
+        io->recv_data(ta.data(), LB); io->recv_data(tb.data(), LB);
+        io->recv_data(tc.data(), LB);
         for (int k = 0; k < LB; ++k) { A[k] ^= ta[k]; B[k] ^= tb[k]; C[k] ^= tc[k]; }
       }
       for (int k = 0; k < LB; ++k) if (C[k] != (uint8_t)(A[k] & B[k])) ok = false;
@@ -246,8 +246,8 @@
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
     block S = RO("AG2PC RO", zero_block)
-                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
-                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .absorb(io->get_digest())
+                  .absorb(sib->get_digest())
                   .squeeze_block();
     std::vector<int> shift(T, 0);
     { PRG p2(&S); std::vector<uint32_t> raw(T); p2.random_data(raw.data(), T * sizeof(uint32_t));

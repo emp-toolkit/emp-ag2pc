@@ -39,11 +39,10 @@ int main(int argc, char **argv) {
     pt_bits[i] = ((i * 3 + 1) % 4) == 0;
   }
 
-  NetIO *io1, *io2;
-  make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  setup_ag2pc(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  setup_ag2pc(io, &pool, party);
+  io->flush();
 
   // key owned by party 1, plaintext by party 2; each party feeds its own real
   // bits, dummies for the other (Bit ctor uses the value only at the owner).

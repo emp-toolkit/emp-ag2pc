@@ -58,10 +58,10 @@ int main(int argc, char **argv) {
     pt[i] = ((i * 3 + 1) % 4) == 0;
   }
 
-  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  setup_ag2pc(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  setup_ag2pc(io, &pool, party);
+  io->flush();
   bool k1a[128], k2a[128], pb[128];
   for (int i = 0; i < 128; ++i) {
     k1a[i] = (party == 1) ? k1[i] : false;

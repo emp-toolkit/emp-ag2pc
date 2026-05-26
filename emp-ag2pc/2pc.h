@@ -63,16 +63,24 @@ public:
   // process_input / compute / decode calls. Both pools amortize their
   // refill costs across however many draw() calls land between refills.
   TriplePool *fpre = nullptr;
-  NetIO *send_io, *recv_io;   // my outgoing / incoming channel to the peer
+  // io = primary channel (sequential comm); sib = a second channel spawned from
+  // it, owned here. send_io/recv_io alias (io, sib) by party for the duplex
+  // beaver pass; everything sequential uses io directly.
+  NetIO *io;
+  std::unique_ptr<NetIO> sib_owned;
+  NetIO *sib, *send_io, *recv_io;
   ThreadPool *pool;
   int party;
   block Delta;
   PRG prg;
 
-  C2PC(NetIO *io1, NetIO *io2, ThreadPool *pool_, int party_)
-      : send_io(party_ == 1 ? io1 : io2), recv_io(party_ == 1 ? io2 : io1),
+  // Takes a single NetIO; spawns and owns the sibling channel.
+  C2PC(NetIO *io, ThreadPool *pool_, int party_)
+      : io(io), sib_owned(io->make_sibling()), sib(sib_owned.get()),
+        send_io(party_ == 1 ? io : sib_owned.get()),
+        recv_io(party_ == 1 ? sib_owned.get() : io),
         pool(pool_), party(party_) {
-    fpre = new TriplePool(io1, io2, pool_, party_);
+    fpre = new TriplePool(io, sib_owned.get(), pool_, party_);
     Delta = fpre->Delta;
   }
   ~C2PC() { delete fpre; }
@@ -213,27 +221,16 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
     for (int i = 0; i < n; ++i) v[i] ^= (unsigned char)inputs[i];
 
   if (party != 1) {
-    send_io->send_data(v.data(), n);
-    send_io->flush();
-    recv_io->recv_data(sw.Lambda.data(), n);
+    io->send_data(v.data(), n);
+    io->flush();
+    io->recv_data(sw.Lambda.data(), n);
   } else {
     std::vector<unsigned char> tmp(n);
-    std::vector<future<void>> res;
-    { const int party2 = 2;
-      res.push_back(pool->enqueue([this, &tmp, n, party2]() {
-        recv_io->recv_data(tmp.data(), n);
-      }));
-    }
-    joinNclean(res);
+    io->recv_data(tmp.data(), n);
     for (int i = 0; i < n; ++i)
       sw.Lambda[i] = v[i] ^ tmp[i];
-    { const int party2 = 2;
-      res.push_back(pool->enqueue([this, &sw, n, party2]() {
-        send_io->send_data(sw.Lambda.data(), n);
-        send_io->flush();
-      }));
-    }
-    joinNclean(res);
+    io->send_data(sw.Lambda.data(), n);
+    io->flush();
   }
 
   // Step 9: Pi (i ≥ 2) ships m_{w, Λ_w}^i = label0[w] ⊕ Λ_w · Δ to P1.
@@ -241,17 +238,10 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
     BlockVec tmp(n);
     for (int i = 0; i < n; ++i)
       tmp[i] = sw.Lambda[i] ? (sw.label0[i] ^ Delta) : sw.label0[i];
-    send_io->send_data(tmp.data(), n * sizeof(block));
-    send_io->flush();
+    io->send_data(tmp.data(), n * sizeof(block));
+    io->flush();
   } else {
-    std::vector<future<void>> res;
-    { const int party2 = 2;
-      res.push_back(pool->enqueue([this, &sw, n, party2]() {
-        recv_io->recv_data(sw.eval_label.data(),
-                      n * sizeof(block));
-      }));
-    }
-    joinNclean(res);
+    io->recv_data(sw.eval_label.data(), n * sizeof(block));
   }
   AG2PC_PHASE(owner == 1 ? "process_input[owner1]" : "process_input[ownerN]");
   return sw;
@@ -665,21 +655,15 @@ void C2PC::check_label_hash(ComputeCtx &ctx) {
       gfmul(EVAL(g.out), pw, &term); acc = acc ^ term;
       gfmul(pw, hp_seed, &pw);
     }
-    std::vector<future<void>> r2;
-    { const int party2 = 2;
-      r2.push_back(pool->enqueue([this, &hp_seed, &Lambda_AND, &acc, num_ands, party2]() {
-        send_io->send_data(&hp_seed, sizeof(block));
-        send_io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // 1 bit/AND, packed
-        send_io->send_data(&acc, sizeof(block));
-        send_io->flush();
-      }));
-    }
-    joinNclean(r2);
+    io->send_data(&hp_seed, sizeof(block));
+    io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // 1 bit/AND, packed
+    io->send_data(&acc, sizeof(block));
+    io->flush();
   } else {
     block h_i;
-    recv_io->recv_data(&hp_seed, sizeof(block));
-    recv_io->recv_bool((bool *)Lambda_AND.data(), num_ands);
-    recv_io->recv_data(&h_i, sizeof(block));
+    io->recv_data(&hp_seed, sizeof(block));
+    io->recv_bool((bool *)Lambda_AND.data(), num_ands);
+    io->recv_data(&h_i, sizeof(block));
 
     // Re-propagate Λ and labels from the persisted base while streaming the
     // hash of shifted[w] = mask[w] ? label^Δ : label. XOR/NOT are local; AND
@@ -756,13 +740,7 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
       vector_inn_prdt_sum_red(&z1, M1_t.data(), coeff_ands.data(), num_ands);
 
     block z_recv;
-    std::vector<future<void>> r3;
-    { const int party2 = 2;
-      r3.push_back(pool->enqueue([this, &z_recv, party2]() {
-        recv_io->recv_data(&z_recv, sizeof(block));
-      }));
-    }
-    joinNclean(r3);
+    io->recv_data(&z_recv, sizeof(block));
     block sum = z1 ^ z_recv;
     if (!cmpBlock(&sum, &zero_block, 1))
       error("cheat in t_gamma check (step 13)");
@@ -787,8 +765,8 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
     block z_i = zero_block;
     if (num_ands > 0)
       vector_inn_prdt_sum_red(&z_i, M1_t.data(), coeff_ands.data(), num_ands);
-    send_io->send_data(&z_i, sizeof(block));
-    send_io->flush();
+    io->send_data(&z_i, sizeof(block));
+    io->flush();
   }
 }
 
@@ -829,18 +807,11 @@ std::vector<bool> C2PC::decode(const SecureWires &wires,
     std::vector<unsigned char> buf(n);
     if (party == 1) {
       for (int i = 0; i < n; ++i) buf[i] = v[i];
-      std::vector<future<void>> res;
-      { const int p = 2;
-        int p2 = p;
-        res.push_back(pool->enqueue([this, &buf, n, p2]() {
-          send_io->send_data(buf.data(), n);
-          send_io->flush();
-        }));
-      }
-      joinNclean(res);
+      io->send_data(buf.data(), n);
+      io->flush();
       return v;
     }
-    recv_io->recv_data(buf.data(), n);
+    io->recv_data(buf.data(), n);
     std::vector<bool> out(n);
     for (int i = 0; i < n; ++i) out[i] = (buf[i] & 1);
     return out;
@@ -851,13 +822,12 @@ std::vector<bool> C2PC::decode(const SecureWires &wires,
   for (int i = 0; i < n; ++i)
     my_share[i] = (unsigned char)LSB(wires.wire_bundle[i].mac);
   if (party != recipient) {
-    send_io->send_data(my_share.data(), n);
-    send_io->flush();
+    io->send_data(my_share.data(), n);
+    io->flush();
   } else {
     result.resize(n);
-    const int party2 = 3 - recipient;  // the single non-recipient party
     std::vector<unsigned char> tmp(n);
-    recv_io->recv_data(tmp.data(), n);
+    io->recv_data(tmp.data(), n);
     for (int i = 0; i < n; ++i) {
       unsigned char v = my_share[i] ^ wires.Lambda[i] ^ tmp[i];
       result[i] = (v & 1);

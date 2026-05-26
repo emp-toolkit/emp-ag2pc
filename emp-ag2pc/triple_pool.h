@@ -45,7 +45,12 @@ class TriplePool {
 public:
   ThreadPool *pool;
   int party;
-  NetIO *send_io, *recv_io;   // my outgoing / incoming channel to the peer
+  // io = primary channel (sequential comm). sib_owned holds the spawned sibling
+  // when this object created it (the one-io ctor); it's null when a sibling was
+  // handed in. send_io/recv_io alias (io, sib) by party for the duplex sites.
+  NetIO *io;
+  std::unique_ptr<NetIO> sib_owned;
+  NetIO *sib, *send_io, *recv_io;
   AuthSharePool abit;
   block Delta;
 
@@ -58,10 +63,19 @@ public:
   // worse bucket; large workloads refill at their own size (≥280K → B=3).
   size_t min_refill = 3100;
 
-  TriplePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party)
-      : pool(pool), party(party),
-        send_io(party == 1 ? io1 : io2), recv_io(party == 1 ? io2 : io1),
-        abit(io1, io2, pool, party), Delta(abit.Delta) {}
+  // Borrowing ctor: the caller (C2PC) owns the sibling and threads it in.
+  TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party)
+      : pool(pool), party(party), io(io), sib(sib),
+        send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io),
+        abit(io, sib, pool, party), Delta(abit.Delta) {}
+
+  // Owning ctor: spawn (and own) the sibling channel from the single io.
+  TriplePool(NetIO *io, ThreadPool *pool, int party)
+      : pool(pool), party(party), io(io),
+        sib_owned(io->make_sibling()), sib(sib_owned.get()),
+        send_io(party == 1 ? io : sib_owned.get()),
+        recv_io(party == 1 ? sib_owned.get() : io),
+        abit(io, sib_owned.get(), pool, party), Delta(abit.Delta) {}
 
   // Bucket size B vs. number of triples ℓ_2 — picked from the leak-rate bound
   // max(1/2^ssp + (2B+1)/ℓ^{B-1}, ...) (see triple.tex theorem for Π_aAND).
@@ -309,20 +323,20 @@ public:
       block r; PRG().random_block(&r, 1);
       char com[Hash::DIGEST_SIZE];
       { Hash h; h.put(Dme, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(com); }
-      send_io->send_data(com, Hash::DIGEST_SIZE);     // 1. c = H(x‖r)
-      send_io->flush();
-      recv_io->recv_data(Dpeer, Hash::DIGEST_SIZE);   // 2. B sends y
-      send_io->send_data(Dme, Hash::DIGEST_SIZE);     // 3. A opens x, r
-      send_io->send_data(&r, sizeof(block));
-      send_io->flush();
+      io->send_data(com, Hash::DIGEST_SIZE);          // 1. c = H(x‖r)
+      io->flush();
+      io->recv_data(Dpeer, Hash::DIGEST_SIZE);        // 2. B sends y
+      io->send_data(Dme, Hash::DIGEST_SIZE);          // 3. A opens x, r
+      io->send_data(&r, sizeof(block));
+      io->flush();
     } else {                                          // B
       char com[Hash::DIGEST_SIZE], chk[Hash::DIGEST_SIZE];
       block r;
-      recv_io->recv_data(com, Hash::DIGEST_SIZE);     // 1.
-      send_io->send_data(Dme, Hash::DIGEST_SIZE);     // 2. send y (before A opens)
-      send_io->flush();
-      recv_io->recv_data(Dpeer, Hash::DIGEST_SIZE);   // 3. recv x
-      recv_io->recv_data(&r, sizeof(block));          //    and r
+      io->recv_data(com, Hash::DIGEST_SIZE);          // 1.
+      io->send_data(Dme, Hash::DIGEST_SIZE);          // 2. send y (before A opens)
+      io->flush();
+      io->recv_data(Dpeer, Hash::DIGEST_SIZE);        // 3. recv x
+      io->recv_data(&r, sizeof(block));               //    and r
       { Hash h; h.put(Dpeer, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(chk); }
       if (memcmp(chk, com, Hash::DIGEST_SIZE) != 0)
         error("LaAND F_eq: commit-open mismatch");
@@ -344,11 +358,11 @@ public:
     // bucket i's k-th slot is leaky triple (k * length + (i + r_k) mod length),
     // which is sequential in i (with at most one wraparound), so each row is
     // streamed once per bucket range.
-    // Public coin: absorb the two channel digests in canonical (1->2, 2->1)
-    // order so both parties derive the same S regardless of local send/recv role.
+    // Public coin: absorb both channels' digests in a fixed (io, sib) order —
+    // same labeled pairs on both ends, so both parties derive the same S.
     block S = RO("AG2PC RO", zero_block)
-                  .absorb((party == 1 ? send_io : recv_io)->get_digest())
-                  .absorb((party == 1 ? recv_io : send_io)->get_digest())
+                  .absorb(io->get_digest())
+                  .absorb(sib->get_digest())
                   .squeeze_block();
     vector<unsigned char> d[3];
     for (int i = 1; i <= 2; ++i)
@@ -486,8 +500,8 @@ public:
 
     BlockVec MAC_dbg(MAC, MAC + 3 * length);
     BlockVec KEY_dbg(KEY, KEY + 3 * length);
-    check_MAC(send_io, recv_io, MAC_dbg, KEY_dbg, Delta, length * 3, party);
-    check_correctness(send_io, recv_io, MAC_dbg, length, party);
+    check_MAC(io, MAC_dbg, KEY_dbg, Delta, length * 3, party);
+    check_correctness(io, MAC_dbg, length, party);
 #endif
   }
 

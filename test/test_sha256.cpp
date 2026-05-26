@@ -45,10 +45,10 @@ int main(int argc, char **argv) {
     for (int j = 0; j < 16; ++j)
       blk[n][j] = 0x9e3779b9u * (uint32_t)(j + 1) + 0x01000193u * (uint32_t)n;
 
-  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  setup_ag2pc(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  setup_ag2pc(io, &pool, party);
+  io->flush();
 
   // Feed ALL secret inputs first (party 2 owns the messages; others feed dummies),
   // then record all N compressions, then reveal every output bit in ONE call.

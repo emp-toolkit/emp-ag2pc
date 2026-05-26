@@ -48,7 +48,10 @@ class AuthSharePool { public:
 	// the body of the AuthSharePool ctor.
 	std::unique_ptr<OTExt> abit1;
 	std::unique_ptr<OTExt> abit2;
-	NetIO *send_io, *recv_io;
+	// io = the primary channel (sequential comm); sib = the second channel.
+	// send_io/recv_io alias (io, sib) by party and are used only by the duplex
+	// COTs below. All borrowed; the owner (TriplePool/C2PC) frees sib.
+	NetIO *io, *sib, *send_io, *recv_io;
 	ThreadPool *pool;
 	int party;
 	PRG prg;
@@ -56,16 +59,16 @@ class AuthSharePool { public:
 	int csp = 128;
 
 
-	AuthSharePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party)
-		: send_io(party == 1 ? io1 : io2), recv_io(party == 1 ? io2 : io1),
+	AuthSharePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party)
+		: io(io), sib(sib),
+		  send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io),
 		  pool(pool), party(party) {
-			// Enable the Fiat-Shamir transcript on both channels from the very
-			// start of the protocol, so their digests bind the full transcript
-			// (not just from the COT's first rcot onward). The per-channel role
-			// is opposite on the two ends (party 1 vs 2), which is all the
-			// digests need to agree; the COT's own lazy enable_fs then no-ops.
-			if (!send_io->fs_enabled()) send_io->enable_fs(/*send_first=*/party == 1);
-			if (!recv_io->fs_enabled()) recv_io->enable_fs(/*send_first=*/party == 1);
+			// Enable the Fiat-Shamir transcript on both channels from the start,
+			// so their digests bind the full transcript. The per-channel role is
+			// opposite on the two ends (party 1 vs 2), which is all the digests
+			// need to agree; the COT's own lazy enable_fs then no-ops.
+			if (!io->fs_enabled())  io->enable_fs(/*send_first=*/party == 1);
+			if (!sib->fs_enabled()) sib->enable_fs(/*send_first=*/party == 1);
 
 			// Pick Δ_me with two pinned bits:
 			//   bit 0 — share-value encoding: always 1, so bit0(M) carries the
@@ -100,7 +103,7 @@ class AuthSharePool { public:
 
 #ifdef EMP_DEBUG_PHASE
 		_phase("[abit] aShare", party);
-		check_MAC(send_io, recv_io, MAC, KEY, Delta, length, party);
+		check_MAC(io, MAC, KEY, Delta, length, party);
 		_phase("", party);
 #endif
 	}

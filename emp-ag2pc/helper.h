@@ -86,18 +86,19 @@ inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 // (see share_bundle.h).
 inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1; }
 
-void check_MAC(NetIO *send_io, NetIO *recv_io, block *MAC, block *KEY, bool *r,
+// Sequential request/response checks: one channel suffices (party 1 sends,
+// party 2 verifies — party-ordered, so no second socket needed).
+void check_MAC(NetIO *io, block *MAC, block *KEY, bool *r,
                block Delta, int length, int party) {
   block *tmp = new block[length];
   block tD;
-  // Single pair (1, 2): party 1 sends Δ + its KEY for the peer, party 2 verifies.
   if (party == 1) {
-    send_io->send_data(&Delta, sizeof(block));
-    send_io->send_data(KEY, sizeof(block) * length);
-    send_io->flush();
+    io->send_data(&Delta, sizeof(block));
+    io->send_data(KEY, sizeof(block) * length);
+    io->flush();
   } else {
-    recv_io->recv_data(&tD, sizeof(block));
-    recv_io->recv_data(tmp, sizeof(block) * length);
+    io->recv_data(&tD, sizeof(block));
+    io->recv_data(tmp, sizeof(block) * length);
     for (int k = 0; k < length; ++k)
       if (r[k]) tmp[k] = tmp[k] ^ tD;
     if (!cmpBlock(MAC, tmp, length))
@@ -108,29 +109,26 @@ void check_MAC(NetIO *send_io, NetIO *recv_io, block *MAC, block *KEY, bool *r,
     cerr << "check_MAC pass!\n" << flush;
 }
 
-void check_MAC(NetIO *send_io, NetIO *recv_io, BlockVec &MAC,
-               BlockVec &KEY, std::vector<unsigned char> &r, block Delta,
-               int length, int party) {
-  check_MAC(send_io, recv_io, MAC.data(), KEY.data(), (bool *)r.data(), Delta,
-                length, party);
+void check_MAC(NetIO *io, BlockVec &MAC, BlockVec &KEY,
+               std::vector<unsigned char> &r, block Delta, int length, int party) {
+  check_MAC(io, MAC.data(), KEY.data(), (bool *)r.data(), Delta, length, party);
 }
 
 // r-less overload: derive share bits from bit0(MAC). Valid when the pool
 // invariant holds (bit0(K)=0, bit0(Δ)=1 ⇒ bit0(M) = x).
-void check_MAC(NetIO *send_io, NetIO *recv_io, BlockVec &MAC,
-               BlockVec &KEY, block Delta, int length, int party) {
+void check_MAC(NetIO *io, BlockVec &MAC, BlockVec &KEY, block Delta, int length, int party) {
   std::vector<unsigned char> r(length);
   for (int k = 0; k < length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_MAC(send_io, recv_io, MAC, KEY, r, Delta, length, party);
+  check_MAC(io, MAC, KEY, r, Delta, length, party);
 }
 
-void check_correctness(NetIO *send_io, NetIO *recv_io, bool *r, int length, int party) {
+void check_correctness(NetIO *io, bool *r, int length, int party) {
   if (party == 1) {
     bool *tmp1 = new bool[length * 3];
     bool *tmp2 = new bool[length * 3];
     memcpy(tmp1, r, length * 3);
-    recv_io->recv_data(tmp2, length * 3);
+    io->recv_data(tmp2, length * 3);
     for (int k = 0; k < length * 3; ++k)
       tmp1[k] = (tmp1[k] != tmp2[k]);
     for (int k = 0; k < length; ++k) {
@@ -141,23 +139,23 @@ void check_correctness(NetIO *send_io, NetIO *recv_io, bool *r, int length, int 
     delete[] tmp2;
     cerr << "check_correctness pass!\n" << flush;
   } else {
-    send_io->send_data(r, length * 3);
-    send_io->flush();
+    io->send_data(r, length * 3);
+    io->flush();
   }
 }
 
-void check_correctness(NetIO *send_io, NetIO *recv_io, vector<unsigned char> &r, int length, int party) {
-  check_correctness(send_io, recv_io, (bool *)r.data(), length, party);
+void check_correctness(NetIO *io, vector<unsigned char> &r, int length, int party) {
+  check_correctness(io, (bool *)r.data(), length, party);
 }
 
 // r-less overload for AND-triple buffers: MAC[*] is sized 3*length (slot-major
 // a/b/c), so r[k] = bit0(MAC[k]) reconstructs the full 3*length
 // share vector before delegating to the bool* form.
-void check_correctness(NetIO *send_io, NetIO *recv_io, BlockVec &MAC, int length, int party) {
+void check_correctness(NetIO *io, BlockVec &MAC, int length, int party) {
   std::vector<unsigned char> r(3 * length);
   for (int k = 0; k < 3 * length; ++k)
     r[k] = (unsigned char)LSB(MAC[k]);
-  check_correctness(send_io, recv_io, (bool *)r.data(), length, party);
+  check_correctness(io, (bool *)r.data(), length, party);
 }
 
 inline const char *hex_char_to_bin(char c) {

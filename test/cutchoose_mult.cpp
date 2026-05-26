@@ -13,10 +13,10 @@ int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
   if (party > 2) return 0;
 
-  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  TriplePool tp(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  TriplePool tp(io, &pool, party);
+  io->flush();
 
   tp.cutchoose_mult_selftest(1024);
   tp.cutchoose_triple_selftest(1024);

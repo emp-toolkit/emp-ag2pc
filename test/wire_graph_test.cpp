@@ -13,10 +13,10 @@ int main(int argc, char **argv) {
   parse_party_and_port(argv, &party, &port);
   if (party > 2) return 0;
 
-  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  C2PC mpc(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  C2PC mpc(io, &pool, party);
+  io->flush();
 
   // Inputs: a from ALICE (party 1) at wire 0, b from BOB (party 2) at wire 1.
   // Each party supplies its own real bit; non-owners pass a dummy (ignored).

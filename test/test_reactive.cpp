@@ -47,10 +47,10 @@ int main(int argc, char **argv) {
   bool b_in = (party == 2) ? Bv : false;
   bool d_in = (party == 1) ? D : false;
 
-  NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
+  NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  setup_ag2pc(io1, io2, &pool, party);
-  io1->flush(); io2->flush();
+  setup_ag2pc(io, &pool, party);
+  io->flush();
   bool got[3];
   reactive<block>(a_in, b_in, d_in, got);   // all parties branch on revealed v
   finalize_ag2pc();
