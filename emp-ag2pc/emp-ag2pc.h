@@ -6,11 +6,8 @@
 // (BristolFormat parser, Bit_T<block>) / execution (Backend, half_gate, ...).
 #include "emp-tool/emp-tool.h"
 
-// Upstream OT (IKNP, COT base) consumed by AuthSharePool.
-#include "emp-ot/ot_extension/iknp.h"
-
-// emp-ag2pc layer (header-only).
-#include "emp-ag2pc/auth_share_pool.h"
+// emp-ag2pc layer (header-only). triple_pool.h pulls in the OT-extension
+// backends (IKNP / SoftSpoken / Ferret) for the merged COT mesh.
 #include "emp-ag2pc/triple_pool.h"
 #include "emp-ag2pc/helper.h"
 #include "emp-ag2pc/secure_wires.h"

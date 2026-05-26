@@ -58,8 +58,8 @@
   // check ⊕z == (⊕a)∧(⊕b). Prints GOOD/BAD at party 1.
   void cutchoose_mult_selftest(int len) {
     BlockVec aMAC, aKEY, bMAC, bKEY;
-    abit.process_phase1(aMAC, aKEY, len);
-    abit.process_phase1(bMAC, bKEY, len);
+    process_phase1(aMAC, aKEY, len);
+    process_phase1(bMAC, bKEY, len);
     int ap = (party == 1) ? 2 : 1;
     std::vector<uint8_t> a(len), b(len), z;
     for (int k = 0; k < len; ++k) { a[k] = (uint8_t)LSB(aMAC[k]); b[k] = (uint8_t)LSB(bMAC[k]); }
@@ -176,7 +176,7 @@
   // c-region MAC is valid (check_MAC aborts on tamper) and ⊕c == (⊕a)∧(⊕b).
   void cutchoose_triple_selftest(int LB) {
     BlockVec tMAC, tKEY;
-    abit.process_phase1(tMAC, tKEY, 3 * LB);
+    process_phase1(tMAC, tKEY, 3 * LB);
     int ap = (party == 1) ? 2 : 1;
     std::vector<uint8_t> a(LB), b(LB);
     for (int k = 0; k < LB; ++k) { a[k] = (uint8_t)LSB(tMAC[k]); b[k] = (uint8_t)LSB(tMAC[LB + k]); }
@@ -238,7 +238,7 @@
   void cutchoose_sacrifice_selftest(int LB, int T, int tamper = -1) {
     int N = T * LB;
     BlockVec tMAC, tKEY;
-    abit.process_phase1(tMAC, tKEY, 3 * N);
+    process_phase1(tMAC, tKEY, 3 * N);
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // a=[0,N) b=[N,2N) c=[2N,3N)
     int ap = (party == 1) ? 2 : 1;
     if (tamper >= 0 && party == 1)  // flip ⊕c by flipping bit0 of c-MAC on P1

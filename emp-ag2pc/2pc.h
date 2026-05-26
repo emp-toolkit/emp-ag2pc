@@ -1,6 +1,5 @@
 #ifndef C2PC_H__
 #define C2PC_H__
-#include "emp-ag2pc/auth_share_pool.h"
 #include "emp-ag2pc/triple_pool.h"
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-ag2pc/share_bundle.h"
@@ -42,7 +41,7 @@ using namespace emp;
 // construction: the garbler P2 sends 2 ciphertexts G_{γ,0/1}^2 (no cross-peer
 // S terms with a single garbler) plus b_γ; P1 recovers
 // Λ_γ = b_γ ⊕ LSB1(m_{γ,Λ_γ}^2). The bit-1 Δ convention is set in
-// auth_share_pool.h: bit1(Δ_2) = 1 and bit1(Δ_1) = 0, so bit1(Δ_1 ⊕ Δ_2) = 1.
+// TriplePool::init_abit_: bit1(Δ_2) = 1 and bit1(Δ_1) = 0, so bit1(Δ_1 ⊕ Δ_2) = 1.
 // Bit 0 is reserved for share-value encoding.
 //
 // API:
@@ -51,17 +50,16 @@ using namespace emp;
 //   decode(wires, recipient)      → vector<bool> // step 14
 //
 // Output wires of compute() carry full SecureWire state. process_input() and
-// compute() draw aShares/triples from the amortized pools owned by
-// AuthSharePool / TriplePool; preprocess(num_triples) pre-mints into the pool.
+// compute() draw aShares/triples from TriplePool (which mints aShares via COT
+// and amortizes triples in a pool); preprocess(num_triples) pre-mints triples.
 // The frontend (a recording backend, see ag2pc_backend.h) drives this from native
 // Bit/Integer code; circuits are consumed as WireGraph, not BristolFormat.
 
 class C2PC {
 public:
-  // Long-lived setup: COT mesh + Δ + TriplePool (which owns the inner
-  // AuthSharePool). Constructed once per session and reused across all
-  // process_input / compute / decode calls. Both pools amortize their
-  // refill costs across however many draw() calls land between refills.
+  // Long-lived setup: TriplePool (COT mesh + Δ + the triple pool). Constructed
+  // once per session and reused across all process_input / compute / decode
+  // calls; the triple pool amortizes refill costs across draw() calls.
   TriplePool *fpre = nullptr;
   // io = primary channel (sequential comm); sib = a second channel spawned from
   // it, owned here. send_io/recv_io alias (io, sib) by party for the duplex
@@ -86,10 +84,9 @@ public:
   ~C2PC() { delete fpre; }
 
   // Eagerly mint num_triples triples into TriplePool's pool so subsequent
-  // compute() calls draw from cache. AuthSharePool no longer has a pool
-  // (Stage 3 refactor) — its aShares are minted lazily inside each
-  // process_input / compute call. num_abits is accepted for backward-compat
-  // signature but unused.
+  // compute() calls draw from cache. aShares are minted lazily inside each
+  // process_input / compute call (no aShare pool). num_abits is accepted for
+  // backward-compat signature but unused.
   void preprocess(size_t num_triples, size_t /*num_abits*/) {
     fpre->preprocess(num_triples);
   }
@@ -99,7 +96,7 @@ public:
   // Steps 3 + 8 + 9 of agc.tex on n new input wires owned by `owner`.
   // At `owner`, `inputs` must point to n cleartext bits; non-owners may
   // pass nullptr. Internally:
-  //   - abit.compute mints n authenticated λ-shares
+  //   - fpre->draw mints n authenticated λ-shares
   //   - Pi (i ≥ 2) samples m_{w, 0}^i at random
   //   - all parties open Λ_w = ⊕_p λ_w^p ⊕ x_w  (owner's x)
   //   - Pi (i ≥ 2) ships m_{w, Λ_w}^i = label0 ⊕ Λ·Δ to P1
@@ -205,7 +202,7 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
   // Step 3 (Π_aShare): n authenticated λ-shares — drawn from pool. The pool
   // stores AoS-by-wire, so draw is a single memcpy into sw.wire_bundle.
   // Each share-bit λ_w^i is implicit in bit0(sw.wire_bundle[w].mac).
-  fpre->abit.draw(n, sw.wire_bundle);
+  fpre->draw(n, sw.wire_bundle);
 
   // Step 3 (cont.): Pi (i ≥ 2) samples m_{w, 0}^i for each input wire.
   if (party != 1)
@@ -330,7 +327,7 @@ void C2PC::draw_and_seed(ComputeCtx &ctx) {
   // aShares before the heavy garble allocations.
   {
     AShareBundleVec preprocess_bundle;
-    fpre->abit.draw(num_ands, preprocess_bundle);
+    fpre->draw(num_ands, preprocess_bundle);
 
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];

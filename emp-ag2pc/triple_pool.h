@@ -1,16 +1,29 @@
 #ifndef TRIPLE_POOL_H__
 #define TRIPLE_POOL_H__
-#include "emp-ag2pc/auth_share_pool.h"
+#include "emp-ag2pc/helper.h"
+#include "emp-ag2pc/share_bundle.h"
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-tool/crypto/mitccrh.h"
 #include "emp-tool/crypto/prp.h"
+#include "emp-ot/ot_extension/iknp.h"
+#include "emp-ot/ot_extension/ferret/ferret.h"
+#include "emp-ot/ot_extension/softspoken/softspoken.h"
+#include <memory>
 #include <thread>
 
 using namespace emp;
 
+// OT-extension backend for the per-pair COT mesh (aShares + leaky-AND COTs).
+// Swappable by this one typedef: IKNP (low setup) / SoftSpoken (low bandwidth)
+// / Ferret (smallest steady-state bandwidth). The streaming leaky-AND reads
+// OTExt::kSenderSendsOnExtend to keep each socket one-directional.
+using OTExt = emp::SoftSpoken<8>;
+
 #ifdef AG2PC_PROFILE
-// Profiler: this party's send+recv bytes spent in the half-gate phi exchange.
+// Profiler: this party's send+recv bytes spent in the half-gate phi exchange,
+// and (separately) in the COT (rcot) extension.
 inline uint64_t g_ag2pc_phi_bytes = 0;
+inline uint64_t g_ag2pc_cot_bytes = 0;
 #endif
 
 // Leaky-AND (eprint 2018/578, Fig. 5) followed by Π_Prep bucketing + amortized
@@ -31,12 +44,12 @@ inline uint64_t g_ag2pc_phi_bytes = 0;
 //     all-to-all exchange of the full d-vector, dropping the bucket
 //     combine to one round.
 //
-// Pool semantics (Phase C):
+// Pool semantics:
 //   - compute() is the refill primitive: mints exactly `length` fresh
 //     triples into caller-supplied buffers. Bucket size B drops with
 //     `length` (5 / 4 / 3 at thresholds 3.1K / 280K), so big batches
-//     shrink the per-triple cost meaningfully — hence min_refill
-//     defaults to 280000 (the bucket-3 threshold).
+//     shrink the per-triple cost — hence the min_refill floor sits at the
+//     bucket-4 threshold (3100) so a small draw never forces a worse bucket.
 //   - draw(n, ...) is the amortized API: pulls n triples from an
 //     internal pool, refilling via compute(min_refill) when short.
 //   - preprocess(n) eagerly mints up to n triples for measured-window
@@ -51,7 +64,14 @@ public:
   NetIO *io;
   std::unique_ptr<NetIO> sib_owned;
   NetIO *sib, *send_io, *recv_io;
-  AuthSharePool abit;
+  // aShare / leaky-AND COT mesh. abit1 is the OT-sender (ALICE, produces KEY),
+  // abit2 the OT-receiver (BOB, produces MAC) with MAC = KEY ⊕ x·Δ and
+  // bit0(MAC)=x. Their sockets adapt to the backend's extend direction
+  // (init_abit_) so the send-dominant role sits on send_io, matching the
+  // half-gate.
+  PRG prg;
+  std::unique_ptr<OTExt> abit1, abit2;
+  NetIO *io_abit1, *io_abit2;
   block Delta;
 
   // AoS-by-triple pool: pool_triples[t] holds the three AShareBundles (a/b/c)
@@ -66,16 +86,75 @@ public:
   // Borrowing ctor: the caller (C2PC) owns the sibling and threads it in.
   TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party)
       : pool(pool), party(party), io(io), sib(sib),
-        send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io),
-        abit(io, sib, pool, party), Delta(abit.Delta) {}
+        send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io) {
+    init_abit_();
+  }
 
   // Owning ctor: spawn (and own) the sibling channel from the single io.
   TriplePool(NetIO *io, ThreadPool *pool, int party)
       : pool(pool), party(party), io(io),
         sib_owned(io->make_sibling()), sib(sib_owned.get()),
         send_io(party == 1 ? io : sib_owned.get()),
-        recv_io(party == 1 ? sib_owned.get() : io),
-        abit(io, sib_owned.get(), pool, party), Delta(abit.Delta) {}
+        recv_io(party == 1 ? sib_owned.get() : io) {
+    init_abit_();
+  }
+
+  // ===== COT-based aShare generation =====
+  // Δ pinning + adaptive abit→socket wiring so the COT's send-dominant role (per
+  // OTExt::kSenderSendsOnExtend) sits on send_io, matching the half-gate
+  // (garbler sends on send_io, eval recvs on recv_io) — no socket direction flip.
+  void init_abit_() {
+    if (!io->fs_enabled())  io->enable_fs(/*send_first=*/party == 1);
+    if (!sib->fs_enabled()) sib->enable_fs(/*send_first=*/party == 1);
+    // Δ_me with two pinned bits: bit0=1 (share-value encoding; bit0(M) carries
+    // the bit when bit0(K)=0), bit1 set so bit1(Δ_1⊕Δ_2)=1 (half-gate parity).
+    bool tmp[128];
+    prg.random_bool(tmp, 128);
+    tmp[0] = true;
+    tmp[1] = (party != 1);
+    io_abit1 = OTExt::kSenderSendsOnExtend ? send_io : recv_io;  // ALICE (KEY)
+    io_abit2 = OTExt::kSenderSendsOnExtend ? recv_io : send_io;  // BOB   (MAC)
+    abit1 = std::make_unique<OTExt>(ALICE, io_abit1);
+    abit2 = std::make_unique<OTExt>(BOB,   io_abit2);
+    abit1->set_delta(tmp);
+    Delta = abit1->Delta;
+  }
+
+  // One-shot COT extension: mint `length` aShares into MAC/KEY (resized). The
+  // share x_k is implicit in bit0(MAC[k]); MAC = KEY ⊕ x·Δ straight from rcot.
+  // Used by draw() and the cut-and-choose path (the half-gate streams instead).
+  void process_phase1(BlockVec &MAC, BlockVec &KEY, int length) {
+    MAC.resize(length);
+    KEY.resize(length);
+#ifdef AG2PC_PROFILE
+    int64_t _cot0 = io_count(send_io, recv_io);
+#endif
+    vector<future<void>> res;
+    res.push_back(pool->enqueue([this, &KEY, length]() {
+      abit1->rcot(KEY.data(), length);
+      io_abit1->flush();
+    }));
+    res.push_back(pool->enqueue([this, &MAC, length]() {
+      abit2->rcot(MAC.data(), length);
+      io_abit2->flush();
+    }));
+    joinNclean(res);
+#ifdef AG2PC_PROFILE
+    g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _cot0);
+#endif
+  }
+
+  // AoS draw: n aShares as AShareBundle{mac,key} (the layout 2pc consumes).
+  // No persistent pool — each call mints fresh, so prefer one large draw.
+  void draw(int n, AShareBundleVec &out_bundle) {
+    BlockVec tmac, tkey;
+    process_phase1(tmac, tkey, n);
+    out_bundle.resize(n);
+    for (int i = 0; i < n; ++i) {
+      out_bundle[i].mac = tmac[i];
+      out_bundle[i].key = tkey[i];
+    }
+  }
 
   // Bucket size B vs. number of triples ℓ_2 — picked from the leak-rate bound
   // max(1/2^ssp + (2B+1)/ℓ^{B-1}, ...) (see triple.tex theorem for Π_aAND).
@@ -116,8 +195,7 @@ public:
                TripleBundle *out_aos = nullptr) {
     int bucket_size = get_bucket_size(length);
     int LB = length * bucket_size;
-    // a/b/r authenticated bits for the LB leaky triples. abit over-mints a csp
-    // tail and drops it, so reserve +csp to avoid a realloc.
+    // a/b/r authenticated bits for the LB leaky triples.
     int abit_len = leaky_abit_len(LB);
 
     BlockVec tMAC, tKEY;
@@ -131,23 +209,14 @@ public:
     vector<unsigned char> tr;
 
     tr.reserve(abit_len);
-    tMAC.reserve(abit_len + abit.csp);
-    tKEY.reserve(abit_len + abit.csp);
+    tMAC.reserve(abit_len);
+    tKEY.reserve(abit_len);
     Sout.resize(LB);
     for (int i = 0; i <= 2; ++i) s[i].resize(LB);
 
 #ifdef EMP_DEBUG_PHASE
     _phase("", party);
 #endif
-
-    // Generate the a/b/r aShares via COT.
-    abit.process_phase1(tMAC, tKEY, abit_len);
-    // Share bits are bit0(MAC); pull them into tr for the bit-indexed code.
-    {
-      tr.resize(abit_len);
-      for (int k = 0; k < abit_len; ++k)
-        tr[k] = LSB(tMAC[k]);
-    }
 
     vector<future<void>> res;
 
@@ -156,89 +225,144 @@ public:
     // a/b/c layout the bucketing reads (r -> c). The CutChoose sibling has the
     // same contract + its own leaky_abit_len.
     auto produce_leaky_ands_halfgate = [&]() {
-    // Two threads sharing only the read-only aShares. C^me = y·Δ ⊕ K[y] ⊕ M[y]
-    // (so C^A ⊕ C^B = y·(Δ_A⊕Δ_B)); the half-gate hash hides C, so phi = C
-    // directly. C^me and the sender pad H(K) are recomputed on the eval thread
-    // rather than shared with the garbler thread, which is what lets the two
-    // threads run with no per-element lock or cross-thread handoff.
-
-    // φ-exchange via MITCCRH<8>: both threads key from the same public pair_seed
-    // so their AES keys advance in lockstep. The garbler hashes (K, K⊕Δ) with
-    // hash<8,2> and ships G = H(K) ⊕ H(K⊕Δ) ⊕ C. The eval hashes (M, K) with
-    // hash<8,2> — H(M) and H(K) land under the same AES key as the garbler's
-    // H(K), so the eval reconstructs the sender pad H(K) without a handoff.
-    // pad = H(x) = AES(x)⊕x. Streamed in hg_chunk blocks.
-    int hg_chunk = 1 << 16;
+    // Stream the leaky-AND a chunk at a time: produce one chunk of COT and run
+    // the half-gate on it, looping. The COTs form ONE streaming session
+    // (begin / next* / end) so the malicious consistency check runs once over
+    // the whole stream; the half-gate consumes each chunk's COTs before that
+    // end()-check (the F_eq + abort-on-check gate acceptance).
+    //
+    // C^me = y·Δ ⊕ K[y] ⊕ M[y] (C^A ⊕ C^B = y·(Δ_A⊕Δ_B)); the half-gate hash
+    // hides C, so phi = C directly. Per chunk the garbler hashes (K, K⊕Δ) with
+    // hash<8,2> and ships G = H(K) ⊕ H(K⊕Δ) ⊕ C on send_io; the eval recvs G on
+    // recv_io and recomputes C and the sender pad H(K) itself (hash<8,2> over
+    // (M, K) under the same tweak via renew_ks(st)), forms E = H(M) ⊕ x·G, and
+    // writes S^me = H(K) ⊕ E ⊕ (K[r]⊕M[r]) ⊕ x·C ⊕ r·Δ into Sout. The two
+    // threads share only the read-only aShares (no lock).
+    tMAC.resize(abit_len);
+    tKEY.resize(abit_len);
+    tr.resize(abit_len);
+    // W = the OT backend's internal chunk: every next() is one full optimal
+    // batch. The send-dominant COT role sits on send_io (init_abit_), so the COT
+    // and half-gate never flip a socket's direction.
+    const int W = (int)abit1->chunk_size();
+    BlockVec stageK((size_t)W), stageM((size_t)W);  // only the final partial chunk
+    const block pair_seed = makeBlock((uint64_t)std::min(party, 3 - party),
+                                      (uint64_t)std::max(party, 3 - party));
 #ifdef AG2PC_PROFILE
-    int64_t _phi0 = io_count(send_io, recv_io);
+    int64_t _mark = io_count(send_io, recv_io);
 #endif
-    { const int peer = 3 - party;
-      block pair_seed = makeBlock((uint64_t)std::min(party, peer),
-                                  (uint64_t)std::max(party, peer));
-      // Garbler thread: reads tKEY/tMAC/tr (read-only), writes only the wire.
-      res.push_back(pool->enqueue([this, &tKEY, &tMAC, &tr, LB, pair_seed, hg_chunk]() {
-        MITCCRH<8> mitc;
-        mitc.setS(pair_seed);
-        block pad[16];
-        BlockVec tmp(std::min(hg_chunk, LB));
-        for (int ci = 0; ci < (LB + hg_chunk - 1) / hg_chunk; ++ci) {
-          int st = hg_chunk * ci, ed = std::min(hg_chunk * (ci + 1), LB);
-          for (int k0 = st; k0 < ed; k0 += 8) {
-            int batch = std::min(8, ed - k0);
-            for (int j = 0; j < 8; ++j) {
-              block key = (j < batch) ? tKEY[k0 + j] : zero_block;
-              pad[2 * j]     = key;
-              pad[2 * j + 1] = key ^ Delta;
-            }
-            mitc.hash<8, 2>(pad);
-            for (int j = 0; j < batch; ++j) {
-              int k = k0 + j;
-              block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
-              tmp[k - st] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
-            }
-          }
-          send_io->send_data(tmp.data(), (ed - st) * sizeof(block));
-          send_io->flush();
-        }
-      }));
-      // Eval thread: recvs the peer G, recomputes H(M), H(K) and C, and writes
-      // S^me = H(K) ⊕ E ⊕ (K[r]⊕M[r]) ⊕ x·C ⊕ r·Δ, with E = H(M) ⊕ x·G. The
-      // (M, K) pair feeds one hash<8,2> so H(K) matches the garbler's pad.
-      res.push_back(pool->enqueue([this, &tKEY, &tMAC, &tr, &Sout, LB, pair_seed, hg_chunk]() {
-        MITCCRH<8> mitc;
-        mitc.setS(pair_seed);
-        block pad[16];
-        BlockVec wire(std::min(hg_chunk, LB));
-        for (int ci = 0; ci < (LB + hg_chunk - 1) / hg_chunk; ++ci) {
-          int st = hg_chunk * ci, ed = std::min(hg_chunk * (ci + 1), LB);
-          recv_io->recv_data(wire.data(), (ed - st) * sizeof(block));
-          for (int k0 = st; k0 < ed; k0 += 8) {
-            int batch = std::min(8, ed - k0);
-            for (int j = 0; j < 8; ++j) {
-              pad[2 * j]     = (j < batch) ? tMAC[k0 + j] : zero_block;  // -> H(M)
-              pad[2 * j + 1] = (j < batch) ? tKEY[k0 + j] : zero_block;  // -> H(K)
-            }
-            mitc.hash<8, 2>(pad);
-            for (int j = 0; j < batch; ++j) {
-              int k = k0 + j;
-              block HM = pad[2 * j], HK = pad[2 * j + 1];
-              block E = HM ^ (wire[k - st] & select_mask[tr[k]]);
-              block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
-              Sout[k] = HK ^ E
-                      ^ tKEY[2 * LB + k] ^ tMAC[2 * LB + k]
-                      ^ (C & select_mask[tr[k]])
-                      ^ (Delta & select_mask[tr[2 * LB + k]]);
-            }
-          }
-        }
-      }));
+    // open the COT session (concurrent base-OT on the two sockets)
+    {
+      vector<future<void>> rb;
+      rb.push_back(pool->enqueue([this]() { abit1->begin(); io_abit1->flush(); }));
+      rb.push_back(pool->enqueue([this]() { abit2->begin(); io_abit2->flush(); }));
+      joinNclean(rb);
     }
-    joinNclean(res);
 #ifdef AG2PC_PROFILE
-    g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _phi0);
+    g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
+    _mark = io_count(send_io, recv_io);
+#endif
+    for (int st = 0; st < LB; st += W) {
+      const int ed = std::min(st + W, LB), Wc = ed - st;
+      // COT phase: this chunk's a/b/r COTs (KEY via abit1, MAC via abit2) into
+      // the region arrays at [st,ed), [LB+st,..), [2LB+st,..). 2 tasks, joined.
+      res.push_back(pool->enqueue([this, st, Wc, LB, W, &tKEY, &stageK]() {
+        for (int reg = 0; reg <= 2; ++reg) {
+          block *dst = tKEY.data() + (size_t)reg * LB + st;
+          if (Wc == W) abit1->next(dst);
+          else { abit1->next(stageK.data());
+                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
+        }
+        io_abit1->flush();
+      }));
+      res.push_back(pool->enqueue([this, st, Wc, LB, W, &tMAC, &stageM]() {
+        for (int reg = 0; reg <= 2; ++reg) {
+          block *dst = tMAC.data() + (size_t)reg * LB + st;
+          if (Wc == W) abit2->next(dst);
+          else { abit2->next(stageM.data());
+                 memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
+        }
+        io_abit2->flush();
+      }));
+      joinNclean(res);
+      for (int reg = 0; reg <= 2; ++reg)
+        for (int k = st; k < ed; ++k)
+          tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
+#ifdef AG2PC_PROFILE
+      g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
+      _mark = io_count(send_io, recv_io);
+#endif
+
+      // half-gate phase on [st,ed): garbler (send_io) and eval (recv_io). The
+      // mitc tweak base renew_ks(st) keeps each leaky-AND's tweak distinct
+      // across chunks and identical on both threads.
+      res.push_back(pool->enqueue([this, st, ed, LB, pair_seed, &tKEY, &tMAC, &tr]() {
+        MITCCRH<8> mitc;
+        mitc.setS(pair_seed);
+        mitc.renew_ks((uint64_t)st);
+        block pad[16];
+        BlockVec tmp(ed - st);
+        for (int k0 = st; k0 < ed; k0 += 8) {
+          int batch = std::min(8, ed - k0);
+          for (int j = 0; j < 8; ++j) {
+            block key = (j < batch) ? tKEY[k0 + j] : zero_block;
+            pad[2 * j]     = key;
+            pad[2 * j + 1] = key ^ Delta;
+          }
+          mitc.hash<8, 2>(pad);
+          for (int j = 0; j < batch; ++j) {
+            int k = k0 + j;
+            block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
+            tmp[k - st] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
+          }
+        }
+        send_io->send_data(tmp.data(), (size_t)(ed - st) * sizeof(block));
+        send_io->flush();
+      }));
+      res.push_back(pool->enqueue([this, st, ed, LB, pair_seed, &tKEY, &tMAC, &tr, &Sout]() {
+        MITCCRH<8> mitc;
+        mitc.setS(pair_seed);
+        mitc.renew_ks((uint64_t)st);
+        block pad[16];
+        BlockVec wire(ed - st);
+        recv_io->recv_data(wire.data(), (size_t)(ed - st) * sizeof(block));
+        for (int k0 = st; k0 < ed; k0 += 8) {
+          int batch = std::min(8, ed - k0);
+          for (int j = 0; j < 8; ++j) {
+            pad[2 * j]     = (j < batch) ? tMAC[k0 + j] : zero_block;  // -> H(M)
+            pad[2 * j + 1] = (j < batch) ? tKEY[k0 + j] : zero_block;  // -> H(K)
+          }
+          mitc.hash<8, 2>(pad);
+          for (int j = 0; j < batch; ++j) {
+            int k = k0 + j;
+            block HM = pad[2 * j], HK = pad[2 * j + 1];
+            block E = HM ^ (wire[k - st] & select_mask[tr[k]]);
+            block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
+            Sout[k] = HK ^ E
+                    ^ tKEY[2 * LB + k] ^ tMAC[2 * LB + k]
+                    ^ (C & select_mask[tr[k]])
+                    ^ (Delta & select_mask[tr[2 * LB + k]]);
+          }
+        }
+      }));
+      joinNclean(res);
+#ifdef AG2PC_PROFILE
+      g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
+      _mark = io_count(send_io, recv_io);
+#endif
+    }
+    // close the COT session: the single malicious consistency check.
+    {
+      vector<future<void>> re;
+      re.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
+      re.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
+      joinNclean(re);
+    }
+#ifdef AG2PC_PROFILE
+    g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
 #endif
 #ifdef EMP_DEBUG_PHASE
-    _phase("[triple] half-gate exchange", party);
+    _phase("[triple] streaming leaky-AND", party);
 #endif
 
     // Open d^me = LSB1(s^me) to the peer (bit 1 carries the garbling parity
@@ -262,7 +386,7 @@ public:
     // r-bit, and every P_(j≠1) flips K_j[c^1] = K_j[r^1] ⊕ d·Δ_j to
     // maintain MAC consistency on the new c^1 bit.
     //
-    // Bit-0 pinned variant (matches AuthSharePool fix): peer j uses
+    // Bit-0 pinned variant (matches the init_abit_ Δ pinning): peer j uses
     // (Δ_j ⊕ e_0) so bit 0 of tKEY[1] stays at 0; P1 instead flips bit 0
     // of tMAC[2*LB + k] by d so bit0(tMAC) tracks c^1 = r^1 ⊕ d
     // across all peers. tr[2*LB + k] is mirrored to keep the legacy byte
@@ -331,9 +455,16 @@ public:
 #endif
     };  // end produce_leaky_ands_halfgate
 
-    // Run the active leaky-AND method.
+    // Run the active leaky-AND method. HalfGate streams its own COT (above);
+    // CutChoose mints all aShares up front, then runs the cut-and-choose.
     if constexpr (kLeakyAnd == LeakyAnd::HalfGate) produce_leaky_ands_halfgate();
-    else { (void)produce_leaky_ands_halfgate; cutchoose_leaky(tMAC, tKEY, tr, LB); }
+    else {
+      (void)produce_leaky_ands_halfgate;
+      process_phase1(tMAC, tKEY, abit_len);
+      tr.resize(abit_len);
+      for (int k = 0; k < abit_len; ++k) tr[k] = LSB(tMAC[k]);
+      cutchoose_leaky(tMAC, tKEY, tr, LB);
+    }
 
     // Π_aAND (P:aAND): bucketing via per-row circular shifts on a
     // bucket_size × length matrix.  Row 0 is fixed, rows 1..B-1 get a random
@@ -499,7 +630,7 @@ public:
     compute(MAC.data(), KEY.data(), length, out_aos);
   }
 
-  // ==== Pool API (Phase C) ====
+  // ==== Pool API ====
 
   // Available pool entries (i.e. unconsumed triples).
   size_t available() const { return pool_triples.size() - cursor; }
@@ -528,12 +659,11 @@ public:
   }
 
 private:
-  // Stage 4d: compact (drop consumed prefix), grow pool_triples by `batch`,
-  // then run compute() with out_aos pointing into the freshly grown slots.
-  // The standalone SoA→AoS transpose is gone — bucketing writes AoS in
-  // place during its per-row XOR loop. The SoA tmac/tkey buffers still
-  // exist (compute() needs them as protocol scratch / output for the
-  // debug check_MAC path) but the pool no longer reads them post-compute.
+  // Compact (drop consumed prefix), grow pool_triples by `batch`, then run
+  // compute() with out_aos pointing into the freshly grown slots. Bucketing
+  // writes the AoS bundles in place during its per-row XOR loop; the SoA
+  // tmac/tkey buffers are compute()'s scratch / output for the debug check_MAC
+  // path but the pool no longer reads them post-compute.
   void refill_internal(size_t batch) {
     if (cursor > 0) {
       pool_triples.erase(pool_triples.begin(), pool_triples.begin() + cursor);
