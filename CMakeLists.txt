@@ -46,12 +46,6 @@ target_link_libraries(emp-ag2pc INTERFACE
     emp-tool::emp-tool
     emp-ot::emp-ot)
 
-# Bristol-format circuit files used by tests (e.g. AES, SHA). Files now
-# live in upstream emp-tool. Stored as absolute path so test binaries can
-# be run from any cwd.
-target_compile_definitions(emp-ag2pc INTERFACE
-    EMP_CIRCUIT_PATH="/Users/wangxiao/Documents/emp-tool/emp-tool/circuits/files/")
-
 if(EMP_AG2PC_DEBUG)
     target_compile_definitions(emp-ag2pc INTERFACE EMP_DEBUG_PHASE)
 endif()
