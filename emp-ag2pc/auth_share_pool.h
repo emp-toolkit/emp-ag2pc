@@ -224,8 +224,8 @@ class AuthSharePool { public:
 		out_bundle.resize(n);
 		for (int i = 0; i < n; ++i) {
 			AShareBundle &wb = out_bundle[i];
-			wb.mac(0) = tmac[i];  // single peer slot
-			wb.key(0) = tkey[i];
+			wb.mac = tmac[i];
+			wb.key = tkey[i];
 		}
 	}
 };

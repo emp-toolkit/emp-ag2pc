@@ -5,30 +5,16 @@
 
 namespace emp {
 
-// AoS-by-wire packing of authenticated-share state for one wire.
-// Layout (slot k indexes peers in increasing party-id order, skipping `self`):
-//   km[2*k]     = mac for the k-th peer
-//   km[2*k + 1] = key for the k-th peer
-// With a single peer there is one slot: K = 1, N = 2 blocks (32B, half a
-// cache line). The flat block layout lets per-slot loops compile into linear
-// SSE/AVX XOR sequences.
+// Per-wire authenticated-share state for one wire: with a single peer it is
+// just (mac, key) = 32B, half a cache line. Kept as a struct (rather than
+// parallel mac[]/key[] arrays) so the frontend can carry per-wire state as an
+// AShareBundleVec and memcpy whole wires around.
+//   mac = M_peer[x] = K_peer[x] ⊕ x·Δ_peer   (bit0 carries the share bit x)
+//   key = K_me[x_peer]                        (local key for the peer's bit)
 struct AShareBundle {
-  static constexpr int K = 1;
-  static constexpr int N = 2;
-  block km[N];
-
-  block &mac(int slot) { return km[2 * slot]; }
-  block &key(int slot) { return km[2 * slot + 1]; }
-  const block &mac(int slot) const { return km[2 * slot]; }
-  const block &key(int slot) const { return km[2 * slot + 1]; }
+  block mac;
+  block key;
 };
-
-// Map peer party-id (1-based) to a slot index in [0, 1) within a bundle owned
-// by `self`. Caller must ensure peer != self. With a single peer this is
-// always 0.
-inline int peer_slot(int self, int peer) {
-  return (peer < self) ? (peer - 1) : (peer - 2);
-}
 
 // Skip zero/value-init for trivial bundles in resize / vector(N), matching
 // the BlockVec convention.

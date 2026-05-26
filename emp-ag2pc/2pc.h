@@ -163,7 +163,8 @@ private:
   // componentwise XOR of its (live) inputs. bit0 (the share-bit) rides along.
   static void xor_share(AShareBundle &out, const AShareBundle &a,
                         const AShareBundle &b) {
-    for (int t = 0; t < AShareBundle::N; ++t) out.km[t] = a.km[t] ^ b.km[t];
+    out.mac = a.mac ^ b.mac;
+    out.key = a.key ^ b.key;
   }
 
   // Orchestrator: builds ComputeCtx, then runs the step methods in order.
@@ -194,7 +195,7 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
     sw.eval_label.resize(n);
   // Step 3 (Π_aShare): n authenticated λ-shares — drawn from pool. The pool
   // stores AoS-by-wire, so draw is a single memcpy into sw.wire_bundle.
-  // Each share-bit λ_w^i is implicit in bit0(sw.wire_bundle[w].mac(0)).
+  // Each share-bit λ_w^i is implicit in bit0(sw.wire_bundle[w].mac).
   fpre->abit.draw(n, sw.wire_bundle);
 
   // Step 3 (cont.): Pi (i ≥ 2) samples m_{w, 0}^i for each input wire.
@@ -206,7 +207,7 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
   // bit0 of any peer slot's MAC.
   std::vector<unsigned char> v(n);
   for (int i = 0; i < n; ++i)
-    v[i] = (unsigned char)LSB(sw.wire_bundle[i].mac(0));
+    v[i] = (unsigned char)LSB(sw.wire_bundle[i].mac);
   if (party == owner)
     for (int i = 0; i < n; ++i) v[i] ^= (unsigned char)inputs[i];
 
@@ -322,7 +323,7 @@ void C2PC::load_inputs(ComputeCtx &ctx, const SecureWires *const *inputs,
 
 // Step 4: draw AND triples + seed each AND-output wire's share state from the
 // preprocessing pool. ANDS_bundle[ai].b[s] holds triple ai's slot-s share
-// bundle; the slot-s share-bit is implicit in bit0(.mac(0)).
+// bundle; the slot-s share-bit is implicit in bit0(.mac).
 void C2PC::draw_and_seed(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
@@ -365,10 +366,10 @@ void C2PC::draw_and_seed(ComputeCtx &ctx) {
 // the sweep, so a later standalone Beaver pass would read stale slots. The bit-0
 // share encoding XORs / copies with the high bits, so λ_w propagates implicitly.
 // sigma[ai] is AND-gate ai's corrected share-bundle: the slot-s share of triple
-// ai lives in bit0(ANDS_bundle[ai].b[s].mac(0)), and the Beaver XOR pattern gives
+// ai lives in bit0(ANDS_bundle[ai].b[s].mac), and the Beaver XOR pattern gives
 // bit0(sigma) = ANDS[2] ⊕ (xb?ANDS[1]) ⊕ (yb?ANDS[0]). The xb && yb correction is
-// "λ_{αβ} ⊕= 1" (P1-only): at P1 flip bit0 of every sb.mac(s); at non-P1 update
-// sb.key(peer_slot(*,1)) by (Δ ⊕ e_0) so bit0(KEY)=0 stays pinned.
+// "λ_{αβ} ⊕= 1" (P1-only): at P1 flip bit0 of sb.mac; at non-P1 update sb.key by
+// (Δ ⊕ e_0) so bit0(KEY)=0 stays pinned.
 void C2PC::beaver_pass(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
@@ -386,10 +387,10 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
       const Gate &g = cf->gates[gi];
       if (g.is_and()) {
         int ai = g.and_index();
-        unsigned char v_in0 = (unsigned char)LSB(WIRE(g.in0).mac(0));
-        unsigned char v_in1 = (unsigned char)LSB(WIRE(g.in1).mac(0));
-        unsigned char a0 = (unsigned char)LSB(ANDS_bundle[ai].b[0].mac(0));
-        unsigned char a1 = (unsigned char)LSB(ANDS_bundle[ai].b[1].mac(0));
+        unsigned char v_in0 = (unsigned char)LSB(WIRE(g.in0).mac);
+        unsigned char v_in1 = (unsigned char)LSB(WIRE(g.in1).mac);
+        unsigned char a0 = (unsigned char)LSB(ANDS_bundle[ai].b[0].mac);
+        unsigned char a1 = (unsigned char)LSB(ANDS_bundle[ai].b[1].mac);
         x[party][ai] = v_in0 ^ a0;
         y[party][ai] = v_in1 ^ a1;
       } else if (g.is_not()) {
@@ -426,18 +427,16 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
       AShareBundle &sb = sigma[ai];
       const TripleBundle &tb = ANDS_bundle[ai];
       bool xb = x[1][ai], yb = y[1][ai];
-      for (int t = 0; t < AShareBundle::N; ++t) {
-        block v = tb.b[2].km[t];
-        if (xb) v = v ^ tb.b[1].km[t];
-        if (yb) v = v ^ tb.b[0].km[t];
-        sb.km[t] = v;
-      }
+      // Beaver select-XOR on both fields: σ = ANDS[2] ⊕ (xb?ANDS[1]) ⊕ (yb?ANDS[0]).
+      sb.mac = tb.b[2].mac ^ (xb ? tb.b[1].mac : zero_block)
+                           ^ (yb ? tb.b[0].mac : zero_block);
+      sb.key = tb.b[2].key ^ (xb ? tb.b[1].key : zero_block)
+                           ^ (yb ? tb.b[0].key : zero_block);
       if (xb && yb) {
         if (party != 1) {
-          sb.key(peer_slot(party, 1)) = sb.key(peer_slot(party, 1)) ^ dxor;
+          sb.key = sb.key ^ dxor;
         } else {
-          for (int s = 0; s < AShareBundle::K; ++s)
-            sb.mac(s) = sb.mac(s) ^ bit0_mask;
+          sb.mac = sb.mac ^ bit0_mask;
         }
       }
     }
@@ -461,8 +460,6 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
   auto &mitc = ctx.mitc;
   {
     BlockVec G_buf(2 * num_ands);
-    std::vector<BlockVec> S_buf(3);
-    if (2 != party) { const int j = 2; S_buf[j].resize(3 * num_ands); }
     std::vector<unsigned char> b_buf;
     if (party == 2) b_buf.resize(num_ands);
 
@@ -504,36 +501,21 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       const AShareBundle &wb_out = WIRE(out);
       const AShareBundle &sb     = sigma[ai];
 
-      block H_a0_self = zero_block, H_a1_self = zero_block;
-      block H_b0_self = zero_block, H_b1_self = zero_block;
-      { const int d = 2;
-        int k = d - 2;
-        if (d == party) {
-          H_a0_self = buf[4 * k];     H_a1_self = buf[4 * k + 1];
-          H_b0_self = buf[4 * k + 2]; H_b1_self = buf[4 * k + 3];
-        } else {
-          int ds = peer_slot(party, d);
-          S_buf[d][3 * ai]     = buf[4 * k]     ^ buf[4 * k + 1] ^ wb_in1.mac(ds);
-          S_buf[d][3 * ai + 1] = buf[4 * k + 2] ^ buf[4 * k + 3] ^ wb_in0.mac(ds);
-          S_buf[d][3 * ai + 2] = buf[4 * k]     ^ buf[4 * k + 2]
-                                 ^ wb_out.mac(ds) ^ sb.mac(ds);
-        }
-      }
+      // Single garbler (d == party == 2): only the self tweak fires, so the
+      // four self hashes are just buf[0..3]; no cross-garbler S terms.
+      block H_a0_self = buf[0], H_a1_self = buf[1];
+      block H_b0_self = buf[2], H_b1_self = buf[3];
 
-      block sumK_a = zero_block, sumK_b = zero_block;
-      block sumK_ab = zero_block, sumK_g = zero_block;
-      for (int s = 0; s < AShareBundle::K; ++s) {
-        sumK_a  = sumK_a  ^ wb_in0.key(s);
-        sumK_b  = sumK_b  ^ wb_in1.key(s);
-        sumK_ab = sumK_ab ^ sb.key(s);
-        sumK_g  = sumK_g  ^ wb_out.key(s);
-      }
-      // λ_w^i is bit0(mac(0)). Branchless: select_mask[bit] gives 0 or
-      // all-ones, so (Δ & select_mask[bit]) collapses to bit ? Δ : 0.
-      block la_dot  = select_mask[LSB(wb_in0.mac(0))] & Delta;
-      block lb_dot  = select_mask[LSB(wb_in1.mac(0))] & Delta;
-      block lab_dot = select_mask[LSB(sb.mac(0))]     & Delta;
-      block lg_dot  = select_mask[LSB(wb_out.mac(0))] & Delta;
+      block sumK_a  = wb_in0.key;
+      block sumK_b  = wb_in1.key;
+      block sumK_ab = sb.key;
+      block sumK_g  = wb_out.key;
+      // λ_w^i is bit0(mac). Branchless: select_mask[bit] gives 0 or all-ones,
+      // so (Δ & select_mask[bit]) collapses to bit ? Δ : 0.
+      block la_dot  = select_mask[LSB(wb_in0.mac)] & Delta;
+      block lb_dot  = select_mask[LSB(wb_in1.mac)] & Delta;
+      block lab_dot = select_mask[LSB(sb.mac)]     & Delta;
+      block lg_dot  = select_mask[LSB(wb_out.mac)] & Delta;
 
       block G0 = H_a0_self ^ H_a1_self ^ sumK_b ^ lb_dot;
       block G1 = H_b0_self ^ H_b1_self ^ ml_a0 ^ sumK_a ^ la_dot;
@@ -545,8 +527,6 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       if (party == 2) b_buf[ai] = (unsigned char)(LSB1(ml_g0));
     }
     io_send(io1, io2, party, 1, G_buf.data(), 2 * num_ands * sizeof(block));
-    // No cross-garbler S terms with a single garbler (party 2): this loop is
-    // empty for 2pc.
     if (party == 2) io_send(io1, io2, party, 1, b_buf.data(), num_ands);
     io_flush(io1, io2, party, 1);
   }
@@ -611,9 +591,9 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
         const AShareBundle &wb_out = WIRE(out);
         const AShareBundle &sb     = sigma[ai];
         block Mr;  // M_2[r^1]: the single (sender=1, receiver=2) cross term
-        { block t = sb.mac(0) ^ wb_out.mac(0);
-          if (La) t = t ^ wb_in1.mac(0);
-          if (Lb) t = t ^ wb_in0.mac(0);
+        { block t = sb.mac ^ wb_out.mac;
+          if (La) t = t ^ wb_in1.mac;
+          if (Lb) t = t ^ wb_in0.mac;
           Mr = t;
         }
         // Pass 1: the single garbler's (s=2, d=2) self tweak — one renew_ks +
@@ -755,21 +735,19 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
       }
       int ai = g.and_index();
       bool La = mask_input[in0], Lb = mask_input[in1], Lg = mask_input[out];
-      bool v_in0 = (bool)LSB(WIRE(in0).mac(0));
-      bool v_in1 = (bool)LSB(WIRE(in1).mac(0));
-      bool v_out = (bool)LSB(WIRE(out).mac(0));
-      bool v_sig = (bool)LSB(sigma[ai].mac(0));
+      bool v_in0 = (bool)LSB(WIRE(in0).mac);
+      bool v_in1 = (bool)LSB(WIRE(in1).mac);
+      bool v_out = (bool)LSB(WIRE(out).mac);
+      bool v_sig = (bool)LSB(sigma[ai].mac);
       bool t1 = (La & Lb) ^ Lg ^ (La & v_in1) ^ (Lb & v_in0) ^ v_sig ^ v_out;
       block m = t1 ? Delta : zero_block;
       const AShareBundle &wb_in0 = WIRE(in0);
       const AShareBundle &wb_in1 = WIRE(in1);
       const AShareBundle &wb_out = WIRE(out);
       const AShareBundle &sb     = sigma[ai];
-      for (int s = 0; s < AShareBundle::K; ++s) {
-        if (La) m = m ^ wb_in1.key(s);
-        if (Lb) m = m ^ wb_in0.key(s);
-        m = m ^ sb.key(s) ^ wb_out.key(s);
-      }
+      if (La) m = m ^ wb_in1.key;
+      if (Lb) m = m ^ wb_in0.key;
+      m = m ^ sb.key ^ wb_out.key;
       M1_t[ai] = m;
     }
     block z1 = zero_block;
@@ -788,8 +766,6 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
     if (!cmpBlock(&sum, &zero_block, 1))
       error("cheat in t_gamma check (step 13)");
   } else {
-    // Non-P1: peer 1 always exists, slot = peer_slot(party, 1).
-    int s = peer_slot(party, 1);
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
       int in0 = g.in0, in1 = g.in1, out = g.out;
@@ -802,9 +778,9 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
       }
       int ai = g.and_index();
       bool La = mask_input[in0], Lb = mask_input[in1];
-      block m = sigma[ai].mac(s) ^ WIRE(out).mac(s);
-      if (La) m = m ^ WIRE(in1).mac(s);
-      if (Lb) m = m ^ WIRE(in0).mac(s);
+      block m = sigma[ai].mac ^ WIRE(out).mac;
+      if (La) m = m ^ WIRE(in1).mac;
+      if (Lb) m = m ^ WIRE(in0).mac;
       M1_t[ai] = m;
     }
     block z_i = zero_block;
@@ -872,7 +848,7 @@ std::vector<bool> C2PC::decode(const SecureWires &wires,
   // Each party reads its own λ-share from bit0 of any peer slot's MAC.
   std::vector<unsigned char> my_share(n);
   for (int i = 0; i < n; ++i)
-    my_share[i] = (unsigned char)LSB(wires.wire_bundle[i].mac(0));
+    my_share[i] = (unsigned char)LSB(wires.wire_bundle[i].mac);
   if (party != recipient) {
     io_send(io1, io2, party, recipient, my_share.data(), n);
     io_flush(io1, io2, party, recipient);

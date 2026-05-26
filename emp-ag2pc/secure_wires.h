@@ -6,20 +6,17 @@ using namespace emp;
 
 // Per-wire authenticated-share + half-gate state. Notation (Pi = local):
 //   wire_bundle[w]   = (M_j[λ_w^i], K_i[λ_w^j]) for the single peer j ≠ i,
-//                      AoS-by-wire. Slot 0 = peer_slot(party, j).
-//                      mac(0) / key(0) accessors hide the layout.
-//   λ_w^i            = LSB(wire_bundle[w].mac(0))  — implicit, since the
-//                      bit-0 invariant pins bit0(M)=x and bit0(K)=0 across
-//                      all peer slots.
+//                      in the bundle's .mac / .key fields.
+//   λ_w^i            = LSB(wire_bundle[w].mac)  — implicit, since the bit-0
+//                      invariant pins bit0(M)=x and bit0(K)=0.
 //   Lambda[w]        = Λ_w             (publicly opened mask; populated
 //                                       at every party after process_input
 //                                       or compute)
 //   label0[w]        = m_{w, 0}^2      only at the garbler P2; empty at P1
 //   eval_label[w]    = m_{w, Λ_w}^2    only at P1; empty at P2
 //
-// MAC relation: M_j[λ_w^i] = K_j[λ_w^i] ⊕ λ_w^i · Δ_j; on Pi the LHS is
-// in bundle.mac(slot of j) and on Pj the RHS-key is in (Pj's local)
-// bundle.key(slot of i).
+// MAC relation: M_j[λ_w^i] = K_j[λ_w^i] ⊕ λ_w^i · Δ_j; on Pi the LHS is in
+// bundle.mac and on Pj the RHS-key is in (Pj's local) bundle.key.
 struct SecureWires {
   std::vector<unsigned char> Lambda;
   AShareBundleVec wire_bundle;
