@@ -11,30 +11,30 @@
 #include <vector>
 using namespace emp;
 
-// Opt-in phase profiler: compile with -DWRK_PROFILE (or #define before include).
-// At P1, each WRK_PHASE prints the wall time and this party's send+recv byte
-// delta since the matching WRK_PHASE_BEGIN. Zero-cost when WRK_PROFILE is unset.
+// Opt-in phase profiler: compile with -DAG2PC_PROFILE (or #define before include).
+// At P1, each AG2PC_PHASE prints the wall time and this party's send+recv byte
+// delta since the matching AG2PC_PHASE_BEGIN. Zero-cost when AG2PC_PROFILE is unset.
 // Requires `send_io`/`recv_io` (NetIO*) and `party` in scope — C2PC members.
-#ifdef WRK_PROFILE
+#ifdef AG2PC_PROFILE
 #include <chrono>
 #include <cstdio>
-#define WRK_PHASE_BEGIN()                                                      \
-  auto _wrk_t = std::chrono::steady_clock::now();                              \
-  int64_t _wrk_c = io_count(send_io, recv_io)
-#define WRK_PHASE(name)                                                        \
+#define AG2PC_PHASE_BEGIN()                                                      \
+  auto _ag2pc_t = std::chrono::steady_clock::now();                              \
+  int64_t _ag2pc_c = io_count(send_io, recv_io)
+#define AG2PC_PHASE(name)                                                        \
   do {                                                                         \
     auto _n = std::chrono::steady_clock::now();                                \
     int64_t _c = io_count(send_io, recv_io);                                                  \
     if (party == 1)                                                            \
-      printf("[wrk] %-22s %9.3f ms  %12lld B\n", (name),                       \
-             std::chrono::duration<double, std::milli>(_n - _wrk_t).count(),   \
-             (long long)(_c - _wrk_c));                                        \
-    _wrk_t = _n;                                                               \
-    _wrk_c = _c;                                                               \
+      printf("[ag2pc] %-22s %9.3f ms  %12lld B\n", (name),                       \
+             std::chrono::duration<double, std::milli>(_n - _ag2pc_t).count(),   \
+             (long long)(_c - _ag2pc_c));                                        \
+    _ag2pc_t = _n;                                                               \
+    _ag2pc_c = _c;                                                               \
   } while (0)
 #else
-#define WRK_PHASE_BEGIN() ((void)0)
-#define WRK_PHASE(name) ((void)0)
+#define AG2PC_PHASE_BEGIN() ((void)0)
+#define AG2PC_PHASE(name) ((void)0)
 #endif
 
 // Two-party authenticated garbling protocol Π_MPC of agc.tex
@@ -53,7 +53,7 @@ using namespace emp;
 // Output wires of compute() carry full SecureWire state. process_input() and
 // compute() draw aShares/triples from the amortized pools owned by
 // AuthSharePool / TriplePool; preprocess(num_triples) pre-mints into the pool.
-// The frontend (a recording backend, see wrk_backend.h) drives this from native
+// The frontend (a recording backend, see ag2pc_backend.h) drives this from native
 // Bit/Integer code; circuits are consumed as WireGraph, not BristolFormat.
 
 class C2PC {
@@ -187,7 +187,7 @@ SecureWires C2PC::concat(const SecureWires &a,
 }
 
 SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
-  WRK_PHASE_BEGIN();
+  AG2PC_PHASE_BEGIN();
   SecureWires sw;
   sw.Lambda.resize(n);
   if (party != 1)
@@ -253,7 +253,7 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
     }
     joinNclean(res);
   }
-  WRK_PHASE(owner == 1 ? "process_input[owner1]" : "process_input[ownerN]");
+  AG2PC_PHASE(owner == 1 ? "process_input[owner1]" : "process_input[ownerN]");
   return sw;
 }
 
@@ -288,16 +288,16 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
   if (party != 1) ctx.label_slot.resize(ctx.num_slots);
   else ctx.eval_slot.resize(ctx.num_slots);  ctx.mitc.setS(zero_block);
 
-  WRK_PHASE_BEGIN();
-  load_inputs(ctx, inputs, n_inputs);     WRK_PHASE("load_inputs");
-  draw_and_seed(ctx);                      WRK_PHASE("draw_and_seed[step4]");
-  beaver_pass(ctx);                        WRK_PHASE("beaver_pass[step5]");
+  AG2PC_PHASE_BEGIN();
+  load_inputs(ctx, inputs, n_inputs);     AG2PC_PHASE("load_inputs");
+  draw_and_seed(ctx);                      AG2PC_PHASE("draw_and_seed[step4]");
+  beaver_pass(ctx);                        AG2PC_PHASE("beaver_pass[step5]");
   if (party != 1) garble_and_ship(ctx);    // steps 6-7 (sender Pi, i>=2)
-  else            receive_garbling(ctx);   WRK_PHASE("garble/recv[step6-7]");
-  if (party == 1) p1_evaluate(ctx);        WRK_PHASE("p1_evaluate[step10]");
-  check_label_hash(ctx);                   WRK_PHASE("check_label[step12]");
-  check_tgamma(ctx);                       WRK_PHASE("check_tgamma[step13]");
-  SecureWires r = gather_outputs(ctx, output_ids);  WRK_PHASE("gather_outputs");
+  else            receive_garbling(ctx);   AG2PC_PHASE("garble/recv[step6-7]");
+  if (party == 1) p1_evaluate(ctx);        AG2PC_PHASE("p1_evaluate[step10]");
+  check_label_hash(ctx);                   AG2PC_PHASE("check_label[step12]");
+  check_tgamma(ctx);                       AG2PC_PHASE("check_tgamma[step13]");
+  SecureWires r = gather_outputs(ctx, output_ids);  AG2PC_PHASE("gather_outputs");
   return r;
 }
 
@@ -329,9 +329,9 @@ void C2PC::draw_and_seed(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-#ifdef WRK_PROFILE
+#ifdef AG2PC_PROFILE
   int64_t _all0 = io_count(send_io, recv_io);
-  uint64_t _cot0 = g_wrk_cot_bytes, _phi0 = g_wrk_phi_bytes;
+  uint64_t _cot0 = g_ag2pc_cot_bytes, _phi0 = g_ag2pc_phi_bytes;
 #endif
   fpre->draw(num_ands, ctx.ANDS_bundle);
 
@@ -347,11 +347,11 @@ void C2PC::draw_and_seed(ComputeCtx &ctx) {
       if (g.is_and()) WIRE(g.out) = preprocess_bundle[g.and_index()];
     }
   }
-#ifdef WRK_PROFILE
+#ifdef AG2PC_PROFILE
   if (party == 1) {
-    uint64_t all = (uint64_t)(io_count(send_io, recv_io) - _all0), cot = g_wrk_cot_bytes - _cot0,
-             phi = g_wrk_phi_bytes - _phi0;
-    printf("[wrk]   draw_and_seed split: COT %llu B, phi-exchange %llu B, "
+    uint64_t all = (uint64_t)(io_count(send_io, recv_io) - _all0), cot = g_ag2pc_cot_bytes - _cot0,
+             phi = g_ag2pc_phi_bytes - _phi0;
+    printf("[ag2pc]   draw_and_seed split: COT %llu B, phi-exchange %llu B, "
            "other-non-COT %lld B\n",
            (unsigned long long)cot, (unsigned long long)phi,
            (long long)(all - cot - phi));
@@ -404,13 +404,13 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
   std::vector<future<void>> res;
   { const int party2 = 3 - party;
     res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-      send_io->send_data(x[party].data(), num_ands);
-      send_io->send_data(y[party].data(), num_ands);
+      send_io->send_bool((const bool *)x[party].data(), num_ands);  // 1 bit/AND, packed
+      send_io->send_bool((const bool *)y[party].data(), num_ands);
       send_io->flush();
     }));
     res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-      recv_io->recv_data(x[party2].data(), num_ands);
-      recv_io->recv_data(y[party2].data(), num_ands);
+      recv_io->recv_bool((bool *)x[party2].data(), num_ands);
+      recv_io->recv_bool((bool *)y[party2].data(), num_ands);
     }));
   }
   joinNclean(res);
@@ -669,7 +669,7 @@ void C2PC::check_label_hash(ComputeCtx &ctx) {
     { const int party2 = 2;
       r2.push_back(pool->enqueue([this, &hp_seed, &Lambda_AND, &acc, num_ands, party2]() {
         send_io->send_data(&hp_seed, sizeof(block));
-        send_io->send_data(Lambda_AND.data(), num_ands);
+        send_io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // 1 bit/AND, packed
         send_io->send_data(&acc, sizeof(block));
         send_io->flush();
       }));
@@ -678,7 +678,7 @@ void C2PC::check_label_hash(ComputeCtx &ctx) {
   } else {
     block h_i;
     recv_io->recv_data(&hp_seed, sizeof(block));
-    recv_io->recv_data(Lambda_AND.data(), num_ands);
+    recv_io->recv_bool((bool *)Lambda_AND.data(), num_ands);
     recv_io->recv_data(&h_i, sizeof(block));
 
     // Re-propagate Λ and labels from the persisted base while streaming the
@@ -821,7 +821,7 @@ SecureWires C2PC::gather_outputs(ComputeCtx &ctx,
 std::vector<bool> C2PC::decode(const SecureWires &wires,
                                          int recipient) {
   int n = (int)wires.size();
-  WRK_PHASE_BEGIN();
+  AG2PC_PHASE_BEGIN();
   // Reveal to ALL parties: reconstruct at P1, then P1 broadcasts. Needed for
   // reactive host branching — every party must learn the same value.
   if (recipient == PUBLIC) {
@@ -863,7 +863,7 @@ std::vector<bool> C2PC::decode(const SecureWires &wires,
       result[i] = (v & 1);
     }
   }
-  WRK_PHASE("decode[step14]");
+  AG2PC_PHASE("decode[step14]");
   return result;
 }
 

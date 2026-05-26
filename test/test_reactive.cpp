@@ -1,11 +1,11 @@
 // Reactive test: mid-circuit reveal-to-all, host branch on the value, a new
 // input after the reveal, and an auto-flush (new secret input after a gate with
-// no explicit reveal/checkpoint). Same SPMD program runs under WRK and under the
+// no explicit reveal/checkpoint). Same SPMD program runs under ag2pc and under the
 // plaintext clear backend; results must match and be identical across parties.
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
-#include "emp-ag2pc/wrk_backend.h"
+#include "emp-ag2pc/ag2pc_backend.h"
 using namespace std;
 using namespace emp;
 
@@ -49,11 +49,11 @@ int main(int argc, char **argv) {
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(4);
-  setup_wrk_backend(io1, io2, &pool, party);
+  setup_ag2pc(io1, io2, &pool, party);
   io1->flush(); io2->flush();
   bool got[3];
   reactive<block>(a_in, b_in, d_in, got);   // all parties branch on revealed v
-  finalize_wrk_backend();
+  finalize_ag2pc();
 
   // Every party should hold identical revealed values (decode-to-all).
   cout << "P" << party << ": v=" << got[0] << " r=" << got[1]
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     reactive<block>(A, Bv, D, ref);           // plaintext oracle, real values
     finalize_clear_backend();
     bool ok = got[0] == ref[0] && got[1] == ref[1] && got[2] == ref[2];
-    cout << "wrk_reactive vs plaintext: " << (ok ? "GOOD!" : "BAD!")
+    cout << "test_reactive vs plaintext: " << (ok ? "GOOD!" : "BAD!")
          << "  (ref v=" << ref[0] << " r=" << ref[1] << " ru=" << ref[2] << ")"
          << endl;
   }

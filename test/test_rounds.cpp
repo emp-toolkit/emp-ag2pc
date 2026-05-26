@@ -4,7 +4,7 @@
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
-#include "emp-ag2pc/wrk_backend.h"
+#include "emp-ag2pc/ag2pc_backend.h"
 using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>
@@ -17,7 +17,7 @@ int main(int argc, char **argv) {
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(4);
-  auto *b = setup_wrk_backend(io1, io2, &pool, party);
+  auto *b = setup_ag2pc(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // K+1 input feeds, ALL owned by party 1 and ALL fed before any gate. Eager
@@ -34,11 +34,11 @@ int main(int argc, char **argv) {
   bool bit0 = bit0b.reveal<bool>(1);  // single (n=1) terminal reveal
 
   int calls = b->process_input_calls;
-  finalize_wrk_backend();
+  finalize_ag2pc();
 
   if (party == 1) {
     // Expected XOR of low bits of 1..10 = low bit parity; just report.
-    cout << "wrk_rounds: K=" << K << " same-owner Integers -> process_input_calls="
+    cout << "test_rounds: K=" << K << " same-owner Integers -> process_input_calls="
          << calls << "  " << (calls == 1 ? "GOOD! (batched)" : "BAD! (per-input)")
          << "  (out bit0=" << bit0 << ")" << endl;
   }

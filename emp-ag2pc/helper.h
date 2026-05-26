@@ -19,7 +19,7 @@ using std::max;
 // (re-included here via the project's emp-tool dependency).
 
 // Single-bit masks at positions 0 and 1. Used by protocols that pin the
-// low bits of the global key Δ (e.g. WRK-style aShare encoding pins bit 0
+// low bits of the global key Δ (e.g. ag2pc-style aShare encoding pins bit 0
 // of K, half-gate Λ_γ recovery pins bit 1 of ⊕_p Δ_p).
 inline constexpr block bit0_mask = makeBlock(0, 1);
 inline constexpr block bit1_mask = makeBlock(0, 2);
@@ -32,7 +32,7 @@ inline constexpr block bit1_mask = makeBlock(0, 2);
 // Code just uses send_io->send_data / recv_io->recv_data directly; there is no
 // dst/src routing because the only peer is implicit.
 //
-// Total bytes across both channels (for the WRK_PROFILE phase counters).
+// Total bytes across both channels (for the AG2PC_PROFILE phase counters).
 inline int64_t io_count(NetIO *send_io, NetIO *recv_io) {
   return send_io->send_counter + send_io->recv_counter +
          recv_io->send_counter + recv_io->recv_counter;

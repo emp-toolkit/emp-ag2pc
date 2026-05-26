@@ -1,5 +1,5 @@
-#ifndef EMP_AG2PC_WRK_BACKEND_H__
-#define EMP_AG2PC_WRK_BACKEND_H__
+#ifndef EMP_AG2PC_BACKEND_H__
+#define EMP_AG2PC_BACKEND_H__
 #include "emp-tool/execution/backend.h"
 #include "emp-ag2pc/2pc.h"
 #include "emp-ag2pc/wire_graph.h"
@@ -10,9 +10,9 @@
 
 namespace emp {
 
-// Recording backend that lets people author WRK circuits in emp-tool's native
+// Recording backend that lets people author ag2pc circuits in emp-tool's native
 // Bit / Integer / Float frontend. Unlike a streaming GC backend, it does NOT run
-// the protocol per gate: WRK is multi-pass and needs the whole circuit, so this
+// the protocol per gate: ag2pc is multi-pass and needs the whole circuit, so this
 // backend *records* a WireGraph and runs the protocol once, at the (single,
 // terminal) reveal.
 //
@@ -22,13 +22,13 @@ namespace emp {
 // The native wire type stays Bit_T<block>; the block is used only as a carrier
 // for an int wire id (low 4 bytes). Public constants are synthesized as ordinary
 // gates (c0 = XOR(w,w), c1 = NOT(c0)) so the protocol needs no special handling.
-class WRKBackend : public Backend {
+class AG2PCBackend : public Backend {
 public:
-  WRKBackend(NetIO *io1_, NetIO *io2_, ThreadPool *pool_, int party_) {
+  AG2PCBackend(NetIO *io1_, NetIO *io2_, ThreadPool *pool_, int party_) {
     this->party = party_;
     mpc = new C2PC(io1_, io2_, pool_, party_);
   }
-  ~WRKBackend() override { delete mpc; }
+  ~AG2PCBackend() override { delete mpc; }
 
   size_t wire_bytes() const override { return sizeof(block); }
 
@@ -93,7 +93,7 @@ public:
   // wires live (as authenticated SecureWires) and discarding the gate list. The
   // kept wires become the inputs of the next chunk — so a long composition (e.g.
   // AES x10) can checkpoint partway and stay at one chunk's gate-list memory
-  // instead of the whole circuit's. Cost: one constant-round WRK instance per
+  // instead of the whole circuit's. Cost: one constant-round ag2pc instance per
   // chunk (more rounds for less memory). `keep` are the wires (Bit carriers) to
   // preserve; their ids are rewritten in place to the next chunk's [0, n).
   void checkpoint(void *keep, int n) {
@@ -131,7 +131,7 @@ private:
 
   // Build a WireGraph from the gates recorded since the last boundary, assemble
   // its input bundles (process_input per owner on the first chunk; the carried
-  // SecureWires on later chunks), resolve constants + liveness, and run the WRK
+  // SecureWires on later chunks), resolve constants + liveness, and run the ag2pc
   // protocol. out_ids: the wire ids that become this chunk's outputs (revealed
   // wires, or wires kept across a checkpoint). Returns their authenticated state.
   SecureWires run_chunk(std::vector<int> &out_ids) {
@@ -192,7 +192,7 @@ private:
     int c0 = -1, c1 = -1;
     std::vector<Gate> pre;
     if (used_c0 || used_c1) {
-      if (num_in == 0) error("WRKBackend: public constant requires >=1 input");
+      if (num_in == 0) error("AG2PCBackend: public constant requires >=1 input");
       c0 = (int)gid++;
       pre.push_back({0, 0, c0, Gate::XOR_TAG});
       if (used_c1) { c1 = (int)gid++; pre.push_back({c0, 0, c1, Gate::NOT_TAG}); }
@@ -265,9 +265,9 @@ private:
   }
 };
 
-inline WRKBackend *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *pool,
+inline AG2PCBackend *setup_ag2pc(NetIO *io1, NetIO *io2, ThreadPool *pool,
                                          int party) {
-  auto *b = new WRKBackend(io1, io2, pool, party);
+  auto *b = new AG2PCBackend(io1, io2, pool, party);
   backend = b;
   return b;
 }
@@ -278,15 +278,15 @@ inline WRKBackend *setup_wrk_backend(NetIO *io1, NetIO *io2, ThreadPool *pool,
 // Reveal n wire carriers to ALL parties (returns the values, keeps all wires
 // live, continues). Use for values the host will branch on. A single Bit can
 // also use `x.reveal<bool>(PUBLIC)` directly.
-inline void wrk_reveal(bool *out, void *wires, int n) {
+inline void reveal_ag2pc(bool *out, void *wires, int n) {
   backend->reveal(out, PUBLIC, wires, n);
 }
 
-inline void wrk_checkpoint(void *keep, int n) {
-  static_cast<WRKBackend *>(backend)->checkpoint(keep, n);
+inline void checkpoint_ag2pc(void *keep, int n) {
+  static_cast<AG2PCBackend *>(backend)->checkpoint(keep, n);
 }
 
-inline void finalize_wrk_backend() {
+inline void finalize_ag2pc() {
   if (backend == nullptr) return;
   backend->finalize();
   delete backend;
@@ -294,4 +294,4 @@ inline void finalize_wrk_backend() {
 }
 
 }  // namespace emp
-#endif  // EMP_AG2PC_WRK_BACKEND_H__
+#endif  // EMP_AG2PC_BACKEND_H__

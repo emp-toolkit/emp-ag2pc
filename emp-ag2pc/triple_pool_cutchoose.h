@@ -134,7 +134,7 @@
     const int T = cutchoose_T, N = T * LB;
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // c = a∧b → [2N,3N)
     int ap = (party == 1) ? 2 : 1;
-    block S = RO("WRK RO", zero_block)
+    block S = RO("AG2PC RO", zero_block)
                   .absorb((party == 1 ? send_io : recv_io)->get_digest())
                   .absorb((party == 1 ? recv_io : send_io)->get_digest())
                   .squeeze_block();
@@ -245,7 +245,7 @@
       tMAC[2 * N + tamper] = tMAC[2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
-    block S = RO("WRK RO", zero_block)
+    block S = RO("AG2PC RO", zero_block)
                   .absorb((party == 1 ? send_io : recv_io)->get_digest())
                   .absorb((party == 1 ? recv_io : send_io)->get_digest())
                   .squeeze_block();

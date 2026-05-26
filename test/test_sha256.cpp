@@ -1,8 +1,8 @@
 // Native SHA-256 compression (emp::sha256_compress<Wire>) authored in the Bit
-// frontend and run through WRKBackend (record -> WireGraph -> C2PC). A larger
+// frontend and run through AG2PCBackend (record -> WireGraph -> C2PC). A larger
 // circuit than AES (~24.7k ANDs). The 512-bit message block is a secret input
 // of party 2; the IV (H0) is public, matching real SHA-256. Oracle: the same
-// compression under setup_clear_backend(""), so we verify WRK == plaintext.
+// compression under setup_clear_backend(""), so we verify ag2pc == plaintext.
 //
 // SHA_BLOCKS (env var, default 1) compressions form ONE circuit of
 // SHA_BLOCKS * ~24.7k ANDs — a knob for the AND-dominated regime. All secret
@@ -13,7 +13,7 @@
 #include "emp-tool/circuits/sha256_circuit.h"
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
-#include "emp-ag2pc/wrk_backend.h"
+#include "emp-ag2pc/ag2pc_backend.h"
 using namespace std;
 using namespace emp;
 
@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(4);
-  setup_wrk_backend(io1, io2, &pool, party);
+  setup_ag2pc(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Feed ALL secret inputs first (party 2 owns the messages; others feed dummies),
@@ -60,14 +60,14 @@ int main(int argc, char **argv) {
   vector<block> buf(256 * N);
   for (int n = 0; n < N; ++n) sha_compress(msg[n].data(), buf.data() + n * 256);
 
-  vector<bool> out_wrk(256 * N);
+  vector<bool> out_ag2pc(256 * N);
   {
     bool *o = new bool[256 * N];
     backend->reveal(o, 1, buf.data(), 256 * N);
-    for (int i = 0; i < 256 * N; ++i) out_wrk[i] = o[i];
+    for (int i = 0; i < 256 * N; ++i) out_ag2pc[i] = o[i];
     delete[] o;
   }
-  finalize_wrk_backend();
+  finalize_ag2pc();
 
   if (party == 1) {
     setup_clear_backend("");
@@ -80,10 +80,10 @@ int main(int argc, char **argv) {
       bool out_ref[256];
       backend->reveal(out_ref, 1, rbuf, 256);
       for (int b = 0; b < 256; ++b)
-        ok = ok && (out_wrk[n * 256 + b] == out_ref[b]);
+        ok = ok && (out_ag2pc[n * 256 + b] == out_ref[b]);
     }
     finalize_clear_backend();
-    cout << "wrk_sha256 (" << N << " compression" << (N == 1 ? "" : "s")
+    cout << "test_sha256 (" << N << " compression" << (N == 1 ? "" : "s")
          << ") vs plaintext: " << (ok ? "GOOD!" : "BAD!") << endl;
   }
   return 0;

@@ -5,7 +5,7 @@
 
 namespace emp {
 
-// Purpose-built circuit IR for the WRK frontend (and, later, GMW). Unlike a
+// Purpose-built circuit IR for the ag2pc frontend (and, later, GMW). Unlike a
 // BristolFormat, it states inputs / outputs explicitly rather than by position:
 //   - inputs occupy wire ids [0, num_in) and are grouped per owner, so a
 //     recording frontend can batch one process_input per owner;
@@ -16,7 +16,7 @@ namespace emp {
 //   - last_use is optional neutral liveness metadata (Stage C): last_use[w] =
 //     largest gate index reading w as an input, -1 if never read, INT_MAX-style
 //     "pinned" left to the consumer. Each backend overlays its own pin policy
-//     (WRK pins AND-incident/outputs; GMW pins per level).
+//     (ag2pc pins AND-incident/outputs; GMW pins per level).
 //
 // A gate's single `op` field encodes both kind and AND index: op >= 0 marks an
 // AND gate whose value IS its index into the protocol's per-AND arrays; the two

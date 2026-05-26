@@ -1,11 +1,11 @@
-// Stage B: author a WRK circuit in emp-tool's native Bit frontend, run it
-// through WRKBackend (record -> WireGraph -> C2PC), no Bristol. SPMD: every
+// Author an ag2pc circuit in emp-tool's native Bit frontend, run it
+// through AG2PCBackend (record -> WireGraph -> C2PC), no Bristol. SPMD: every
 // party runs identical code, passing its own real input and a dummy for
 // inputs it does not own.
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
-#include "emp-ag2pc/wrk_backend.h"
+#include "emp-ag2pc/ag2pc_backend.h"
 using namespace std;
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>
@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
 
   NetIO *io1, *io2; make_io2pc(party, port, io1, io2);
   ThreadPool pool(4);
-  setup_wrk_backend(io1, io2, &pool, party);
+  setup_ag2pc(io1, io2, &pool, party);
   io1->flush(); io2->flush();
 
   // Inputs: a owned by party 1, b owned by party 2 (a=b=1).
@@ -29,11 +29,11 @@ int main(int argc, char **argv) {
   Bit r = ((A & B) ^ (!A)) ^ Bit(false, PUBLIC);  // (a&b)^(!a) ^ 0
   bool res = r.reveal<bool>(1);                    // reveal to party 1
 
-  finalize_wrk_backend();
+  finalize_ag2pc();
 
   if (party == 1) {
     bool ref = ((true & true) ^ (!true)) ^ false;  // = 1
-    cout << "wrk_recording out = " << res << " (expected " << ref << ")  "
+    cout << "test_recording out = " << res << " (expected " << ref << ")  "
          << (res == ref ? "GOOD!" : "BAD!") << endl;
   }
   return 0;

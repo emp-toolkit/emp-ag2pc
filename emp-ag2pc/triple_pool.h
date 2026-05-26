@@ -8,27 +8,23 @@
 
 using namespace emp;
 
-#ifdef WRK_PROFILE
+#ifdef AG2PC_PROFILE
 // Profiler: this party's send+recv bytes spent in the half-gate phi exchange.
-inline uint64_t g_wrk_phi_bytes = 0;
+inline uint64_t g_ag2pc_phi_bytes = 0;
 #endif
 
-// Leaky-AND (KRRW18, eprint 2018/578, Fig. 5) followed by Π_Prep bucketing +
-// amortized pool: per-triple half-gate garbled-AND with an F_eq consistency
-// check, then circular-shift bucketing to remove leakage (P:aAND). The
-// leaky-AND is batched over LB triples; see produce_leaky_ands_halfgate.
+// Leaky-AND (eprint 2018/578, Fig. 5) followed by Π_Prep bucketing + amortized
+// pool: per-triple half-gate garbled-AND with an F_eq consistency check, then
+// circular-shift bucketing to remove leakage (P:aAND). The leaky-AND is batched
+// over LB triples; see produce_leaky_ands_halfgate.
 //
-// Notes on the 2-party leaky-AND (vs the n-party WRK protocol):
+// (1) No shared-zero mask. The y-contribution C^me = y·Δ_me ⊕ K[y] ⊕ M[y] is
+//     computed locally; C^A ⊕ C^B = y·(Δ_A⊕Δ_B) holds from the MAC relation,
+//     and the half-gate hash already hides C on the wire.
 //
-// (1) No FZero. The y-contribution C^me = y·Δ_me ⊕ K[y] ⊕ M[y] is computed
-//     locally; C^A ⊕ C^B = y·(Δ_A⊕Δ_B) holds from the MAC relation, and the
-//     half-gate hash already hides C on the wire, so the n-party shared-zero
-//     mask is unnecessary.
-//
-// (2) The consistency check is KRRW's F_eq on L^me = S^me ⊕ d·Δ_me: hash the
+// (2) The consistency check is an F_eq on L^me = S^me ⊕ d·Δ_me: hash the
 //     L-vector to one digest and run a rush-secure equality (commit H(D) then
-//     open D). This replaces the n-party FRand/universal-hash α-check (no coin,
-//     no inner product, no u-mask).
+//     open D).
 //
 // (3) The B-1 sequential OpenToAll calls in P:aAND step 4 (one per
 //     non-first leaky triple in each bucket) are batched into a single
@@ -53,23 +49,13 @@ public:
   AuthSharePool abit;
   block Delta;
 
-  // ==== Pool storage (Phase C) ====
-  // AoS-by-triple layout: pool_triples[t] holds three AShareBundles (slots
-  // 0/1/2) for triple t. Internal compute() still emits SoA per-peer
-  // slot-major arrays — refill_internal transposes once on insert so
-  // consumers read AoS via draw(). The triple's share bits live in
-  // bit0(pool_triples[t].b[s].mac) for slots a/b/c at s=0/1/2.
+  // AoS-by-triple pool: pool_triples[t] holds the three AShareBundles (a/b/c)
+  // of triple t; share bit s is bit0(.b[s].mac). draw() serves from here.
   TripleBundleVec pool_triples;
   size_t cursor = 0;
-  // Floor for refill batch size. Any draw smaller than this still mints
-  // `min_refill` triples to amortize the per-call protocol overhead
-  // (csp tail, closing exchanges). Set at the bucket_size=4
-  // threshold from Figure 16: anything ≥ 3100 already gets B=4, so this
-  // floor doesn't push us into a worse bucket. Genuinely large workloads
-  // (≥ 280K triples) still hit B=3 naturally because `batch = max(needed,
-  // min_refill)` ≥ needed ≥ 280K. The previous floor of 280000 was tuned
-  // for B=3 always but threw away ~90% of the minted triples on
-  // SHA-256-sized circuits where the actual demand is ~22K.
+  // Floor on the refill batch so small draws still amortize the per-call
+  // overhead. 3100 is the bucket_size=4 threshold, so the floor never forces a
+  // worse bucket; large workloads refill at their own size (≥280K → B=3).
   size_t min_refill = 3100;
 
   TriplePool(NetIO *io1, NetIO *io2, ThreadPool *pool, int party)
@@ -90,57 +76,40 @@ public:
       return 5;
   }
 
-  // Leaky-AND generation method. COT/aShare generation, the aShare consistency
-  // check, and the final Π_aAND bucketing are shared across methods; only the
-  // middle leaky-AND step and its COT demand differ. HalfGate = WRK's garbled
-  // half-gate phi exchange (current). CutChoose = an OT-based cut-and-choose
-  // (FKOS / TinyOT style) — not implemented; the seam is here to drop it in.
+  // Leaky-AND method. The COT/aShare generation and the Π_aAND bucketing are
+  // shared; only the middle leaky-AND step differs. HalfGate = garbled
+  // half-gate (active). CutChoose = OT-based cut-and-choose (see
+  // triple_pool_cutchoose.h).
   enum class LeakyAnd { HalfGate, CutChoose };
   static constexpr LeakyAnd kLeakyAnd = LeakyAnd::HalfGate;
   static constexpr int cutchoose_T = 3;  // correctness-sacrifice bucket size
 
-  // Authenticated bits to mint for LB leaky-triple slots under the active
-  // method. Half-gate needs 3*LB (a, b, r); a cut-and-choose method returns
-  // more (it does the multiplication via OT rather than a garbled gate).
+  // Authenticated bits to mint for LB leaky-triple slots: half-gate needs 3·LB
+  // (a, b, r); cut-and-choose mints T× more candidates for its sacrifice.
   static int leaky_abit_len(int LB) {
-    // half-gate: 3·LB (a,b,r). cut-choose: 3·(T·LB) candidates → sacrifice keeps
-    // LB (the ~T× / "triple-the-COT" overhead) → Π_Prep then buckets LB→length.
     return kLeakyAnd == LeakyAnd::HalfGate ? 3 * LB : 3 * cutchoose_T * LB;
   }
 
-  // ===== Cut-and-choose (FKOS) leaky-AND (dormant while kLeakyAnd==HalfGate) =====
-  // The OT-multiply / sacrifice path + self-tests live in their own file to keep
-  // this one half-gate-focused. Included inside the class so they stay inline
-  // TriplePool members (multiply_unauth, make_leaky_triples_cutchoose,
-  // cutchoose_leaky, open_bits, and the *_selftest entry points).
+  // The CutChoose leaky-AND path lives in its own file (OT multiply, sacrifice,
+  // self-tests). It is #included inside the class so the methods stay inline
+  // TriplePool members; dormant while kLeakyAnd == HalfGate.
   #include "emp-ag2pc/triple_pool_cutchoose.h"
 
-  // The output share-bits are implicit: bit0(MAC[k])
-  // gives the k-th share-bit for slot k/length (a / b / c at offsets
-  // 0 / length / 2*length). bit0(KEY[*]) = 0 throughout.
-  // Stage 4d: optional out_aos. When non-null, bucketing also writes its
-  // per-output-index XOR results into pool_triples-shaped AoS bundles
-  // (one TripleBundle per output index), eliminating the standalone
-  // transpose pass at refill. SoA MAC/KEY writes are still produced for
-  // the debug check_MAC / check_correctness path.
+  // Mint `length` AND triples into MAC/KEY, slot-major a/b/c: share bit s of
+  // triple k is bit0(MAC[s*length+k]), bit0(KEY)=0. If out_aos is non-null the
+  // triples are also written as AoS TripleBundles (the layout draw() serves).
   void compute(block *MAC, block *KEY, int length,
                TripleBundle *out_aos = nullptr) {
     int bucket_size = get_bucket_size(length);
     int LB = length * bucket_size;
-    // Authenticated bits per leaky-AND slot, set by the active leaky-AND method
-    // (half-gate: 3·LB = a, b, r). abit's internal sacrificial tail (csp
-    // positions for the gadget Δ-check in abit.check1) is grown and dropped
-    // inside abit.compute — it doesn't appear in our buffers on output. We
-    // over-reserve MAC/KEY by csp to avoid the realloc when abit grows.
+    // a/b/r authenticated bits for the LB leaky triples. abit over-mints a csp
+    // tail and drops it, so reserve +csp to avoid a realloc.
     int abit_len = leaky_abit_len(LB);
 
     BlockVec tMAC, tKEY;
-    // tKEYphi[party] is the s^i / t^i accumulator (overwritten in step 5b);
-    // tKEYphi[peer] holds the sender-side half-gate output. tMACphi holds the
-    // single peer's receiver-side half-gate output (the would-be tMACphi[party]
-    // is never written or read, so it is just one buffer rather than a slot
-    // array). s[party]/s[peer] are the two parties' garbling-parity shares and
-    // s[0] their opened XOR.
+    // Half-gate scratch: tKEYphi[peer] is the sender-side output, tKEYphi[party]
+    // the s/t accumulator, tMACphi the receiver-side output (one peer, one
+    // buffer). s[party]/s[peer] are the two garbling-parity shares, s[0] = XOR.
     BlockVec tKEYphi[3], tMACphi;
     BlockVec phi(LB);
     vector<unsigned char> s[3];
@@ -158,18 +127,10 @@ public:
     _phase("", party);
 #endif
 
-    // steps 1+2: Init + Gen aShares.  Stage 4a: split abit.compute into
-    // process_phase1 (now) + check2_init/chunk/finalize (deferred to the
-    // end of TriplePool::compute). Defers integrity verification, but the
-    // verification still runs before TriplePool's outputs are consumed —
-    // so cheating is still caught, just slightly later. Lets us interleave
-    // check2_chunk with per-region passes in subsequent stages.
+    // Generate the a/b/r aShares via COT.
     abit.process_phase1(tMAC, tKEY, abit_len);
-    // Share bits live in bit 0 of MAC (any non-self peer carries the same
-    // bit). Pull them out into tr once so the existing tr-indexed code
-    // below stays unchanged; Step D will fold these reads inline.
+    // Share bits are bit0(MAC); pull them into tr for the bit-indexed code.
     {
-      int any_peer = (party == 1) ? 2 : 1;
       tr.resize(abit_len);
       for (int k = 0; k < abit_len; ++k)
         tr[k] = LSB(tMAC[k]);
@@ -177,20 +138,14 @@ public:
 
     vector<future<void>> res;
 
-    // ======================================================================
-    // SWAPPABLE leaky-AND generation (half-gate phi method). Consumes the
-    // a/b/r authenticated bits in tMAC/tKEY (+ share bits tr) and produces LB
-    // leaky-but-checked AND triples in the a/b/c slot layout that bucketing
-    // reads (r -> c). Scratch (tKEYphi/tMACphi/phi/s) is captured by ref. To
-    // use a different method (e.g. OT-based cut-and-choose), add a sibling with
-    // the same contract + its own leaky_abit_len, and dispatch at the call.
-    // ======================================================================
+    // Half-gate leaky-AND (eprint 2018/578, Fig. 5). Consumes the a/b/r aShares in
+    // tMAC/tKEY (+ share bits tr) and produces LB leaky AND triples in the
+    // a/b/c layout the bucketing reads (r -> c). The CutChoose sibling has the
+    // same contract + its own leaky_abit_len.
     auto produce_leaky_ands_halfgate = [&]() {
-    // step 1 (KRRW Fig. 5): C^me_k = y^me·Δ_me ⊕ K_me[y^peer] ⊕ M_me[y^me]
-    // over the b-region. C^A_k ⊕ C^B_k = y_k·(Δ_A⊕Δ_B) holds straight from the
-    // MAC relation, so the n-party FZero mask z (Σ_p z^p = 0) is unnecessary at
-    // two parties -- phi IS C, and the half-gate hash already hides it on the
-    // wire. (This drops fzero_xor and the u-mask the old α-check needed.)
+    // C^me = y^me·Δ_me ⊕ K[y^peer] ⊕ M[y^me] over the b-region; C^A ⊕ C^B =
+    // y·(Δ_A⊕Δ_B) from the MAC relation. The half-gate hash hides C on the
+    // wire, so phi = C directly (no extra mask).
     int width = (LB + pool->size() - 1) / pool->size();
     for (int wi = 0; wi < pool->size(); ++wi) {
       int st = wi * width, ed = std::min((wi + 1) * width, LB);
@@ -204,16 +159,12 @@ public:
     _phase("[triple] C (phi)", party);
 #endif
 
-    // step 5(a): half-gate phi exchange via MITCCRH.
-    // Per peer-pair, both sides instantiate MITCCRH<8> with the same
-    // public start_point S_pair = makeBlock(min,max) so their AES keys
-    // (S_pair ⊕ makeBlock(gid,0)) advance in lockstep. Sender's hash<8,2>
-    // uses 8 keys × 2 blocks (key, key⊕Delta); receiver's hash<8,1> uses
-    // the same 8 keys × 1 block (mac). Output: pad[i] = H(x) = AES(x)⊕x.
-    // Network is streamed in `hg_chunk` blocks; the per-task scratch
-    // buffer is allocated once and reused across chunks.
+    // Half-gate φ-exchange via MITCCRH<8>: both sides key from the same public
+    // pair_seed so their AES keys advance in lockstep; the sender hashes
+    // (key, key⊕Δ) with hash<8,2>, the receiver hashes (mac) with hash<8,1>,
+    // giving pad = H(x) = AES(x)⊕x. Streamed in hg_chunk blocks.
     int hg_chunk = 1 << 16;
-#ifdef WRK_PROFILE
+#ifdef AG2PC_PROFILE
     int64_t _phi0 = io_count(send_io, recv_io);
 #endif
     { const int peer = 3 - party;
@@ -265,16 +216,15 @@ public:
       }));
     }
     joinNclean(res);
-#ifdef WRK_PROFILE
-    g_wrk_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _phi0);
+#ifdef AG2PC_PROFILE
+    g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _phi0);
 #endif
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] half-gate exchange", party);
 #endif
 
-    // step 5(b): s^i_k = a^i·φ^i ⊕ ⊕_{j≠i}(K_i[a^j]_φ ⊕ M_j[a^i]_φ
-    //   ⊕ K_i[r^j] ⊕ M_j[r^i]) ⊕ r^i·Δ_i.  Stored back into tKEYphi[party]
-    //   (overwriting the j=party slot, which was unused in step 5(a)).
+    // Accumulate s^me into tKEYphi[party]: a·φ ⊕ (half-gate outputs for the
+    // peer) ⊕ (r-region K ⊕ M) ⊕ r·Δ.
     for (int wi = 0; wi < pool->size(); ++wi) {
       int st = wi * width, ed = std::min((wi + 1) * width, LB);
       res.push_back(pool->enqueue([this, st, ed, LB, &tKEYphi, &tMACphi, &tKEY, &tMAC, &phi, &tr]() {
@@ -293,20 +243,17 @@ public:
     }
     joinNclean(res);
 
-    // step 6 (Commit) collapsed into step 7 (Open): a single send of
-    // d^i_k = LSB1(s^i_k) per peer (bit 1 carries garbling parity under
-    // the bit-0/bit-1 Δ convention; see auth_share_pool.h ctor). The
-    // α-check at step 10 binds d after the fact, so no separate
-    // commitment round is needed.
+    // Open d^me = LSB1(s^me) to the peer (bit 1 carries the garbling parity
+    // under the bit-0/bit-1 Δ convention); d = d^A ⊕ d^B.
     for (int k = 0; k < LB; ++k)
       s[party][k] = LSB1(tKEYphi[party][k]);
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        send_io->send_data(s[party].data(), LB);
+        send_io->send_bool((const bool *)s[party].data(), LB);  // 1 bit/elt, packed
         send_io->flush();
       }));
       res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        recv_io->recv_data(s[peer].data(), LB);
+        recv_io->recv_bool((bool *)s[peer].data(), LB);
       }));
     }
     joinNclean(res);
@@ -343,7 +290,7 @@ public:
 #endif
 
     // step 5 (F_eq): the leaky-AND consistency check. After the step-7 fold,
-    // tKEYphi[party][k] = S^me_k ⊕ d_k·Δ_me = L^me_k (KRRW Fig. 5). On honest
+    // tKEYphi[party][k] = S^me_k ⊕ d_k·Δ_me = L^me_k (eprint 2018/578, Fig. 5). On honest
     // execution L^A_k = L^B_k for every k, so a batched equality of D = H(L)
     // catches a cheating multiplication.
     //
@@ -399,7 +346,7 @@ public:
     // streamed once per bucket range.
     // Public coin: absorb the two channel digests in canonical (1->2, 2->1)
     // order so both parties derive the same S regardless of local send/recv role.
-    block S = RO("WRK RO", zero_block)
+    block S = RO("AG2PC RO", zero_block)
                   .absorb((party == 1 ? send_io : recv_io)->get_digest())
                   .absorb((party == 1 ? recv_io : send_io)->get_digest())
                   .squeeze_block();
@@ -502,11 +449,11 @@ public:
 
     { const int peer = 3 - party;
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        send_io->send_data(d[party].data(), (bucket_size - 1) * length);
+        send_io->send_bool((const bool *)d[party].data(), (bucket_size - 1) * length);
         send_io->flush();
       }));
       res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        recv_io->recv_data(d[peer].data(), (bucket_size - 1) * length);
+        recv_io->recv_bool((bool *)d[peer].data(), (bucket_size - 1) * length);
       }));
     }
     joinNclean(res);

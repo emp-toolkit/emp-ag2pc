@@ -40,7 +40,7 @@ inline WireLayout compute_wire_layout(const CircuitView &cf, int num_in,
   for (int w = 0; w < num_in; ++w) persist[w] = 1;
   for (int id : output_ids) persist[id] = 1;  // outputs pinned (extracted at end)
   // Liveness (last_rd): use the recorder-supplied array if present, else scan.
-  // The AND-output persist marking (WRK's pin policy) is always applied here.
+  // The AND-output persist marking (ag2pc's pin policy) is always applied here.
   std::vector<int> last_rd_storage;
   const int *last_rd;
   if (cf.last_use) {
