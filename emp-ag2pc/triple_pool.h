@@ -23,6 +23,7 @@ using OTExt = emp::SoftSpoken<8>;
 #ifdef AG2PC_PROFILE
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 // Profiler: this party's send+recv bytes spent in the half-gate phi exchange,
 // and (separately) in the COT (rcot) extension.
 inline uint64_t g_ag2pc_phi_bytes = 0;
@@ -317,6 +318,17 @@ public:
     const int nchunks = (LB + W - 1) / W;
     std::atomic<int> bar_cnt{0};
     std::atomic<uint64_t> bar_gen{0};
+#ifdef AG2PC_PROFILE
+    // Per-thread phase timing to locate the barrier imbalance. s_=send/garbler
+    // thread, r_=recv/eval thread; cot=pre-barrier COT, bar=barrier wait,
+    // hg=post-barrier half-gate, net=the recv thread's blocking G recv.
+    std::atomic<long long> s_cot_ns{0}, s_bar_ns{0}, s_hg_ns{0};
+    std::atomic<long long> r_cot_ns{0}, r_bar_ns{0}, r_net_ns{0}, r_hg_ns{0};
+    auto _now = []{ return std::chrono::steady_clock::now(); };
+    auto _ns = [](std::chrono::steady_clock::time_point a,
+                  std::chrono::steady_clock::time_point b){ return (long long)
+        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
+#endif
     auto barrier = [&]() {
       uint64_t g = bar_gen.load(std::memory_order_acquire);
       if (bar_cnt.fetch_add(1, std::memory_order_acq_rel) == 1) {  // 2nd arriver
@@ -327,6 +339,52 @@ public:
           std::this_thread::yield();
       }
     };
+#ifdef AG2PC_PROFILE
+    // AG2PC_COT_ONLY: time just the COT exchange (both abits, all chunks, no
+    // barrier / half-gate) to compare against the SoftSpoken bench with no
+    // push/pull confound. Leaves tKEY/tMAC un-half-gated -> garbage triples
+    // (test shows BAD); we only read the timing, then return to skip the rest.
+    if (std::getenv("AG2PC_COT_ONLY")) {
+      auto _c0 = std::chrono::steady_clock::now();
+      vector<future<void>> rc;
+      rc.push_back(pool->enqueue([&, this]() {
+        for (int ci = 0; ci < nchunks; ++ci) {
+          const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+          for (int reg = 0; reg <= 2; ++reg) {
+            block *dst = tMAC.data() + (size_t)reg * LB + st;
+            if (Wc == W) abit2->next(dst);
+            else { abit2->next(stageM.data());
+                   memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
+          }
+          io_abit2->flush();
+        }
+      }));
+      rc.push_back(pool->enqueue([&, this]() {
+        for (int ci = 0; ci < nchunks; ++ci) {
+          const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+          for (int reg = 0; reg <= 2; ++reg) {
+            block *dst = tKEY.data() + (size_t)reg * LB + st;
+            if (Wc == W) abit1->next(dst);
+            else { abit1->next(stageK.data());
+                   memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
+          }
+          io_abit1->flush();
+        }
+      }));
+      joinNclean(rc);
+      { vector<future<void>> re;
+        re.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
+        re.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
+        joinNclean(re); }
+      if (party == 1)
+        printf("[ag2pc-tp]   COT-ONLY (both abits, no HG/barrier) %9.3f ms"
+               "  (%d COTs/abit, %d chunks)\n",
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - _c0).count(),
+               abit_len, nchunks);
+      return;
+    }
+#endif
     // send thread (send_io): abit2 -> tMAC, derive tr, then garbler ships G.
     res.push_back(pool->enqueue([&, this]() {
       MITCCRH<8> mitc; mitc.setS(pair_seed);
@@ -334,6 +392,9 @@ public:
       BlockVec tmp(W);
       for (int ci = 0; ci < nchunks; ++ci) {
         const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+#ifdef AG2PC_PROFILE
+        auto _tc0 = _now();
+#endif
         for (int reg = 0; reg <= 2; ++reg) {
           block *dst = tMAC.data() + (size_t)reg * LB + st;
           if (Wc == W) abit2->next(dst);
@@ -344,7 +405,13 @@ public:
           for (int k = st; k < ed; ++k)
             tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
         io_abit2->flush();
+#ifdef AG2PC_PROFILE
+        auto _t1 = _now(); s_cot_ns += _ns(_tc0, _t1);
+#endif
         barrier();                              // tKEY now ready too
+#ifdef AG2PC_PROFILE
+        auto _t2 = _now(); s_bar_ns += _ns(_t1, _t2);
+#endif
         mitc.renew_ks((uint64_t)st);
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
@@ -362,6 +429,9 @@ public:
         }
         send_io->send_data(tmp.data(), (size_t)Wc * sizeof(block));
         send_io->flush();
+#ifdef AG2PC_PROFILE
+        s_hg_ns += _ns(_t2, _now());
+#endif
       }
     }));
     // recv thread (recv_io): abit1 -> tKEY, then eval recvs G and writes Sout.
@@ -371,6 +441,9 @@ public:
       BlockVec wire(W);
       for (int ci = 0; ci < nchunks; ++ci) {
         const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+#ifdef AG2PC_PROFILE
+        auto _tc0 = _now();
+#endif
         for (int reg = 0; reg <= 2; ++reg) {
           block *dst = tKEY.data() + (size_t)reg * LB + st;
           if (Wc == W) abit1->next(dst);
@@ -378,9 +451,18 @@ public:
                  memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
         }
         io_abit1->flush();
+#ifdef AG2PC_PROFILE
+        auto _t1 = _now(); r_cot_ns += _ns(_tc0, _t1);
+#endif
         barrier();                              // tMAC + tr now ready
-        mitc.renew_ks((uint64_t)st);
+#ifdef AG2PC_PROFILE
+        auto _t2 = _now(); r_bar_ns += _ns(_t1, _t2);
+#endif
         recv_io->recv_data(wire.data(), (size_t)Wc * sizeof(block));
+#ifdef AG2PC_PROFILE
+        auto _t2b = _now(); r_net_ns += _ns(_t2, _t2b);
+#endif
+        mitc.renew_ks((uint64_t)st);
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
           for (int j = 0; j < 8; ++j) {
@@ -399,6 +481,9 @@ public:
                     ^ (Delta & select_mask[tr[2 * LB + k]]);
           }
         }
+#ifdef AG2PC_PROFILE
+        r_hg_ns += _ns(_t2b, _now());
+#endif
       }
     }));
     joinNclean(res);
@@ -407,6 +492,17 @@ public:
     _mark = io_count(send_io, recv_io);
 #endif
     AG2PC_TP("COT + half-gate loop");
+#ifdef AG2PC_PROFILE
+    if (party == 1) {
+      printf("[ag2pc-tp]   send/garble thr:  COT %7.1f  bar(wait) %7.1f  HG %7.1f ms\n",
+             s_cot_ns.load() / 1e6, s_bar_ns.load() / 1e6, s_hg_ns.load() / 1e6);
+      printf("[ag2pc-tp]   recv/eval   thr:  COT %7.1f  bar(wait) %7.1f  HG %7.1f ms"
+             "  (HG = recv-G net %.1f + eval %.1f)\n",
+             r_cot_ns.load() / 1e6, r_bar_ns.load() / 1e6,
+             (r_net_ns.load() + r_hg_ns.load()) / 1e6,
+             r_net_ns.load() / 1e6, r_hg_ns.load() / 1e6);
+    }
+#endif
     // close the COT session: the single malicious consistency check.
     {
       vector<future<void>> re;

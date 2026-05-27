@@ -394,8 +394,10 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
   // same share-prop sweep — fabric slots are recycled here, so seeding in a
   // separate earlier pass would just walk the circuit twice. preprocess_bundle
   // frees at function end, before the heavy garble allocations.
+  AG2PC_TP_BEGIN();
   AShareBundleVec preprocess_bundle;
   fpre->draw(num_ands, preprocess_bundle);
+  AG2PC_TP("aShare draw (AND-out masks)");
   {
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
@@ -415,6 +417,7 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
       }
     }
   }
+  AG2PC_TP("share-prop + x/y masks");
   std::vector<future<void>> res;
   { const int party2 = 3 - party;
     res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
@@ -428,6 +431,7 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
     }));
   }
   joinNclean(res);
+  AG2PC_TP("x/y exchange");
   { const int i = 2;
     for (int j = 0; j < num_ands; ++j) {
       x[1][j] = x[1][j] ^ x[i][j];
@@ -455,6 +459,7 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
       }
     }
   }
+  AG2PC_TP("sigma derive");
 }
 
 // Steps 6-7: the garbler P2 garbles each AND gate and ships to P1. Per gate γ:
