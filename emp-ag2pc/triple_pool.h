@@ -18,7 +18,12 @@ using namespace emp;
 // Swappable by this one typedef: IKNP (low setup) / SoftSpoken (low bandwidth)
 // / Ferret (smallest steady-state bandwidth). The streaming leaky-AND reads
 // OTExt::kSenderSendsOnExtend to keep each socket one-directional.
-using OTExt = emp::SoftSpoken<8>;
+//
+// SoftSpoken<k>: k is the compute/bandwidth knob (k ∈ {1,2,4,8}). Smaller k =
+// fewer AES calls per COT but more bytes on the wire; larger k = the reverse.
+// k=4 sits at the COT-compute floor on a fast/local link while staying well
+// below k=2's bandwidth; raise toward k=8 on a bandwidth-tight link.
+using OTExt = emp::SoftSpoken<4>;
 
 #ifdef AG2PC_PROFILE
 #include <chrono>
@@ -279,7 +284,7 @@ public:
     // hides C, so phi = C directly. Per chunk the garbler hashes (K, K⊕Δ) with
     // hash<8,2> and ships G = H(K) ⊕ H(K⊕Δ) ⊕ C on send_io; the eval recvs G on
     // recv_io and recomputes C and the sender pad H(K) itself (hash<8,2> over
-    // (M, K) under the same tweak via renew_ks(st)), forms E = H(M) ⊕ x·G, and
+    // (M, K) under the same gid-aligned tweak), forms E = H(M) ⊕ x·G, and
     // writes S^me = H(K) ⊕ E ⊕ (K[r]⊕M[r]) ⊕ x·C ⊕ r·Δ into Sout. The two
     // threads share only the read-only aShares (no lock).
     tMAC.resize(abit_len);
@@ -308,37 +313,24 @@ public:
     _mark = io_count(send_io, recv_io);
 #endif
     AG2PC_TP("COT begin (+base OT)");
-    // Fuse the COT and half-gate into two long-lived threads so each role reads
-    // the chunk it just produced while it is cache-warm, instead of writing the
-    // chunk and re-loading it across a phase boundary. The send thread produces
-    // tMAC (abit2) + derives tr, the recv thread produces tKEY (abit1); a
-    // 2-thread barrier per chunk gates the half-gate (both roles read both COT
-    // halves, so both COTs must finish first). tr is written by the send thread
-    // before the barrier, so it is read-only for both roles afterward.
+    // [EXPERIMENT] Unfused: run the COT for the whole stream first (both abits
+    // in parallel), then the half-gate for the whole stream (garbler + eval in
+    // parallel), separated by a thread join instead of a per-chunk barrier. The
+    // abit2 thread derives tr from tMAC after its COTs; the half-gate re-reads
+    // tKEY/tMAC/tr after the COT phase has fully written them (cold across the
+    // phase boundary, vs. cache-warm per-chunk in the fused version).
     const int nchunks = (LB + W - 1) / W;
-    std::atomic<int> bar_cnt{0};
-    std::atomic<uint64_t> bar_gen{0};
 #ifdef AG2PC_PROFILE
-    // Per-thread phase timing to locate the barrier imbalance. s_=send/garbler
-    // thread, r_=recv/eval thread; cot=pre-barrier COT, bar=barrier wait,
-    // hg=post-barrier half-gate, net=the recv thread's blocking G recv.
-    std::atomic<long long> s_cot_ns{0}, s_bar_ns{0}, s_hg_ns{0};
-    std::atomic<long long> r_cot_ns{0}, r_bar_ns{0}, r_net_ns{0}, r_hg_ns{0};
+    // Per-thread phase timing. s_=garbler thread, r_=eval thread; cot=COT
+    // extension (phase A), hg=half-gate compute (phase B), net=the eval thread's
+    // blocking G recv.
+    std::atomic<long long> s_cot_ns{0}, s_hg_ns{0};
+    std::atomic<long long> r_cot_ns{0}, r_net_ns{0}, r_hg_ns{0};
     auto _now = []{ return std::chrono::steady_clock::now(); };
     auto _ns = [](std::chrono::steady_clock::time_point a,
                   std::chrono::steady_clock::time_point b){ return (long long)
         std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
 #endif
-    auto barrier = [&]() {
-      uint64_t g = bar_gen.load(std::memory_order_acquire);
-      if (bar_cnt.fetch_add(1, std::memory_order_acq_rel) == 1) {  // 2nd arriver
-        bar_cnt.store(0, std::memory_order_relaxed);
-        bar_gen.store(g + 1, std::memory_order_release);
-      } else {
-        while (bar_gen.load(std::memory_order_acquire) == g)
-          std::this_thread::yield();
-      }
-    };
 #ifdef AG2PC_PROFILE
     // AG2PC_COT_ONLY: time just the COT exchange (both abits, all chunks, no
     // barrier / half-gate) to compare against the SoftSpoken bench with no
@@ -385,34 +377,60 @@ public:
       return;
     }
 #endif
-    // send thread (send_io): abit2 -> tMAC, derive tr, then garbler ships G.
-    res.push_back(pool->enqueue([&, this]() {
-      MITCCRH<8> mitc; mitc.setS(pair_seed);
-      block pad[16];
-      BlockVec tmp(W);
+    // ===== Phase A: COT over the whole stream (both abits in parallel) =====
+    res.push_back(pool->enqueue([&, this]() {     // abit2 -> tMAC, derive tr
+#ifdef AG2PC_PROFILE
+      auto _c0 = _now();
+#endif
       for (int ci = 0; ci < nchunks; ++ci) {
         const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-#ifdef AG2PC_PROFILE
-        auto _tc0 = _now();
-#endif
         for (int reg = 0; reg <= 2; ++reg) {
           block *dst = tMAC.data() + (size_t)reg * LB + st;
           if (Wc == W) abit2->next(dst);
           else { abit2->next(stageM.data());
                  memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
         }
-        for (int reg = 0; reg <= 2; ++reg)
-          for (int k = st; k < ed; ++k)
-            tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
         io_abit2->flush();
+      }
+      for (int k = 0; k < abit_len; ++k) tr[k] = LSB(tMAC[k]);
 #ifdef AG2PC_PROFILE
-        auto _t1 = _now(); s_cot_ns += _ns(_tc0, _t1);
+      s_cot_ns += _ns(_c0, _now());
 #endif
-        barrier();                              // tKEY now ready too
+    }));
+    res.push_back(pool->enqueue([&, this]() {     // abit1 -> tKEY
 #ifdef AG2PC_PROFILE
-        auto _t2 = _now(); s_bar_ns += _ns(_t1, _t2);
+      auto _c0 = _now();
 #endif
-        mitc.renew_ks((uint64_t)st);
+      for (int ci = 0; ci < nchunks; ++ci) {
+        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+        for (int reg = 0; reg <= 2; ++reg) {
+          block *dst = tKEY.data() + (size_t)reg * LB + st;
+          if (Wc == W) abit1->next(dst);
+          else { abit1->next(stageK.data());
+                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
+        }
+        io_abit1->flush();
+      }
+#ifdef AG2PC_PROFILE
+      r_cot_ns += _ns(_c0, _now());
+#endif
+    }));
+    joinNclean(res);
+    AG2PC_TP("COT phase (both abits)");
+
+    // ===== Phase B: half-gate over the whole stream (garbler ships G, eval recvs) =====
+    res.push_back(pool->enqueue([&, this]() {     // garbler on send_io
+      // gid auto-increment: hash<8,2> re-keys every 8 gates on its own, so no
+      // per-chunk renew_ks — garbler and eval walk the identical chunk sequence,
+      // so their gid (hence each gate's tweak) stays in lockstep.
+      MITCCRH<8> mitc; mitc.setS(pair_seed);
+      block pad[16];
+      BlockVec tmp(W);
+#ifdef AG2PC_PROFILE
+      auto _h0 = _now();
+#endif
+      for (int ci = 0; ci < nchunks; ++ci) {
+        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
           for (int j = 0; j < 8; ++j) {
@@ -429,40 +447,24 @@ public:
         }
         send_io->send_data(tmp.data(), (size_t)Wc * sizeof(block));
         send_io->flush();
-#ifdef AG2PC_PROFILE
-        s_hg_ns += _ns(_t2, _now());
-#endif
       }
+#ifdef AG2PC_PROFILE
+      s_hg_ns += _ns(_h0, _now());
+#endif
     }));
-    // recv thread (recv_io): abit1 -> tKEY, then eval recvs G and writes Sout.
-    res.push_back(pool->enqueue([&, this]() {
+    res.push_back(pool->enqueue([&, this]() {     // eval on recv_io
       MITCCRH<8> mitc; mitc.setS(pair_seed);
       block pad[16];
       BlockVec wire(W);
       for (int ci = 0; ci < nchunks; ++ci) {
         const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
 #ifdef AG2PC_PROFILE
-        auto _tc0 = _now();
-#endif
-        for (int reg = 0; reg <= 2; ++reg) {
-          block *dst = tKEY.data() + (size_t)reg * LB + st;
-          if (Wc == W) abit1->next(dst);
-          else { abit1->next(stageK.data());
-                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
-        }
-        io_abit1->flush();
-#ifdef AG2PC_PROFILE
-        auto _t1 = _now(); r_cot_ns += _ns(_tc0, _t1);
-#endif
-        barrier();                              // tMAC + tr now ready
-#ifdef AG2PC_PROFILE
-        auto _t2 = _now(); r_bar_ns += _ns(_t1, _t2);
+        auto _n0 = _now();
 #endif
         recv_io->recv_data(wire.data(), (size_t)Wc * sizeof(block));
 #ifdef AG2PC_PROFILE
-        auto _t2b = _now(); r_net_ns += _ns(_t2, _t2b);
+        auto _n1 = _now(); r_net_ns += _ns(_n0, _n1);
 #endif
-        mitc.renew_ks((uint64_t)st);
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
           for (int j = 0; j < 8; ++j) {
@@ -482,7 +484,7 @@ public:
           }
         }
 #ifdef AG2PC_PROFILE
-        r_hg_ns += _ns(_t2b, _now());
+        r_hg_ns += _ns(_n1, _now());
 #endif
       }
     }));
@@ -491,14 +493,14 @@ public:
     g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
     _mark = io_count(send_io, recv_io);
 #endif
-    AG2PC_TP("COT + half-gate loop");
+    AG2PC_TP("half-gate phase");
 #ifdef AG2PC_PROFILE
     if (party == 1) {
-      printf("[ag2pc-tp]   send/garble thr:  COT %7.1f  bar(wait) %7.1f  HG %7.1f ms\n",
-             s_cot_ns.load() / 1e6, s_bar_ns.load() / 1e6, s_hg_ns.load() / 1e6);
-      printf("[ag2pc-tp]   recv/eval   thr:  COT %7.1f  bar(wait) %7.1f  HG %7.1f ms"
+      printf("[ag2pc-tp]   abit2/garble thr:  COT %7.1f  HG %7.1f ms\n",
+             s_cot_ns.load() / 1e6, s_hg_ns.load() / 1e6);
+      printf("[ag2pc-tp]   abit1/eval   thr:  COT %7.1f  HG %7.1f ms"
              "  (HG = recv-G net %.1f + eval %.1f)\n",
-             r_cot_ns.load() / 1e6, r_bar_ns.load() / 1e6,
+             r_cot_ns.load() / 1e6,
              (r_net_ns.load() + r_hg_ns.load()) / 1e6,
              r_net_ns.load() / 1e6, r_hg_ns.load() / 1e6);
     }
