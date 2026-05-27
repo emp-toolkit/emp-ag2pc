@@ -61,20 +61,61 @@ inline WireLayout compute_wire_layout(const CircuitView &cf, int num_in,
   int next_slot = 0;
   for (int w = 0; w < num_in; ++w) phys[w] = next_slot++;  // inputs: slots [0,num_in)
   std::vector<int> freelist;
+#ifdef AG2PC_MEMPROFILE
+  long n_persist = 0, n_fabric = 0, n_free = 0, n_reuse = 0, n_grow_persist = 0,
+       n_grow_fabric_empty = 0; size_t max_free = 0;
+  for (int w = 0; w < W; ++w) if (persist[w]) ++n_persist; else ++n_fabric;
+  { // persist by source: AND-outputs vs the rest (inputs+circuit-outputs)
+    long p_and = 0;
+    for (int gi = 0; gi < cf.num_gate; ++gi)
+      if (cf.gates[gi].is_and() && persist[cf.gates[gi].out]) ++p_and;
+    long p_xor_out = 0, p_not_out = 0;  // linear-gate outputs that are pinned
+    for (int gi = 0; gi < cf.num_gate; ++gi) {
+      const Gate &g = cf.gates[gi];
+      if (g.is_and() || !persist[g.out]) continue;
+      if (g.is_not()) ++p_not_out; else ++p_xor_out;
+    }
+    printf("[ag2pc-mem] persist sources: AND-out=%ld linear-out(pinned)={xor=%ld,"
+           "not=%ld} num_in=%d num_out=%zu\n", p_and, p_xor_out, p_not_out,
+           num_in, output_ids.size());
+  }
+#endif
   for (int gi = 0; gi < cf.num_gate; ++gi) {
     int a = cf.gates[gi].in0, b = cf.gates[gi].in1;
     int out = cf.gates[gi].out;
     if (phys[out] == -1) {
-      if (persist[out]) phys[out] = next_slot++;  // permanent
-      else if (!freelist.empty()) { phys[out] = freelist.back(); freelist.pop_back(); }
-      else phys[out] = next_slot++;
+      if (persist[out]) { phys[out] = next_slot++;  // permanent
+#ifdef AG2PC_MEMPROFILE
+        ++n_grow_persist;
+#endif
+      }
+      else if (!freelist.empty()) { phys[out] = freelist.back(); freelist.pop_back();
+#ifdef AG2PC_MEMPROFILE
+        ++n_reuse;
+#endif
+      }
+      else { phys[out] = next_slot++;
+#ifdef AG2PC_MEMPROFILE
+        ++n_grow_fabric_empty;
+#endif
+      }
     }
     for (int k = 0; k < 2; ++k) {
       int w = (k == 0) ? a : b;
       if (k == 1 && b == a) continue;  // avoid double-free when in0 == in1
-      if (!persist[w] && last_rd[w] == gi) freelist.push_back(phys[w]);
+      if (!persist[w] && last_rd[w] == gi) { freelist.push_back(phys[w]);
+#ifdef AG2PC_MEMPROFILE
+        ++n_free; if (freelist.size() > max_free) max_free = freelist.size();
+#endif
+      }
     }
   }
+#ifdef AG2PC_MEMPROFILE
+  printf("[ag2pc-mem] layout  W=%d persist=%ld fabric=%ld  slots=%d | "
+         "free=%ld reuse=%ld grow{persist=%ld,fabric_empty=%ld} max_freelist=%zu\n",
+         W, n_persist, n_fabric, next_slot, n_free, n_reuse, n_grow_persist,
+         n_grow_fabric_empty, max_free);
+#endif
   return {std::move(phys), next_slot};
 }
 

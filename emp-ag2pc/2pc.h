@@ -17,6 +17,16 @@ using namespace emp;
 #ifdef AG2PC_PROFILE
 #include <chrono>
 #include <cstdio>
+// With -DAG2PC_MEMPROFILE each phase line also carries the peak RSS reached by
+// its end (ag2pc_peak_rss_kib, defined in triple_pool.h); the jump between two
+// phases is that phase's contribution to the high-water mark.
+#ifdef AG2PC_MEMPROFILE
+#define AG2PC_PHASE_RSS_FMT "  peakRSS %8ld KiB"
+#define AG2PC_PHASE_RSS_ARG , ag2pc_peak_rss_kib()
+#else
+#define AG2PC_PHASE_RSS_FMT ""
+#define AG2PC_PHASE_RSS_ARG
+#endif
 #define AG2PC_PHASE_BEGIN()                                                      \
   auto _ag2pc_t = std::chrono::steady_clock::now();                              \
   int64_t _ag2pc_c = io_count(send_io, recv_io)
@@ -25,9 +35,9 @@ using namespace emp;
     auto _n = std::chrono::steady_clock::now();                                \
     int64_t _c = io_count(send_io, recv_io);                                                  \
     if (party == 1)                                                            \
-      printf("[ag2pc] %-22s %9.3f ms  %12lld B\n", (name),                       \
+      printf("[ag2pc] %-22s %9.3f ms  %12lld B" AG2PC_PHASE_RSS_FMT "\n", (name), \
              std::chrono::duration<double, std::milli>(_n - _ag2pc_t).count(),   \
-             (long long)(_c - _ag2pc_c));                                        \
+             (long long)(_c - _ag2pc_c) AG2PC_PHASE_RSS_ARG);                     \
     _ag2pc_t = _n;                                                               \
     _ag2pc_c = _c;                                                               \
   } while (0)
@@ -137,8 +147,6 @@ private:
     TripleBundleVec ANDS_bundle;        // AND triples, by and_index
     AShareBundleVec sigma;              // Beaver-corrected AND shares
     MITCCRH<1> mitc;                   // half-gate hash (garble / evaluate)
-    std::vector<std::array<block, 2>> G;    // P1: G_{γ,0/1} from the garbler P2
-    std::vector<unsigned char> b_buf_at_P1; // P1: b_γ from P2
     block hp_seed;                          // step-11 hash seed (used in 12, 13)
     AShareBundle &WIRE(int w) { return wire_slot[phys[w]]; }
     block &LABEL(int w) { return label_slot[phys[w]]; }
@@ -152,11 +160,13 @@ private:
                    int n_inputs);
   void draw_and_seed(ComputeCtx &ctx);          // step 4: triples + AND-out seed
   void beaver_pass(ComputeCtx &ctx);            // step 5
-  void garble_and_ship(ComputeCtx &ctx);        // steps 6-7, sender Pi (i>=2)
-  void receive_garbling(ComputeCtx &ctx);       // steps 6-7, P1 receive
-  void p1_evaluate(ComputeCtx &ctx);            // step 10, P1
-  void check_label_hash(ComputeCtx &ctx);       // steps 11-12
-  void check_tgamma(ComputeCtx &ctx);           // step 13
+  // Garbled tables are streamed: garble_and_ship sends them in kGarbleChunk-
+  // AND-gate chunks; p1_evaluate recvs each chunk on demand during evaluation,
+  // so neither side ever holds the full-circuit G buffer.
+  static constexpr int kGarbleChunk = 1 << 16;
+  void garble_and_ship(ComputeCtx &ctx);        // steps 6-7, garbler P2
+  void p1_evaluate(ComputeCtx &ctx);            // steps 6-7 recv + step 10, P1
+  void check_fused(ComputeCtx &ctx);            // steps 11-13 (label-hash + t_γ, one sweep)
   SecureWires gather_outputs(ComputeCtx &ctx,
                                  const std::vector<int> &output_ids);
 
@@ -279,12 +289,29 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
   load_inputs(ctx, inputs, n_inputs);     AG2PC_PHASE("load_inputs");
   draw_and_seed(ctx);                      AG2PC_PHASE("draw_and_seed[step4]");
   beaver_pass(ctx);                        AG2PC_PHASE("beaver_pass[step5]");
-  if (party != 1) garble_and_ship(ctx);    // steps 6-7 (sender Pi, i>=2)
-  else            receive_garbling(ctx);   AG2PC_PHASE("garble/recv[step6-7]");
-  if (party == 1) p1_evaluate(ctx);        AG2PC_PHASE("p1_evaluate[step10]");
-  check_label_hash(ctx);                   AG2PC_PHASE("check_label[step12]");
-  check_tgamma(ctx);                       AG2PC_PHASE("check_tgamma[step13]");
+  if (party != 1) garble_and_ship(ctx);    // steps 6-7: garbler P2 ships G in chunks
+  AG2PC_PHASE("garble/recv[step6-7]");
+  if (party == 1) p1_evaluate(ctx);        // P1 streams G in and evaluates
+  AG2PC_PHASE("p1_evaluate[step10]");
+  check_fused(ctx);                        AG2PC_PHASE("check[step12-13]");
   SecureWires r = gather_outputs(ctx, output_ids);  AG2PC_PHASE("gather_outputs");
+#ifdef AG2PC_MEMPROFILE
+  if (party == 1) {
+    const double A = (double)std::max(1, ctx.num_ands);
+    printf("[ag2pc-mem] ComputeCtx  num_wire=%d num_slots=%d num_ands=%d "
+           "num_gate=%d\n", cf->num_wire, ctx.num_slots, ctx.num_ands, cf->num_gate);
+    ag2pc_mem_row("phys",         (double)ctx.phys.capacity() * sizeof(int), A);
+    ag2pc_mem_row("mask_input",   (double)ctx.mask_input.capacity(), A);
+    ag2pc_mem_row("wire_slot",    (double)ctx.wire_slot.capacity() * sizeof(AShareBundle), A);
+    ag2pc_mem_row("eval/label",   (double)(party == 1 ? ctx.eval_slot.capacity()
+                                  : ctx.label_slot.capacity()) * sizeof(block), A);
+    ag2pc_mem_row("ANDS_bundle",  (double)ctx.ANDS_bundle.capacity() * sizeof(TripleBundle), A);
+    ag2pc_mem_row("sigma",        (double)ctx.sigma.capacity() * sizeof(AShareBundle), A);
+    ag2pc_mem_row("circuit.gates", (double)cf->num_gate * sizeof(Gate), A);
+    if (cf->last_use) ag2pc_mem_row("circuit.last_use", (double)cf->num_gate * sizeof(int), A);
+    printf("[ag2pc-mem]   peakRSS-so-far %8ld KiB\n", ag2pc_peak_rss_kib());
+  }
+#endif
   return r;
 }
 
@@ -447,9 +474,21 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
   {
-    BlockVec G_buf(2 * num_ands);
-    std::vector<unsigned char> b_buf;
-    if (party == 2) b_buf.resize(num_ands);
+    // Ship G in chunks of kGarbleChunk AND gates (in and_index order) so the
+    // full-circuit G buffer never materializes; the send is one-directional
+    // (P2 -> P1), so chunking adds flushes but no extra rounds.
+    const int C = kGarbleChunk;
+    const int cap = std::min(C, num_ands);
+    BlockVec G_chunk(2 * cap);
+    std::vector<unsigned char> b_chunk(party == 2 ? cap : 0);
+    int nfilled = 0;
+    auto flush_chunk = [&]() {
+      if (nfilled == 0) return;
+      send_io->send_data(G_chunk.data(), (size_t)2 * nfilled * sizeof(block));
+      if (party == 2) send_io->send_data(b_chunk.data(), nfilled);
+      send_io->flush();
+      nfilled = 0;
+    };
 
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
@@ -510,39 +549,14 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       block ml_g0 = H_a0_self ^ H_b0_self ^ sumK_ab ^ lab_dot ^ sumK_g ^ lg_dot;
 
       LABEL(out) = ml_g0;
-      G_buf[2 * ai]     = G0;
-      G_buf[2 * ai + 1] = G1;
-      if (party == 2) b_buf[ai] = (unsigned char)(LSB1(ml_g0));
+      G_chunk[2 * nfilled]     = G0;
+      G_chunk[2 * nfilled + 1] = G1;
+      if (party == 2) b_chunk[nfilled] = (unsigned char)(LSB1(ml_g0));
+      if (++nfilled == C) flush_chunk();
     }
-    send_io->send_data(G_buf.data(), 2 * num_ands * sizeof(block));
-    if (party == 2) send_io->send_data(b_buf.data(), num_ands);
-    send_io->flush();
+    flush_chunk();
   }
 }
-
-// Steps 6-7: P1 receives G, b from the garbler P2 into ctx (consumed by
-// p1_evaluate). With a single garbler there are no cross-garbler S terms.
-void C2PC::receive_garbling(ComputeCtx &ctx) {
-  const int num_ands = ctx.num_ands;
-  auto &G = ctx.G;
-  auto &b_buf_at_P1 = ctx.b_buf_at_P1;
-  G.resize(num_ands);
-  b_buf_at_P1.resize(num_ands);
-  std::vector<future<void>> rres;
-    { const int p2 = 2;
-      rres.push_back(
-          pool->enqueue([this, &G, &b_buf_at_P1, num_ands, p2]() {
-            BlockVec G_buf(2 * num_ands);
-            recv_io->recv_data(G_buf.data(), 2 * num_ands * sizeof(block));
-            for (int g = 0; g < num_ands; ++g) {
-              G[g][0] = G_buf[2 * g];
-              G[g][1] = G_buf[2 * g + 1];
-            }
-            recv_io->recv_data(b_buf_at_P1.data(), num_ands);
-          }));
-    }
-    joinNclean(rres);
-  }
 
 // Step 10: P1 evaluates each gate topologically, recovering eval-labels and the
 // public mask. XOR/NOT propagate locally; AND combines the received G
@@ -554,8 +568,15 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
   auto &mask_input = ctx.mask_input;
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
-  auto &G = ctx.G;
-  auto &b_buf_at_P1 = ctx.b_buf_at_P1;
+  const int num_ands = ctx.num_ands;
+  // Stream the garbled tables: recv one kGarbleChunk-AND-gate chunk at a time,
+  // on demand as evaluation reaches each AND gate (in and_index order), so the
+  // full-circuit G buffer never materializes.
+  const int C = kGarbleChunk;
+  const int cap = std::min(C, num_ands);
+  BlockVec G_chunk(2 * cap);
+  std::vector<unsigned char> b_chunk(cap);
+  int chunk_base = 0, chunk_len = 0;   // current chunk covers ai in [base, base+len)
   {
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
@@ -573,6 +594,13 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
         }
       } else {  // AND
         int ai = g.and_index();
+        if (ai >= chunk_base + chunk_len) {        // pull the next garbled-table chunk
+          chunk_base += chunk_len;
+          chunk_len = std::min(C, num_ands - chunk_base);
+          recv_io->recv_data(G_chunk.data(), (size_t)2 * chunk_len * sizeof(block));
+          recv_io->recv_data(b_chunk.data(), chunk_len);
+        }
+        const int loc = ai - chunk_base;
         bool La = mask_input[in0], Lb = mask_input[in1];
         const AShareBundle &wb_in0 = WIRE(in0);
         const AShareBundle &wb_in1 = WIRE(in1);
@@ -597,74 +625,110 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
         // Pass 2: combine the cached self hashes with G + the Mr cross term to
         // produce the eval-label at out.
         { block t = self_Ha ^ self_Hb;
-          if (La) t = t ^ G[ai][0];
-          if (Lb) t = t ^ G[ai][1] ^ EVAL(in0);
+          if (La) t = t ^ G_chunk[2 * loc];
+          if (Lb) t = t ^ G_chunk[2 * loc + 1] ^ EVAL(in0);
           t = t ^ Mr;  // the single cross term (sender s = 1, receiver = 2)
           EVAL(out) = t;
         }
         mask_input[out] =
-            (unsigned char)(b_buf_at_P1[ai] ^ LSB1(EVAL(out)));
+            (unsigned char)(b_chunk[loc] ^ LSB1(EVAL(out)));
       }
     }
   }
 }
 
-// Steps 11-12: P1 samples the polynomial-hash seed h'_seed; both parties then run
-// the streaming label-hash check (step 12). h'_s({a_w}) = ⊕_w a_w·s^{w+1} is
-// linear in {a_w}, which step 13's ⊕_p z_p = h'(⊕_p {M_1[t_w^p]}) check requires.
-void C2PC::check_label_hash(ComputeCtx &ctx) {
+// Steps 11-13 fused: the label-hash check (step 12) and the t_γ check (step 13)
+// share the hash seed h'_seed and traverse the same gate list, so they run in a
+// SINGLE circuit sweep per party instead of two. Wire behaviour is unchanged —
+// identical bytes in identical order (hp_seed‖Lambda_AND‖acc P1→P2, then z P2→P1):
+// the two folds are independent (label folds EVAL/LABEL labels; t_γ folds the M[·]
+// keys into M1_t), so interleaving them per gate yields bit-identical messages.
+// Both labels and shares are re-propagated from the persisted base on the fly;
+// h'_s({a_w}) = ⊕_w a_w·s^{w+1} is linear, which the step-13 ⊕_p z_p check needs.
+void C2PC::check_fused(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_in = ctx.num_in;
   const int num_ands = ctx.num_ands;
+  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
   auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
   auto EVAL = [&](int w) -> block & { return ctx.EVAL(w); };
   auto &mask_input = ctx.mask_input;
+  auto &sigma = ctx.sigma;
   block &hp_seed = ctx.hp_seed;
   std::vector<unsigned char> Lambda_AND(num_ands);
+  BlockVec M1_t(num_ands);
+
   if (party == 1) {
     prg.random_block(&hp_seed, 1);
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
       if (g.is_and()) Lambda_AND[g.and_index()] = mask_input[g.out];
     }
-  }
+    BlockVec coeff_ands(num_ands);
+    if (num_ands > 0) uni_hash_coeff_gen(coeff_ands.data(), hp_seed, num_ands);
 
-  // Step 12: label-hash check, computed as a *streaming* inner product so the
-  // per-wire labels never need to all be live at once. h = ⊕_w coeff[w]·a_w
-  // with coeff[w] = hp_seed^(w+1); per-term gfmul + XOR-accumulate equals the
-  // deferred-reduction vector_inn_prdt_sum_red by linearity of reduce(). The
-  // coeff is keyed to *processing position* (inputs, then gate outputs in gate
-  // order) — identical on both parties for the same circuit — so the hash is
-  // consistent regardless of wire-id ordering (the numeric out id need not equal
-  // num_in+gi). Each wire is folded exactly once; fabric labels are re-propagated
-  // from the persisted base on the fly.
-  if (party == 1) {
-    block acc = zero_block;
-    block pw = hp_seed, term;
+    // Single sweep: label-hash acc over EVAL labels (coeff[w] = hp_seed^(w+1),
+    // position-keyed) AND the per-AND M1_t key term. Fabric EVAL labels and WIRE
+    // shares are both re-propagated here; the two are independent arrays.
+    block acc = zero_block, pw = hp_seed, term;
     for (int w = 0; w < num_in; ++w) {
       gfmul(EVAL(w), pw, &term); acc = acc ^ term;
       gfmul(pw, hp_seed, &pw);
     }
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
+      int in0 = g.in0, in1 = g.in1, out = g.out;
       if (!g.is_and())  // AND output eval-labels persist (set during evaluation)
-        EVAL(g.out) = g.is_not() ? EVAL(g.in0) : EVAL(g.in0) ^ EVAL(g.in1);
-      gfmul(EVAL(g.out), pw, &term); acc = acc ^ term;
+        EVAL(out) = g.is_not() ? EVAL(in0) : EVAL(in0) ^ EVAL(in1);
+      gfmul(EVAL(out), pw, &term); acc = acc ^ term;
       gfmul(pw, hp_seed, &pw);
+      if (!g.is_and()) {  // recompute fabric share for downstream ANDs
+        if (g.is_not()) { WIRE(out) = WIRE(in0); }
+        else { xor_share(WIRE(out), WIRE(in0), WIRE(in1)); }
+        continue;
+      }
+      int ai = g.and_index();
+      bool La = mask_input[in0], Lb = mask_input[in1], Lg = mask_input[out];
+      bool v_in0 = (bool)LSB(WIRE(in0).mac);
+      bool v_in1 = (bool)LSB(WIRE(in1).mac);
+      bool v_out = (bool)LSB(WIRE(out).mac);
+      bool v_sig = (bool)LSB(sigma[ai].mac);
+      bool t1 = (La & Lb) ^ Lg ^ (La & v_in1) ^ (Lb & v_in0) ^ v_sig ^ v_out;
+      block m = t1 ? Delta : zero_block;
+      const AShareBundle &wb_in0 = WIRE(in0);
+      const AShareBundle &wb_in1 = WIRE(in1);
+      const AShareBundle &wb_out = WIRE(out);
+      const AShareBundle &sb     = sigma[ai];
+      if (La) m = m ^ wb_in1.key;
+      if (Lb) m = m ^ wb_in0.key;
+      m = m ^ sb.key ^ wb_out.key;
+      M1_t[ai] = m;
     }
+    // Step 12 message (label hash), then step 13 verdict (t_γ).
     io->send_data(&hp_seed, sizeof(block));
     io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // 1 bit/AND, packed
     io->send_data(&acc, sizeof(block));
     io->flush();
+    block z1 = zero_block;
+    if (num_ands > 0)
+      vector_inn_prdt_sum_red(&z1, M1_t.data(), coeff_ands.data(), num_ands);
+    block z_recv;
+    io->recv_data(&z_recv, sizeof(block));
+    block sum = z1 ^ z_recv;
+    if (!cmpBlock(&sum, &zero_block, 1))
+      error("cheat in t_gamma check (step 13)");
   } else {
     block h_i;
     io->recv_data(&hp_seed, sizeof(block));
     io->recv_bool((bool *)Lambda_AND.data(), num_ands);
     io->recv_data(&h_i, sizeof(block));
+    BlockVec coeff_ands(num_ands);
+    if (num_ands > 0) uni_hash_coeff_gen(coeff_ands.data(), hp_seed, num_ands);
 
-    // Re-propagate Λ and labels from the persisted base while streaming the
-    // hash of shifted[w] = mask[w] ? label^Δ : label. XOR/NOT are local; AND
-    // outputs come from P1's broadcast (Lambda_AND).
+    // Single sweep: re-propagate Λ + labels from the persisted base, fold the
+    // shifted label (mask ? label^Δ : label) into acc, and compute M1_t. AND
+    // output masks come from P1's broadcast (Lambda_AND); the t_γ term reads the
+    // input masks set earlier in this same gate-ordered sweep.
     block acc = zero_block, pw = hp_seed, term;
     auto fold = [&](int w) {
       block lab = LABEL(w);
@@ -686,70 +750,9 @@ void C2PC::check_label_hash(ComputeCtx &ctx) {
         LABEL(out) = LABEL(in0) ^ LABEL(in1);
       }
       fold(out);
-    }
-    if (!cmpBlock(&h_i, &acc, 1))
-      error("cheat in label-hash check (step 12)");
-  }
-}
-
-// Step 13: t_γ check. ⊕_p M_1[t_γ^p] = (y_α y_β ⊕ y_γ)·Δ_1 = 0 on honest gates;
-// h' linearity then gives ⊕_p z_p = 0. coeff_ands is the uni-hash of hp_seed.
-void C2PC::check_tgamma(ComputeCtx &ctx) {
-  const CircuitView *cf = ctx.cf;
-  const int num_ands = ctx.num_ands;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto &mask_input = ctx.mask_input;
-  auto &sigma = ctx.sigma;
-  block &hp_seed = ctx.hp_seed;
-  BlockVec coeff_ands(num_ands);
-  if (num_ands > 0) uni_hash_coeff_gen(coeff_ands.data(), hp_seed, num_ands);
-  BlockVec M1_t(num_ands);
-  if (party == 1) {
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      int in0 = g.in0, in1 = g.in1, out = g.out;
       if (!g.is_and()) {  // recompute fabric share for downstream ANDs
         if (g.is_not()) { WIRE(out) = WIRE(in0); }
-        else {            // XOR
-          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-        }
-        continue;
-      }
-      int ai = g.and_index();
-      bool La = mask_input[in0], Lb = mask_input[in1], Lg = mask_input[out];
-      bool v_in0 = (bool)LSB(WIRE(in0).mac);
-      bool v_in1 = (bool)LSB(WIRE(in1).mac);
-      bool v_out = (bool)LSB(WIRE(out).mac);
-      bool v_sig = (bool)LSB(sigma[ai].mac);
-      bool t1 = (La & Lb) ^ Lg ^ (La & v_in1) ^ (Lb & v_in0) ^ v_sig ^ v_out;
-      block m = t1 ? Delta : zero_block;
-      const AShareBundle &wb_in0 = WIRE(in0);
-      const AShareBundle &wb_in1 = WIRE(in1);
-      const AShareBundle &wb_out = WIRE(out);
-      const AShareBundle &sb     = sigma[ai];
-      if (La) m = m ^ wb_in1.key;
-      if (Lb) m = m ^ wb_in0.key;
-      m = m ^ sb.key ^ wb_out.key;
-      M1_t[ai] = m;
-    }
-    block z1 = zero_block;
-    if (num_ands > 0)
-      vector_inn_prdt_sum_red(&z1, M1_t.data(), coeff_ands.data(), num_ands);
-
-    block z_recv;
-    io->recv_data(&z_recv, sizeof(block));
-    block sum = z1 ^ z_recv;
-    if (!cmpBlock(&sum, &zero_block, 1))
-      error("cheat in t_gamma check (step 13)");
-  } else {
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      int in0 = g.in0, in1 = g.in1, out = g.out;
-      if (!g.is_and()) {  // recompute fabric share for downstream ANDs
-        if (g.is_not()) { WIRE(out) = WIRE(in0); }
-        else {            // XOR
-          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-        }
+        else { xor_share(WIRE(out), WIRE(in0), WIRE(in1)); }
         continue;
       }
       int ai = g.and_index();
@@ -759,6 +762,8 @@ void C2PC::check_tgamma(ComputeCtx &ctx) {
       if (Lb) m = m ^ WIRE(in0).mac;
       M1_t[ai] = m;
     }
+    if (!cmpBlock(&h_i, &acc, 1))
+      error("cheat in label-hash check (step 12)");
     block z_i = zero_block;
     if (num_ands > 0)
       vector_inn_prdt_sum_red(&z_i, M1_t.data(), coeff_ands.data(), num_ands);

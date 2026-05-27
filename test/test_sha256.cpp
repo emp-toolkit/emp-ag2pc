@@ -50,15 +50,37 @@ int main(int argc, char **argv) {
   setup_ag2pc(io, &pool, party);
   io->flush();
 
-  // Feed ALL secret inputs first (party 2 owns the messages; others feed dummies),
-  // then record all N compressions, then reveal every output bit in ONE call.
-  vector<array<U, 16>> msg(N);
-  for (int n = 0; n < N; ++n)
-    for (int j = 0; j < 16; ++j)
-      msg[n][j] = U((party == 2) ? blk[n][j] : 0, /*owner=*/2);
+  // SHA_CHECKPOINT=K (env, default 0=off): checkpoint every K compressions so the
+  // recorded gate list + per-wire arrays stay at one chunk's worth instead of the
+  // whole N-circuit. The compressions are independent, so the only wires carried
+  // across a checkpoint are the output bits produced so far (revealed at the end).
+  // A chunk's inputs are fed at its start (gates_ empty) so an interleaved feed
+  // never triggers flush_keep_all.
+  const char *cenv = getenv("SHA_CHECKPOINT");
+  const int K = cenv ? atoi(cenv) : 0;
 
   vector<block> buf(256 * N);
-  for (int n = 0; n < N; ++n) sha_compress(msg[n].data(), buf.data() + n * 256);
+  if (K <= 0) {
+    // Feed ALL secret inputs first, then record all N compressions (single chunk).
+    vector<array<U, 16>> msg(N);
+    for (int n = 0; n < N; ++n)
+      for (int j = 0; j < 16; ++j)
+        msg[n][j] = U((party == 2) ? blk[n][j] : 0, /*owner=*/2);
+    for (int n = 0; n < N; ++n) sha_compress(msg[n].data(), buf.data() + n * 256);
+  } else {
+    // Per-chunk: feed [c,hi) inputs, record their compressions, checkpoint keeping
+    // every output produced so far (ids compact to [0, hi*256) for the next chunk).
+    for (int c = 0; c < N; c += K) {
+      int hi = (c + K < N) ? c + K : N;
+      vector<array<U, 16>> msg(hi - c);
+      for (int n = c; n < hi; ++n)
+        for (int j = 0; j < 16; ++j)
+          msg[n - c][j] = U((party == 2) ? blk[n][j] : 0, /*owner=*/2);
+      for (int n = c; n < hi; ++n)
+        sha_compress(msg[n - c].data(), buf.data() + n * 256);
+      checkpoint_ag2pc(buf.data(), hi * 256);
+    }
+  }
 
   vector<bool> out_ag2pc(256 * N);
   {
@@ -66,6 +88,20 @@ int main(int argc, char **argv) {
     backend->reveal(o, 1, buf.data(), 256 * N);
     for (int i = 0; i < 256 * N; ++i) out_ag2pc[i] = o[i];
     delete[] o;
+  }
+  // SHA_TRACE=1: dump the primary channel's per-direction transcript digest and
+  // byte/round/flush counters (counters are randomness-invariant; digest is only
+  // reproducible under EMP_TEST_MODE + single-thread). For wire-equivalence diffs.
+  if (getenv("SHA_TRACE")) {
+    auto hex = [](block b) { unsigned char c[16]; memcpy(c, &b, 16);
+      std::string s; char t[3];
+      for (int i = 0; i < 16; ++i) { snprintf(t, 3, "%02x", c[i]); s += t; }
+      return s; };
+    printf("[trace] party=%d send=%s recv=%s sent=%llu recv=%llu rounds=%llu "
+           "flushes=%llu\n", party, hex(io->get_send_digest()).c_str(),
+           hex(io->get_recv_digest()).c_str(),
+           (unsigned long long)io->send_counter, (unsigned long long)io->recv_counter,
+           (unsigned long long)io->rounds, (unsigned long long)io->flushes_count);
   }
   finalize_ag2pc();
 

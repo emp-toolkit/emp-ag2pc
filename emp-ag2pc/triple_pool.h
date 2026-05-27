@@ -8,6 +8,7 @@
 #include "emp-ot/ot_extension/iknp.h"
 #include "emp-ot/ot_extension/ferret/ferret.h"
 #include "emp-ot/ot_extension/softspoken/softspoken.h"
+#include <atomic>
 #include <memory>
 #include <thread>
 
@@ -20,10 +21,51 @@ using namespace emp;
 using OTExt = emp::SoftSpoken<8>;
 
 #ifdef AG2PC_PROFILE
+#include <chrono>
+#include <cstdio>
 // Profiler: this party's send+recv bytes spent in the half-gate phi exchange,
 // and (separately) in the COT (rcot) extension.
 inline uint64_t g_ag2pc_phi_bytes = 0;
 inline uint64_t g_ag2pc_cot_bytes = 0;
+// Sub-phase timer for TriplePool::compute (decomposes the step-4 black box);
+// prints elapsed since the last marker at P1. _tp_t lives in compute() scope so
+// the half-gate lambda (captures by ref) and the post-lambda bucketing share it.
+#define AG2PC_TP_BEGIN() auto _tp_t = std::chrono::steady_clock::now()
+#define AG2PC_TP(name)                                                           \
+  do {                                                                         \
+    auto _n = std::chrono::steady_clock::now();                                \
+    if (party == 1)                                                            \
+      printf("[ag2pc-tp]   %-24s %9.3f ms\n", (name),                            \
+             std::chrono::duration<double, std::milli>(_n - _tp_t).count());     \
+    _tp_t = _n;                                                                  \
+  } while (0)
+#else
+#define AG2PC_TP_BEGIN() ((void)0)
+#define AG2PC_TP(name) ((void)0)
+#endif
+
+#ifdef AG2PC_MEMPROFILE
+#include <sys/resource.h>
+#include <cstdio>
+#include <algorithm>
+// Peak resident set so far (KiB). Monotonic, so sampling it at phase boundaries
+// localizes which phase grows the footprint. macOS getrusage reports ru_maxrss
+// in bytes, Linux in KiB.
+inline long ag2pc_peak_rss_kib() {
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &ru);
+#if defined(__APPLE__)
+  return ru.ru_maxrss / 1024;
+#else
+  return ru.ru_maxrss;
+#endif
+}
+// One row of the per-array byte census: total MiB and bytes per AND gate (the
+// per-gate unit the workload is measured in). div is the AND count.
+inline void ag2pc_mem_row(const char *label, double bytes, double div) {
+  printf("[ag2pc-mem]   %-18s %10.2f MiB  %9.1f B/AND\n", label,
+         bytes / (1024.0 * 1024.0), div > 0 ? bytes / div : 0.0);
+}
 #endif
 
 // Leaky-AND (eprint 2018/578, Fig. 5) followed by Π_Prep bucketing + amortized
@@ -219,6 +261,7 @@ public:
 #endif
 
     vector<future<void>> res;
+    AG2PC_TP_BEGIN();
 
     // Half-gate leaky-AND (eprint 2018/578, Fig. 5). Consumes the a/b/r aShares in
     // tMAC/tKEY (+ share bits tr) and produces LB leaky AND triples in the
@@ -241,6 +284,7 @@ public:
     tMAC.resize(abit_len);
     tKEY.resize(abit_len);
     tr.resize(abit_len);
+    AG2PC_TP("alloc 3.LB COT bufs");
     // W = the OT backend's internal chunk: every next() is one full optimal
     // batch. The send-dominant COT role sits on send_io (init_abit_), so the COT
     // and half-gate never flip a socket's direction.
@@ -262,46 +306,46 @@ public:
     g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
     _mark = io_count(send_io, recv_io);
 #endif
-    for (int st = 0; st < LB; st += W) {
-      const int ed = std::min(st + W, LB), Wc = ed - st;
-      // COT phase: this chunk's a/b/r COTs (KEY via abit1, MAC via abit2) into
-      // the region arrays at [st,ed), [LB+st,..), [2LB+st,..). 2 tasks, joined.
-      res.push_back(pool->enqueue([this, st, Wc, LB, W, &tKEY, &stageK]() {
-        for (int reg = 0; reg <= 2; ++reg) {
-          block *dst = tKEY.data() + (size_t)reg * LB + st;
-          if (Wc == W) abit1->next(dst);
-          else { abit1->next(stageK.data());
-                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
-        }
-        io_abit1->flush();
-      }));
-      res.push_back(pool->enqueue([this, st, Wc, LB, W, &tMAC, &stageM]() {
+    AG2PC_TP("COT begin (+base OT)");
+    // Fuse the COT and half-gate into two long-lived threads so each role reads
+    // the chunk it just produced while it is cache-warm, instead of writing the
+    // chunk and re-loading it across a phase boundary. The send thread produces
+    // tMAC (abit2) + derives tr, the recv thread produces tKEY (abit1); a
+    // 2-thread barrier per chunk gates the half-gate (both roles read both COT
+    // halves, so both COTs must finish first). tr is written by the send thread
+    // before the barrier, so it is read-only for both roles afterward.
+    const int nchunks = (LB + W - 1) / W;
+    std::atomic<int> bar_cnt{0};
+    std::atomic<uint64_t> bar_gen{0};
+    auto barrier = [&]() {
+      uint64_t g = bar_gen.load(std::memory_order_acquire);
+      if (bar_cnt.fetch_add(1, std::memory_order_acq_rel) == 1) {  // 2nd arriver
+        bar_cnt.store(0, std::memory_order_relaxed);
+        bar_gen.store(g + 1, std::memory_order_release);
+      } else {
+        while (bar_gen.load(std::memory_order_acquire) == g)
+          std::this_thread::yield();
+      }
+    };
+    // send thread (send_io): abit2 -> tMAC, derive tr, then garbler ships G.
+    res.push_back(pool->enqueue([&, this]() {
+      MITCCRH<8> mitc; mitc.setS(pair_seed);
+      block pad[16];
+      BlockVec tmp(W);
+      for (int ci = 0; ci < nchunks; ++ci) {
+        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
         for (int reg = 0; reg <= 2; ++reg) {
           block *dst = tMAC.data() + (size_t)reg * LB + st;
           if (Wc == W) abit2->next(dst);
           else { abit2->next(stageM.data());
                  memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
         }
+        for (int reg = 0; reg <= 2; ++reg)
+          for (int k = st; k < ed; ++k)
+            tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
         io_abit2->flush();
-      }));
-      joinNclean(res);
-      for (int reg = 0; reg <= 2; ++reg)
-        for (int k = st; k < ed; ++k)
-          tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
-#ifdef AG2PC_PROFILE
-      g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
-      _mark = io_count(send_io, recv_io);
-#endif
-
-      // half-gate phase on [st,ed): garbler (send_io) and eval (recv_io). The
-      // mitc tweak base renew_ks(st) keeps each leaky-AND's tweak distinct
-      // across chunks and identical on both threads.
-      res.push_back(pool->enqueue([this, st, ed, LB, pair_seed, &tKEY, &tMAC, &tr]() {
-        MITCCRH<8> mitc;
-        mitc.setS(pair_seed);
+        barrier();                              // tKEY now ready too
         mitc.renew_ks((uint64_t)st);
-        block pad[16];
-        BlockVec tmp(ed - st);
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
           for (int j = 0; j < 8; ++j) {
@@ -316,16 +360,27 @@ public:
             tmp[k - st] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
           }
         }
-        send_io->send_data(tmp.data(), (size_t)(ed - st) * sizeof(block));
+        send_io->send_data(tmp.data(), (size_t)Wc * sizeof(block));
         send_io->flush();
-      }));
-      res.push_back(pool->enqueue([this, st, ed, LB, pair_seed, &tKEY, &tMAC, &tr, &Sout]() {
-        MITCCRH<8> mitc;
-        mitc.setS(pair_seed);
+      }
+    }));
+    // recv thread (recv_io): abit1 -> tKEY, then eval recvs G and writes Sout.
+    res.push_back(pool->enqueue([&, this]() {
+      MITCCRH<8> mitc; mitc.setS(pair_seed);
+      block pad[16];
+      BlockVec wire(W);
+      for (int ci = 0; ci < nchunks; ++ci) {
+        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
+        for (int reg = 0; reg <= 2; ++reg) {
+          block *dst = tKEY.data() + (size_t)reg * LB + st;
+          if (Wc == W) abit1->next(dst);
+          else { abit1->next(stageK.data());
+                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
+        }
+        io_abit1->flush();
+        barrier();                              // tMAC + tr now ready
         mitc.renew_ks((uint64_t)st);
-        block pad[16];
-        BlockVec wire(ed - st);
-        recv_io->recv_data(wire.data(), (size_t)(ed - st) * sizeof(block));
+        recv_io->recv_data(wire.data(), (size_t)Wc * sizeof(block));
         for (int k0 = st; k0 < ed; k0 += 8) {
           int batch = std::min(8, ed - k0);
           for (int j = 0; j < 8; ++j) {
@@ -344,13 +399,14 @@ public:
                     ^ (Delta & select_mask[tr[2 * LB + k]]);
           }
         }
-      }));
-      joinNclean(res);
+      }
+    }));
+    joinNclean(res);
 #ifdef AG2PC_PROFILE
-      g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
-      _mark = io_count(send_io, recv_io);
+    g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
+    _mark = io_count(send_io, recv_io);
 #endif
-    }
+    AG2PC_TP("COT + half-gate loop");
     // close the COT session: the single malicious consistency check.
     {
       vector<future<void>> re;
@@ -361,6 +417,7 @@ public:
 #ifdef AG2PC_PROFILE
     g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
 #endif
+    AG2PC_TP("COT end (consistency)");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] streaming leaky-AND", party);
 #endif
@@ -406,6 +463,7 @@ public:
         T[k] = T[k] ^ (Delta & mask_s);
       }
     }
+    AG2PC_TP("d-open + combine s");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] combine s", party);
 #endif
@@ -450,6 +508,7 @@ public:
     }
     if (memcmp(Dme, Dpeer, Hash::DIGEST_SIZE) != 0)
       error("LaAND F_eq: leaky-AND check failed");
+    AG2PC_TP("F_eq check");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] LAND check", party);
 #endif
@@ -571,6 +630,7 @@ public:
       }));
     }
     joinNclean(res);
+    AG2PC_TP("bucketing (shift-XOR)");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] bucketing", party);
 #endif
@@ -605,8 +665,25 @@ public:
         }
       }
     }
+    AG2PC_TP("bucket d-exch + c-fold");
 #ifdef EMP_DEBUG_PHASE
     _phase("[triple] bucket d exchange", party);
+#endif
+
+#ifdef AG2PC_MEMPROFILE
+    if (party == 1) {
+      const double A = (double)std::max(1, length);   // 1 triple per AND gate
+      printf("[ag2pc-mem] TriplePool::compute  length=%d bucket=%d LB=%d "
+             "abit_len=%d\n", length, bucket_size, LB, abit_len);
+      ag2pc_mem_row("tMAC+tKEY",  (double)(tMAC.capacity() + tKEY.capacity()) * sizeof(block), A);
+      ag2pc_mem_row("Sout",       (double)Sout.capacity() * sizeof(block), A);
+      ag2pc_mem_row("tr+s+d",     (double)(tr.capacity() + s[0].capacity() + s[1].capacity()
+                                  + s[2].capacity() + d[1].capacity() + d[2].capacity()), A);
+      ag2pc_mem_row("MAC+KEY out", 2.0 * 3.0 * (double)length * sizeof(block), A);
+      ag2pc_mem_row("stage(const)", 2.0 * (double)abit1->chunk_size() * sizeof(block), A);
+      ag2pc_mem_row("pool_triples", (double)pool_triples.capacity() * sizeof(TripleBundle), A);
+      printf("[ag2pc-mem]   peakRSS-so-far %8ld KiB\n", ag2pc_peak_rss_kib());
+    }
 #endif
 
 #ifdef EMP_DEBUG_PHASE
