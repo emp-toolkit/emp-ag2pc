@@ -168,28 +168,36 @@ public:
     Delta = abit1->Delta;
   }
 
-  // One-shot COT extension: mint `length` aShares into MAC/KEY (resized). The
-  // share x_k is implicit in bit0(MAC[k]); MAC = KEY ⊕ x·Δ straight from rcot.
-  // Used by draw() and the cut-and-choose path (the half-gate streams instead).
-  void process_phase1(BlockVec &MAC, BlockVec &KEY, int length) {
-    MAC.resize(length);
-    KEY.resize(length);
+  // Share generator: mint `count` checked random authenticated shares into the
+  // mac/key spans (one COT session per call — abit1->rcot is begin/next*/end with
+  // a single consistency check). bit0(mac)=x, mac = key ⊕ x·Δ. Pointer form so a
+  // leaky-AND layer can fill a whole region triple (3·L) or just one region (the
+  // in-place representative's fresh r). Shared by the leaky-AND layers,
+  // process_phase1 / draw, and the cut-and-choose path.
+  void gen_cot_shares(block *mac, block *key, int count) {
 #ifdef AG2PC_PROFILE
     int64_t _cot0 = io_count(send_io, recv_io);
 #endif
     vector<future<void>> res;
-    res.push_back(pool->enqueue([this, &KEY, length]() {
-      abit1->rcot(KEY.data(), length);
+    res.push_back(pool->enqueue([this, key, count]() {
+      abit1->rcot(key, count);
       io_abit1->flush();
     }));
-    res.push_back(pool->enqueue([this, &MAC, length]() {
-      abit2->rcot(MAC.data(), length);
+    res.push_back(pool->enqueue([this, mac, count]() {
+      abit2->rcot(mac, count);
       io_abit2->flush();
     }));
     joinNclean(res);
 #ifdef AG2PC_PROFILE
     g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _cot0);
 #endif
+  }
+
+  // One-shot COT extension: mint `length` aShares into MAC/KEY (resized).
+  void process_phase1(BlockVec &MAC, BlockVec &KEY, int length) {
+    MAC.resize(length);
+    KEY.resize(length);
+    gen_cot_shares(MAC.data(), KEY.data(), length);
   }
 
   // AoS draw: n aShares as AShareBundle{mac,key} (the layout 2pc consumes).
@@ -236,565 +244,312 @@ public:
   // TriplePool members; dormant while kLeakyAnd == HalfGate.
   #include "emp-ag2pc/triple_pool_cutchoose.h"
 
-  // Mint `length` AND triples into MAC/KEY, slot-major a/b/c: share bit s of
-  // triple k is bit0(MAC[s*length+k]), bit0(KEY)=0. If out_aos is non-null the
-  // triples are also written as AoS TripleBundles (the layout draw() serves).
-  void compute(block *MAC, block *KEY, int length,
-               TripleBundle *out_aos = nullptr) {
-    int bucket_size = get_bucket_size(length);
-    int LB = length * bucket_size;
-    // a/b/r authenticated bits for the LB leaky triples.
-    int abit_len = leaky_abit_len(LB);
+  // ===== Leaky-AND layer primitives (eprint 2018/578, Fig. 5 + P:aAND) =====
+  // A "layer" is L candidate triples in SoA region-major order, stride L:
+  // region a=[0,L), b=[L,2L), r/c=[2L,3L); the share bit of region g triple i is
+  // LSB(mac[g*L+i]). Region 2 holds the output mask r before leaky_and_halfgate
+  // and the leaky product c=a∧b after (the fold is in place). gen_cot_shares
+  // fills a layer (or one region); the same leaky_and_halfgate / bucket_one_layer
+  // serve both the generic and the in-place (function-dependent) paths.
 
-    BlockVec tMAC, tKEY;
-    // Half-gate output: the eval thread writes S^me per leaky triple into Sout
-    // (folded in place to L^me for the F_eq check). The garbler thread is
-    // read-only over the aShares; C^me and the sender pad H(K) are recomputed
-    // on the eval thread, so the two threads share only read-only data (no
-    // lock). s[party]/s[peer] are the garbling-parity shares, s[0] = XOR.
-    BlockVec Sout;
-    vector<unsigned char> s[3];
-    vector<unsigned char> tr;
-
-    tr.reserve(abit_len);
-    tMAC.reserve(abit_len);
-    tKEY.reserve(abit_len);
-    Sout.resize(LB);
-    for (int i = 0; i <= 2; ++i) s[i].resize(LB);
-
-#ifdef EMP_DEBUG_PHASE
-    _phase("", party);
-#endif
-
+  // Half-gate leaky-AND over the L candidates whose 3L authenticated shares are in
+  // mac/key. The garbler ships G on send_io; the eval recovers S^me on recv_io and
+  // writes it locally; an s-open folds d into region 2 (r -> c = a∧b) in place; the
+  // F_eq equality check (rush-safe) aborts on a cheating multiplication. tr is
+  // (re)derived here so callers need only fill mac/key. gmitc/emitc persist across
+  // a bucket's layers (one setS in the caller), so the per-gate tweak (gid) keeps
+  // advancing and never repeats. No COT: the shares are given (COT and/or copied
+  // wire masks), which is why this serves both the representative and the sacrifices.
+  void leaky_and_halfgate(block *mac, block *key, unsigned char *tr, int L,
+                          MITCCRH<8> &gmitc, MITCCRH<8> &emitc) {
+    for (int k = 0; k < 3 * L; ++k) tr[k] = LSB(mac[k]);
+    BlockVec Sout(L);
     vector<future<void>> res;
-    AG2PC_TP_BEGIN();
-
-    // Half-gate leaky-AND (eprint 2018/578, Fig. 5). Consumes the a/b/r aShares in
-    // tMAC/tKEY (+ share bits tr) and produces LB leaky AND triples in the
-    // a/b/c layout the bucketing reads (r -> c). The CutChoose sibling has the
-    // same contract + its own leaky_abit_len.
-    auto produce_leaky_ands_halfgate = [&]() {
-    // Stream the leaky-AND a chunk at a time: produce one chunk of COT and run
-    // the half-gate on it, looping. The COTs form ONE streaming session
-    // (begin / next* / end) so the malicious consistency check runs once over
-    // the whole stream; the half-gate consumes each chunk's COTs before that
-    // end()-check (the F_eq + abort-on-check gate acceptance).
-    //
-    // C^me = y·Δ ⊕ K[y] ⊕ M[y] (C^A ⊕ C^B = y·(Δ_A⊕Δ_B)); the half-gate hash
-    // hides C, so phi = C directly. Per chunk the garbler hashes (K, K⊕Δ) with
-    // hash<8,2> and ships G = H(K) ⊕ H(K⊕Δ) ⊕ C on send_io; the eval recvs G on
-    // recv_io and recomputes C and the sender pad H(K) itself (hash<8,2> over
-    // (M, K) under the same gid-aligned tweak), forms E = H(M) ⊕ x·G, and
-    // writes S^me = H(K) ⊕ E ⊕ (K[r]⊕M[r]) ⊕ x·C ⊕ r·Δ into Sout. The two
-    // threads share only the read-only aShares (no lock).
-    tMAC.resize(abit_len);
-    tKEY.resize(abit_len);
-    tr.resize(abit_len);
-    AG2PC_TP("alloc 3.LB COT bufs");
-    // W = the OT backend's internal chunk: every next() is one full optimal
-    // batch. The send-dominant COT role sits on send_io (init_abit_), so the COT
-    // and half-gate never flip a socket's direction.
-    const int W = (int)abit1->chunk_size();
-    BlockVec stageK((size_t)W), stageM((size_t)W);  // only the final partial chunk
-    const block pair_seed = makeBlock((uint64_t)std::min(party, 3 - party),
-                                      (uint64_t)std::max(party, 3 - party));
-#ifdef AG2PC_PROFILE
-    int64_t _mark = io_count(send_io, recv_io);
-#endif
-    // open the COT session (concurrent base-OT on the two sockets)
-    {
-      vector<future<void>> rb;
-      rb.push_back(pool->enqueue([this]() { abit1->begin(); io_abit1->flush(); }));
-      rb.push_back(pool->enqueue([this]() { abit2->begin(); io_abit2->flush(); }));
-      joinNclean(rb);
-    }
-#ifdef AG2PC_PROFILE
-    g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
-    _mark = io_count(send_io, recv_io);
-#endif
-    AG2PC_TP("COT begin (+base OT)");
-    // Unfused: run the COT for the whole stream first (both abits in parallel),
-    // then the half-gate for the whole stream (garbler + eval in parallel),
-    // separated by a thread join instead of a per-chunk barrier. The abit2
-    // thread derives tr (= bit0 of tMAC) per chunk while that chunk is still
-    // cache-hot; the half-gate then re-reads tKEY/tMAC/tr after the COT join.
-    const int nchunks = (LB + W - 1) / W;
-#ifdef AG2PC_PROFILE
-    // Per-thread phase timing. s_=garbler thread, r_=eval thread; cot=COT
-    // extension (phase A), hg=half-gate compute (phase B), net=the eval thread's
-    // blocking G recv.
-    std::atomic<long long> s_cot_ns{0}, s_hg_ns{0};
-    std::atomic<long long> r_cot_ns{0}, r_net_ns{0}, r_hg_ns{0};
-    auto _now = []{ return std::chrono::steady_clock::now(); };
-    auto _ns = [](std::chrono::steady_clock::time_point a,
-                  std::chrono::steady_clock::time_point b){ return (long long)
-        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
-#endif
-#ifdef AG2PC_PROFILE
-    // AG2PC_COT_ONLY: time just the COT exchange (both abits, all chunks, no
-    // barrier / half-gate) to compare against the SoftSpoken bench with no
-    // push/pull confound. Leaves tKEY/tMAC un-half-gated -> garbage triples
-    // (test shows BAD); we only read the timing, then return to skip the rest.
-    if (std::getenv("AG2PC_COT_ONLY")) {
-      auto _c0 = std::chrono::steady_clock::now();
-      vector<future<void>> rc;
-      rc.push_back(pool->enqueue([&, this]() {
-        for (int ci = 0; ci < nchunks; ++ci) {
-          const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-          for (int reg = 0; reg <= 2; ++reg) {
-            block *dst = tMAC.data() + (size_t)reg * LB + st;
-            if (Wc == W) abit2->next(dst);
-            else { abit2->next(stageM.data());
-                   memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
-          }
-          io_abit2->flush();
-        }
-      }));
-      rc.push_back(pool->enqueue([&, this]() {
-        for (int ci = 0; ci < nchunks; ++ci) {
-          const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-          for (int reg = 0; reg <= 2; ++reg) {
-            block *dst = tKEY.data() + (size_t)reg * LB + st;
-            if (Wc == W) abit1->next(dst);
-            else { abit1->next(stageK.data());
-                   memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
-          }
-          io_abit1->flush();
-        }
-      }));
-      joinNclean(rc);
-      { vector<future<void>> re;
-        re.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
-        re.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
-        joinNclean(re); }
-      if (party == 1)
-        printf("[ag2pc-tp]   COT-ONLY (both abits, no HG/barrier) %9.3f ms"
-               "  (%d COTs/abit, %d chunks)\n",
-               std::chrono::duration<double, std::milli>(
-                   std::chrono::steady_clock::now() - _c0).count(),
-               abit_len, nchunks);
-      return;
-    }
-#endif
-    // ===== Phase A: COT over the whole stream (both abits in parallel) =====
-    res.push_back(pool->enqueue([&, this]() {     // abit2 -> tMAC, derive tr
-#ifdef AG2PC_PROFILE
-      auto _c0 = _now();
-#endif
-      for (int ci = 0; ci < nchunks; ++ci) {
-        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-        for (int reg = 0; reg <= 2; ++reg) {
-          block *dst = tMAC.data() + (size_t)reg * LB + st;
-          if (Wc == W) abit2->next(dst);
-          else { abit2->next(stageM.data());
-                 memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
-        }
-        // derive tr (= bit0 of tMAC) for this chunk while tMAC is still
-        // cache-hot, instead of a cold full re-read pass after the loop.
-        for (int reg = 0; reg <= 2; ++reg)
-          for (int k = st; k < ed; ++k)
-            tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
-        io_abit2->flush();
-      }
-#ifdef AG2PC_PROFILE
-      s_cot_ns += _ns(_c0, _now());
-#endif
-    }));
-    res.push_back(pool->enqueue([&, this]() {     // abit1 -> tKEY
-#ifdef AG2PC_PROFILE
-      auto _c0 = _now();
-#endif
-      for (int ci = 0; ci < nchunks; ++ci) {
-        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-        for (int reg = 0; reg <= 2; ++reg) {
-          block *dst = tKEY.data() + (size_t)reg * LB + st;
-          if (Wc == W) abit1->next(dst);
-          else { abit1->next(stageK.data());
-                 memcpy(dst, stageK.data(), (size_t)Wc * sizeof(block)); }
-        }
-        io_abit1->flush();
-      }
-#ifdef AG2PC_PROFILE
-      r_cot_ns += _ns(_c0, _now());
-#endif
-    }));
-    joinNclean(res);
-    AG2PC_TP("COT phase (both abits)");
-
-    // ===== Phase B: half-gate over the whole stream (garbler ships G, eval recvs) =====
-    res.push_back(pool->enqueue([&, this]() {     // garbler on send_io
-      // gid auto-increment: hash<8,2> re-keys every 8 gates on its own, so no
-      // per-chunk renew_ks — garbler and eval walk the identical chunk sequence,
-      // so their gid (hence each gate's tweak) stays in lockstep.
-      MITCCRH<8> mitc; mitc.setS(pair_seed);
+    res.push_back(pool->enqueue([&, this]() {            // garbler on send_io
       block pad[16];
-      BlockVec tmp(W);
-#ifdef AG2PC_PROFILE
-      auto _h0 = _now();
-#endif
-      for (int ci = 0; ci < nchunks; ++ci) {
-        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-        for (int k0 = st; k0 < ed; k0 += 8) {
-          int batch = std::min(8, ed - k0);
-          for (int j = 0; j < 8; ++j) {
-            block key = (j < batch) ? tKEY[k0 + j] : zero_block;
-            pad[2 * j]     = key;
-            pad[2 * j + 1] = key ^ Delta;
-          }
-          mitc.hash<8, 2>(pad);
-          for (int j = 0; j < batch; ++j) {
-            int k = k0 + j;
-            block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
-            tmp[k - st] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
-          }
+      BlockVec tmp(L);
+      for (int k0 = 0; k0 < L; k0 += 8) {
+        int batch = std::min(8, L - k0);
+        for (int j = 0; j < 8; ++j) {
+          block kk = (j < batch) ? key[k0 + j] : zero_block;
+          pad[2 * j] = kk;
+          pad[2 * j + 1] = kk ^ Delta;
         }
-        send_io->send_data(tmp.data(), (size_t)Wc * sizeof(block));
-        send_io->flush();
+        gmitc.hash<8, 2>(pad);
+        for (int j = 0; j < batch; ++j) {
+          int k = k0 + j;
+          block C = (select_mask[tr[L + k]] & Delta) ^ key[L + k] ^ mac[L + k];
+          tmp[k] = pad[2 * j] ^ pad[2 * j + 1] ^ C;
+        }
       }
-#ifdef AG2PC_PROFILE
-      s_hg_ns += _ns(_h0, _now());
-#endif
+      send_io->send_data(tmp.data(), (size_t)L * sizeof(block));
+      send_io->flush();
     }));
-    res.push_back(pool->enqueue([&, this]() {     // eval on recv_io
-      MITCCRH<8> mitc; mitc.setS(pair_seed);
+    res.push_back(pool->enqueue([&, this]() {            // eval on recv_io
       block pad[16];
-      BlockVec wire(W);
-      for (int ci = 0; ci < nchunks; ++ci) {
-        const int st = ci * W, ed = std::min(st + W, LB), Wc = ed - st;
-#ifdef AG2PC_PROFILE
-        auto _n0 = _now();
-#endif
-        recv_io->recv_data(wire.data(), (size_t)Wc * sizeof(block));
-#ifdef AG2PC_PROFILE
-        auto _n1 = _now(); r_net_ns += _ns(_n0, _n1);
-#endif
-        for (int k0 = st; k0 < ed; k0 += 8) {
-          int batch = std::min(8, ed - k0);
-          for (int j = 0; j < 8; ++j) {
-            pad[2 * j]     = (j < batch) ? tMAC[k0 + j] : zero_block;  // -> H(M)
-            pad[2 * j + 1] = (j < batch) ? tKEY[k0 + j] : zero_block;  // -> H(K)
-          }
-          mitc.hash<8, 2>(pad);
-          for (int j = 0; j < batch; ++j) {
-            int k = k0 + j;
-            block HM = pad[2 * j], HK = pad[2 * j + 1];
-            block E = HM ^ (wire[k - st] & select_mask[tr[k]]);
-            block C = (select_mask[tr[LB + k]] & Delta) ^ tKEY[LB + k] ^ tMAC[LB + k];
-            Sout[k] = HK ^ E
-                    ^ tKEY[2 * LB + k] ^ tMAC[2 * LB + k]
-                    ^ (C & select_mask[tr[k]])
-                    ^ (Delta & select_mask[tr[2 * LB + k]]);
-          }
+      BlockVec wire(L);
+      recv_io->recv_data(wire.data(), (size_t)L * sizeof(block));
+      for (int k0 = 0; k0 < L; k0 += 8) {
+        int batch = std::min(8, L - k0);
+        for (int j = 0; j < 8; ++j) {
+          pad[2 * j]     = (j < batch) ? mac[k0 + j] : zero_block;  // -> H(M)
+          pad[2 * j + 1] = (j < batch) ? key[k0 + j] : zero_block;  // -> H(K)
         }
-#ifdef AG2PC_PROFILE
-        r_hg_ns += _ns(_n1, _now());
-#endif
+        emitc.hash<8, 2>(pad);
+        for (int j = 0; j < batch; ++j) {
+          int k = k0 + j;
+          block HM = pad[2 * j], HK = pad[2 * j + 1];
+          block E = HM ^ (wire[k] & select_mask[tr[k]]);
+          block C = (select_mask[tr[L + k]] & Delta) ^ key[L + k] ^ mac[L + k];
+          Sout[k] = HK ^ E ^ key[2 * L + k] ^ mac[2 * L + k]
+                  ^ (C & select_mask[tr[k]]) ^ (Delta & select_mask[tr[2 * L + k]]);
+        }
       }
     }));
     joinNclean(res);
-#ifdef AG2PC_PROFILE
-    g_ag2pc_phi_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
-    _mark = io_count(send_io, recv_io);
-#endif
-    AG2PC_TP("half-gate phase");
-#ifdef AG2PC_PROFILE
-    if (party == 1) {
-      printf("[ag2pc-tp]   abit2/garble thr:  COT %7.1f  HG %7.1f ms\n",
-             s_cot_ns.load() / 1e6, s_hg_ns.load() / 1e6);
-      printf("[ag2pc-tp]   abit1/eval   thr:  COT %7.1f  HG %7.1f ms"
-             "  (HG = recv-G net %.1f + eval %.1f)\n",
-             r_cot_ns.load() / 1e6,
-             (r_net_ns.load() + r_hg_ns.load()) / 1e6,
-             r_net_ns.load() / 1e6, r_hg_ns.load() / 1e6);
-    }
-#endif
-    // close the COT session: the single malicious consistency check.
-    {
-      vector<future<void>> re;
-      re.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
-      re.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
-      joinNclean(re);
-    }
-#ifdef AG2PC_PROFILE
-    g_ag2pc_cot_bytes += (uint64_t)(io_count(send_io, recv_io) - _mark);
-#endif
-    AG2PC_TP("COT end (consistency)");
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] streaming leaky-AND", party);
-#endif
 
-    // Open d^me = LSB1(s^me) to the peer (bit 1 carries the garbling parity
-    // under the bit-0/bit-1 Δ convention); d = d^A ⊕ d^B.
-    for (int k = 0; k < LB; ++k)
-      s[party][k] = LSB1(Sout[k]);
-    { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        send_io->send_bool((const bool *)s[party].data(), LB);  // 1 bit/elt, packed
-        send_io->flush();
-      }));
-      res.push_back(pool->enqueue([this, &s, LB, peer]() {
-        recv_io->recv_bool((bool *)s[peer].data(), LB);
-      }));
-    }
+    // s-open + combine: d = ⊕_party LSB1(S). Fold d into Sout (-> L^me) and into
+    // region 2 (r -> c = r⊕d): P1 flips bit0(mac[2L+k]); the peer flips key by
+    // (Δ⊕e_0) so bit0(key) stays pinned. tr[2L+] mirrors c's share bit.
+    vector<unsigned char> s_me(L), s_peer(L);
+    for (int k = 0; k < L; ++k) s_me[k] = LSB1(Sout[k]);
+    res.push_back(pool->enqueue([&, this]() {
+      send_io->send_bool((const bool *)s_me.data(), L);
+      send_io->flush();
+    }));
+    res.push_back(pool->enqueue([&, this]() {
+      recv_io->recv_bool((bool *)s_peer.data(), L);
+    }));
     joinNclean(res);
-
-    // steps 7 + (part of) 11: combine d = ⊕_i d^i; compute t^i = s^i ⊕ d·Δ_i
-    // (folded into T = Sout).  We also fold d into the r-share
-    // in-place so r becomes c = r ⊕ d (paper step 11): only P1 flips its
-    // r-bit, and every P_(j≠1) flips K_j[c^1] = K_j[r^1] ⊕ d·Δ_j to
-    // maintain MAC consistency on the new c^1 bit.
-    //
-    // Bit-0 pinned variant (matches the init_abit_ Δ pinning): peer j uses
-    // (Δ_j ⊕ e_0) so bit 0 of tKEY[1] stays at 0; P1 instead flips bit 0
-    // of tMAC[2*LB + k] by d so bit0(tMAC) tracks c^1 = r^1 ⊕ d
-    // across all peers. tr[2*LB + k] is mirrored to keep the legacy byte
-    // vector in sync (Step E removes it).
     {
-      block *T = Sout.data();
       block dxor = Delta ^ bit0_mask;
-      for (int k = 0; k < LB; ++k) {
-        s[0][k] = (s[1][k] != s[2][k]);
-        block mask_s = select_mask[s[0][k]];
+      for (int k = 0; k < L; ++k) {
+        unsigned char d = (s_me[k] != s_peer[k]);
+        block mask_s = select_mask[d];
         if (party == 1) {
-          tr[2 * LB + k] = (s[0][k] != tr[2 * LB + k]);
-          tMAC[2 * LB + k] = tMAC[2 * LB + k] ^ (bit0_mask & mask_s);
+          tr[2 * L + k] = (d != tr[2 * L + k]);
+          mac[2 * L + k] = mac[2 * L + k] ^ (bit0_mask & mask_s);
         } else {
-          tKEY[2 * LB + k] = tKEY[2 * LB + k] ^ (dxor & mask_s);
+          key[2 * L + k] = key[2 * L + k] ^ (dxor & mask_s);
         }
-        T[k] = T[k] ^ (Delta & mask_s);
+        Sout[k] = Sout[k] ^ (Delta & mask_s);
       }
     }
-    AG2PC_TP("d-open + combine s");
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] combine s", party);
-#endif
 
-    // step 5 (F_eq): the leaky-AND consistency check. After the step-7 fold,
-    // Sout[k] = S^me_k ⊕ d_k·Δ_me = L^me_k (eprint 2018/578, Fig. 5). On honest
-    // execution L^A_k = L^B_k for every k, so a batched equality of D = H(L)
-    // catches a cheating multiplication.
-    //
-    // The check is an equality, so it is realized as the RO-model EQ protocol
-    // of eprint 2018/578: party A commits c = H(x‖r) with a fresh random nonce
-    // r, party B then sends its value y, and only then A opens (x, r); B
-    // verifies H(x‖r)==c and x==y. The asymmetric order makes it rush-safe (a
-    // symmetric "both commit, both open" lets a rushing party echo the peer's
-    // commitment and opening to pass with a bad triple), and the nonce keeps
-    // the commitment hiding. We run EQ on x := D = H(L-vector), so the revealed
-    // values stay digest-sized; D^A == D^B iff the L-vectors match. Only the
-    // equality verdict leaks (the leaky-AND's allowed ≤1 bit).
+    // F_eq: EQ on D = H(L-vector) (eprint 2018/578). A commits H(x‖r), B sends y,
+    // A opens (x,r); asymmetric order is rush-safe, the nonce keeps it hiding.
     char Dme[Hash::DIGEST_SIZE], Dpeer[Hash::DIGEST_SIZE];
-    Hash::hash_once(Dme, Sout.data(), (size_t)LB * sizeof(block));
-    if (party == 1) {                                 // A
+    Hash::hash_once(Dme, Sout.data(), (size_t)L * sizeof(block));
+    if (party == 1) {
       block r; PRG().random_block(&r, 1);
       char com[Hash::DIGEST_SIZE];
       { Hash h; h.put(Dme, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(com); }
-      io->send_data(com, Hash::DIGEST_SIZE);          // 1. c = H(x‖r)
-      io->flush();
-      io->recv_data(Dpeer, Hash::DIGEST_SIZE);        // 2. B sends y
-      io->send_data(Dme, Hash::DIGEST_SIZE);          // 3. A opens x, r
-      io->send_data(&r, sizeof(block));
-      io->flush();
-    } else {                                          // B
+      io->send_data(com, Hash::DIGEST_SIZE);
+      io->recv_data(Dpeer, Hash::DIGEST_SIZE);
+      io->send_data(Dme, Hash::DIGEST_SIZE);
+      io->send_data(&r, sizeof(block)); io->flush();
+    } else {
       char com[Hash::DIGEST_SIZE], chk[Hash::DIGEST_SIZE];
       block r;
-      io->recv_data(com, Hash::DIGEST_SIZE);          // 1.
-      io->send_data(Dme, Hash::DIGEST_SIZE);          // 2. send y (before A opens)
-      io->flush();
-      io->recv_data(Dpeer, Hash::DIGEST_SIZE);        // 3. recv x
-      io->recv_data(&r, sizeof(block));               //    and r
+      io->recv_data(com, Hash::DIGEST_SIZE);
+      io->send_data(Dme, Hash::DIGEST_SIZE);
+      io->recv_data(Dpeer, Hash::DIGEST_SIZE);
+      io->recv_data(&r, sizeof(block));
       { Hash h; h.put(Dpeer, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(chk); }
       if (memcmp(chk, com, Hash::DIGEST_SIZE) != 0)
         error("LaAND F_eq: commit-open mismatch");
     }
     if (memcmp(Dme, Dpeer, Hash::DIGEST_SIZE) != 0)
       error("LaAND F_eq: leaky-AND check failed");
-    AG2PC_TP("F_eq check");
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] LAND check", party);
-#endif
-    };  // end produce_leaky_ands_halfgate
+  }
 
-    // Run the active leaky-AND method. HalfGate streams its own COT (above);
-    // CutChoose mints all aShares up front, then runs the cut-and-choose.
-    if constexpr (kLeakyAnd == LeakyAnd::HalfGate) produce_leaky_ands_halfgate();
-    else {
-      (void)produce_leaky_ands_halfgate;
-      process_phase1(tMAC, tKEY, abit_len);
-      tr.resize(abit_len);
-      for (int k = 0; k < abit_len; ++k) tr[k] = LSB(tMAC[k]);
-      cutchoose_leaky(tMAC, tKEY, tr, LB);
+  // Fold one bucketing layer into the accumulator (P:aAND combine): with the
+  // layer cyclically reindexed by r (src=(i+r) mod L, split at the one wraparound),
+  // acc.a ^= layer.a, acc.c ^= layer.c ⊕ d·layer.a, where d = bit_b(acc) ⊕
+  // bit_b(layer) is opened over (send_io, recv_io). acc.b is untouched (it stays
+  // the representative's b across all layers). Call B-1 times per bucket.
+  void bucket_one_layer(block *am, block *ak, const unsigned char *atr,
+                        const block *lm, const block *lk, const unsigned char *ltr,
+                        int L, int r) {
+    vector<unsigned char> d_me(L), d_peer(L);
+    const int cut = L - r;                       // r ∈ [0,L); src wraps at i==cut
+    for (int i = 0; i < L; ++i) {
+      int src = (i < cut) ? i + r : i + r - L;
+      am[i]         = am[i]         ^ lm[src];              // a ^= layer.a
+      am[2 * L + i] = am[2 * L + i] ^ lm[2 * L + src];      // c ^= layer.c
+      ak[i]         = ak[i]         ^ lk[src];
+      ak[2 * L + i] = ak[2 * L + i] ^ lk[2 * L + src];
+      d_me[i] = atr[L + i] ^ ltr[L + src];                 // b-share diff
     }
+    vector<future<void>> res;
+    res.push_back(pool->enqueue([&, this]() {
+      send_io->send_bool((const bool *)d_me.data(), L);
+      send_io->flush();
+    }));
+    res.push_back(pool->enqueue([&, this]() {
+      recv_io->recv_bool((bool *)d_peer.data(), L);
+    }));
+    joinNclean(res);
+    for (int i = 0; i < L; ++i) {
+      int src = (i < cut) ? i + r : i + r - L;
+      block m = select_mask[(unsigned char)(d_me[i] ^ d_peer[i])];
+      am[2 * L + i] = am[2 * L + i] ^ (lm[src] & m);        // c ^= layer.a · d
+      ak[2 * L + i] = ak[2 * L + i] ^ (lk[src] & m);
+    }
+  }
 
-    // Π_aAND (P:aAND): bucketing via per-row circular shifts on a
-    // bucket_size × length matrix.  Row 0 is fixed, rows 1..B-1 get a random
-    // shift r_k ∈ [0, length).  We don't materialize a permutation array:
-    // bucket i's k-th slot is leaky triple (k * length + (i + r_k) mod length),
-    // which is sequential in i (with at most one wraparound), so each row is
-    // streamed once per bucket range.
-    // Public coin: absorb both channels' digests in a fixed (io, sib) order —
-    // same labeled pairs on both ends, so both parties derive the same S.
+  // Generate B-1 fresh sacrifice layers (COT + half-gate), then bucket them all
+  // into acc. The shifts are drawn from the public coin AFTER every candidate is
+  // committed (all leaky-ANDs done), so a cheater cannot bias which candidates
+  // co-bucket. On return acc holds L secure triples (a/b = layer 0's, c secure).
+  // The caller has already filled+leaky'd layer 0 (acc) with gmitc/emitc, which
+  // continue here so each layer's tweaks stay distinct.
+  void layered_bucket_into_acc(block *am, block *ak, unsigned char *atr, int B,
+                               int L, MITCCRH<8> &gmitc, MITCCRH<8> &emitc) {
+    struct Lyr { BlockVec mac, key; vector<unsigned char> tr; };
+    std::vector<Lyr> sac(B - 1);
+    for (int k = 0; k < B - 1; ++k) {
+      sac[k].mac.resize((size_t)3 * L);
+      sac[k].key.resize((size_t)3 * L);
+      sac[k].tr.resize((size_t)3 * L);
+      gen_cot_shares(sac[k].mac.data(), sac[k].key.data(), 3 * L);
+      leaky_and_halfgate(sac[k].mac.data(), sac[k].key.data(), sac[k].tr.data(),
+                         L, gmitc, emitc);
+    }
+    // Public coin: same labeled (io, sib) digests on both ends -> same S.
     block S = RO("AG2PC RO", zero_block)
-                  .absorb(io->get_digest())
-                  .absorb(sib->get_digest())
-                  .squeeze_block();
-    vector<unsigned char> d[3];
-    for (int i = 1; i <= 2; ++i)
-      d[i].resize(length * (bucket_size - 1));
-    vector<int> rk(bucket_size);
-    rk[0] = 0;
-    {
-      vector<uint32_t> raw(bucket_size - 1);
-      PRG prg2(&S);
-      prg2.random_data(raw.data(), (bucket_size - 1) * sizeof(uint32_t));
-      for (int k = 1; k < bucket_size; ++k)
-        rk[k] = (int)(raw[k - 1] % (uint32_t)length);
-    }
+                  .absorb(io->get_digest()).absorb(sib->get_digest()).squeeze_block();
+    std::vector<int> rk(B - 1);
+    { PRG prg2(&S);
+      std::vector<uint32_t> raw(B - 1);
+      prg2.random_data(raw.data(), (B - 1) * sizeof(uint32_t));
+      for (int k = 0; k < B - 1; ++k) rk[k] = (int)(raw[k] % (uint32_t)L); }
+    for (int k = 0; k < B - 1; ++k)
+      bucket_one_layer(am, ak, atr, sac[k].mac.data(), sac[k].key.data(),
+                       sac[k].tr.data(), L, rk[k]);
+  }
 
-    int T2U = pool->size();
-    int width3 = (length + T2U - 1) / T2U;
-    for (int ti = 0; ti < T2U; ++ti) {
-      int st = width3 * ti, ed = std::min(length, width3 * (ti + 1));
-      res.push_back(pool->enqueue([this, bucket_size, length, LB, &d, MAC, KEY, &tMAC, &tKEY, &rk, &tr, st, ed, out_aos]() {
-        // Row 0 (no shift): bucket i's representative is leaky triple i.
-        // Slot-major layout: slot s of dst at MAC[s*length + i], slot s
-        // of src at tMAC. When out_aos is non-null, also
-        // initialize the AoS bundle for each i (Stage 4d: fuses the
-        // SoA→AoS transpose into bucketing's existing per-i write).
-        {
-          for (int s = 0; s < 3; ++s) {
-            memcpy(MAC + s * length + st, tMAC.data() + s * LB + st, (ed - st) * sizeof(block));
-            memcpy(KEY + s * length + st, tKEY.data() + s * LB + st, (ed - st) * sizeof(block));
-          }
-          if (out_aos) {
-            for (int i = st; i < ed; ++i) {
-              out_aos[i].b[0].mac = tMAC[i];
-              out_aos[i].b[0].key = tKEY[i];
-              out_aos[i].b[1].mac = tMAC[LB + i];
-              out_aos[i].b[1].key = tKEY[LB + i];
-              out_aos[i].b[2].mac = tMAC[2 * LB + i];
-              out_aos[i].b[2].key = tKEY[2 * LB + i];
-            }
-          }
-        }
-        // Rows k = 1..B-1: XOR in row k, shifted by r_k.  For i ∈ [st, ed),
-        // source position within row k is p = (i + r_k) mod length; split the
-        // range at the one wraparound so both segments are strictly sequential.
-        // Share bits are carried implicitly by bit0(MAC[*]); no separate
-        // byte vector update is needed. AoS slot 1 (b) is NOT updated here
-        // — bucketing only XORs slot 0 (a) and slot 2 (c=r); the b-slot
-        // diff is tracked in d[party] and resolved at the closing d-mask.
-        for (int k = 1; k < bucket_size; ++k) {
-          int shift = rk[k];
-          int cut = std::max(st, std::min(ed, length - shift));
-          int base = k * length;
-          {
-            for (int i = st; i < cut; ++i) {
-              int src = base + i + shift;
-              MAC[i]              = MAC[i]              ^ tMAC[src];
-              MAC[2 * length + i] = MAC[2 * length + i] ^ tMAC[2 * LB + src];
-              KEY[i]              = KEY[i]              ^ tKEY[src];
-              KEY[2 * length + i] = KEY[2 * length + i] ^ tKEY[2 * LB + src];
-              if (out_aos) {
-                out_aos[i].b[0].mac = out_aos[i].b[0].mac ^ tMAC[src];
-                out_aos[i].b[0].key = out_aos[i].b[0].key ^ tKEY[src];
-                out_aos[i].b[2].mac = out_aos[i].b[2].mac ^ tMAC[2 * LB + src];
-                out_aos[i].b[2].key = out_aos[i].b[2].key ^ tKEY[2 * LB + src];
-              }
-            }
-            for (int i = cut; i < ed; ++i) {
-              int src = base + i + shift - length;
-              MAC[i]              = MAC[i]              ^ tMAC[src];
-              MAC[2 * length + i] = MAC[2 * length + i] ^ tMAC[2 * LB + src];
-              KEY[i]              = KEY[i]              ^ tKEY[src];
-              KEY[2 * length + i] = KEY[2 * length + i] ^ tKEY[2 * LB + src];
-              if (out_aos) {
-                out_aos[i].b[0].mac = out_aos[i].b[0].mac ^ tMAC[src];
-                out_aos[i].b[0].key = out_aos[i].b[0].key ^ tKEY[src];
-                out_aos[i].b[2].mac = out_aos[i].b[2].mac ^ tMAC[2 * LB + src];
-                out_aos[i].b[2].key = out_aos[i].b[2].key ^ tKEY[2 * LB + src];
-              }
-            }
-          }
-          // d[party][...] tracks the b-slot bucket-row XOR (= bit0(tMAC b-tail)
-          // diff) and is exchanged across peers below. Same XOR pattern that
-          // the MAC/KEY rows above carry, restricted to the b-slot.
-          for (int i = st; i < cut; ++i) {
-            int src = base + i + shift;
-            d[party][(bucket_size - 1) * i + (k - 1)] = tr[LB + i] != tr[LB + src];
-          }
-          for (int i = cut; i < ed; ++i) {
-            int src = base + i + shift - length;
-            d[party][(bucket_size - 1) * i + (k - 1)] = tr[LB + i] != tr[LB + src];
-          }
-        }
-      }));
-    }
-    joinNclean(res);
-    AG2PC_TP("bucketing (shift-XOR)");
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] bucketing", party);
-#endif
-
-    { const int peer = 3 - party;
-      res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        send_io->send_bool((const bool *)d[party].data(), (bucket_size - 1) * length);
-        send_io->flush();
-      }));
-      res.push_back(pool->enqueue([this, &d, length, bucket_size, peer]() {
-        recv_io->recv_bool((bool *)d[peer].data(), (bucket_size - 1) * length);
-      }));
-    }
-    joinNclean(res);
-    for (int j = 0; j < (bucket_size - 1) * length; ++j)
-      d[1][j] = d[1][j] != d[2][j];
-
-    for (int i = 0; i < length; ++i) {
-      {
-        for (int k = 1; k < bucket_size; ++k) {
-          int src = k * length + (i + rk[k]) % length;
-          block mask = select_mask[d[1][(bucket_size - 1) * i + k - 1]];
-          MAC[2 * length + i] = MAC[2 * length + i] ^ (tMAC[src] & mask);
-          KEY[2 * length + i] = KEY[2 * length + i] ^ (tKEY[src] & mask);
-          if (out_aos) {
-            // Mirror the SoA c-slot XOR into AoS slot 2. The masked value
-            // is the b-region row k contribution to c (Figure 16's r⊕d
-            // in-place flip).
-            out_aos[i].b[2].mac = out_aos[i].b[2].mac ^ (tMAC[src] & mask);
-            out_aos[i].b[2].key = out_aos[i].b[2].key ^ (tKEY[src] & mask);
-          }
-        }
+  // Generic half-gate triple generation: layer 0 (the output MAC/KEY, all COT) +
+  // B-1 fresh sacrifice layers, bucketed. Output is the slot-major a/b/c triple in
+  // MAC/KEY (+ AoS out_aos) — identical contract to the old fused compute().
+  void compute_halfgate(block *MAC, block *KEY, int length, TripleBundle *out_aos) {
+    const int B = get_bucket_size(length);
+    const int L = length;
+    const block pair_seed = makeBlock((uint64_t)std::min(party, 3 - party),
+                                      (uint64_t)std::max(party, 3 - party));
+    MITCCRH<8> gmitc, emitc;
+    gmitc.setS(pair_seed);
+    emitc.setS(pair_seed);
+    vector<unsigned char> acc_tr((size_t)3 * L);
+    AG2PC_TP_BEGIN();
+    gen_cot_shares(MAC, KEY, 3 * L);                          // layer 0 = MAC/KEY
+    leaky_and_halfgate(MAC, KEY, acc_tr.data(), L, gmitc, emitc);
+    AG2PC_TP("layer 0 (gen+leaky)");
+    layered_bucket_into_acc(MAC, KEY, acc_tr.data(), B, L, gmitc, emitc);
+    AG2PC_TP("sacrifice layers + bucket");
+    if (out_aos) {
+      for (int i = 0; i < L; ++i) {
+        out_aos[i].b[0].mac = MAC[i];         out_aos[i].b[0].key = KEY[i];
+        out_aos[i].b[1].mac = MAC[L + i];     out_aos[i].b[1].key = KEY[L + i];
+        out_aos[i].b[2].mac = MAC[2 * L + i]; out_aos[i].b[2].key = KEY[2 * L + i];
       }
     }
-    AG2PC_TP("bucket d-exch + c-fold");
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] bucket d exchange", party);
-#endif
-
 #ifdef AG2PC_MEMPROFILE
     if (party == 1) {
-      const double A = (double)std::max(1, length);   // 1 triple per AND gate
-      printf("[ag2pc-mem] TriplePool::compute  length=%d bucket=%d LB=%d "
-             "abit_len=%d\n", length, bucket_size, LB, abit_len);
-      ag2pc_mem_row("tMAC+tKEY",  (double)(tMAC.capacity() + tKEY.capacity()) * sizeof(block), A);
-      ag2pc_mem_row("Sout",       (double)Sout.capacity() * sizeof(block), A);
-      ag2pc_mem_row("tr+s+d",     (double)(tr.capacity() + s[0].capacity() + s[1].capacity()
-                                  + s[2].capacity() + d[1].capacity() + d[2].capacity()), A);
-      ag2pc_mem_row("MAC+KEY out", 2.0 * 3.0 * (double)length * sizeof(block), A);
-      ag2pc_mem_row("stage(const)", 2.0 * (double)abit1->chunk_size() * sizeof(block), A);
-      ag2pc_mem_row("pool_triples", (double)pool_triples.capacity() * sizeof(TripleBundle), A);
+      const double A = (double)std::max(1, length);
+      printf("[ag2pc-mem] compute_halfgate length=%d bucket=%d (acc + %d sacrifice "
+             "layers, 3L each)\n", length, B, B - 1);
+      ag2pc_mem_row("acc MAC+KEY", 2.0 * 3.0 * (double)L * sizeof(block), A);
+      ag2pc_mem_row("sacrifice", 2.0 * 3.0 * (double)L * sizeof(block) * (B - 1), A);
       printf("[ag2pc-mem]   peakRSS-so-far %8ld KiB\n", ag2pc_peak_rss_kib());
     }
 #endif
+  }
 
-#ifdef EMP_DEBUG_PHASE
-    _phase("[triple] check2", party);
+  // In-place (function-dependent) AND-share generation (KRRW §5.2 bucket-saving).
+  // For each AND gate the bucket's representative (layer 0) is the leaky-AND of the
+  // gate's OWN input wire masks (rep_a = λ_α, rep_b = λ_β) instead of fresh random
+  // (a,b); only its output randomness r is freshly COT'd. The B-1 sacrifice layers
+  // are fresh, exactly as in compute_halfgate. So per gate we mint (3B-2)·num_ands
+  // COTs (vs 3B·num_ands generic) and the Beaver x/y reconciliation is gone — the
+  // representative is already on the real masks. out_sigma[ai] is the authenticated
+  // share of σ = λ_α∧λ_β (bit0(mac)=σ, bit0(key)=0), drop-in for the garbler /
+  // evaluator. λ_γ stays a fresh independent wire mask (kept by the caller), so the
+  // construction is constant-round.
+  void compute_inplace(const AShareBundleVec &rep_a, const AShareBundleVec &rep_b,
+                       int num_ands, AShareBundleVec &out_sigma) {
+    const int B = get_bucket_size(num_ands);
+    const int L = num_ands;
+    const block pair_seed = makeBlock((uint64_t)std::min(party, 3 - party),
+                                      (uint64_t)std::max(party, 3 - party));
+    MITCCRH<8> gmitc, emitc;
+    gmitc.setS(pair_seed);
+    emitc.setS(pair_seed);
+    AG2PC_TP_BEGIN();
+    // layer 0 (acc): region a = λ_α, b = λ_β (copied wire masks, no COT); region r
+    // = fresh COT (the representative's only minted share).
+    BlockVec acc_mac((size_t)3 * L), acc_key((size_t)3 * L);
+    vector<unsigned char> acc_tr((size_t)3 * L);
+    for (int i = 0; i < L; ++i) {
+      acc_mac[i]     = rep_a[i].mac;  acc_key[i]     = rep_a[i].key;
+      acc_mac[L + i] = rep_b[i].mac;  acc_key[L + i] = rep_b[i].key;
+    }
+    gen_cot_shares(acc_mac.data() + 2 * L, acc_key.data() + 2 * L, L);   // region r
+    leaky_and_halfgate(acc_mac.data(), acc_key.data(), acc_tr.data(), L, gmitc, emitc);
+    AG2PC_TP("in-place layer 0 (rep + r + leaky)");
+    layered_bucket_into_acc(acc_mac.data(), acc_key.data(), acc_tr.data(), B, L,
+                            gmitc, emitc);
+    AG2PC_TP("sacrifice layers + bucket");
+    // The bucketing combines the a-inputs, so acc now holds a valid triple
+    // (X, Y, Z=X∧Y) with X = λ_α ⊕ Σ(sacrifice a) and Y = λ_β (the b-region is
+    // kept, not combined). Reconcile (X,Y) back to (λ_α,λ_β) with the Beaver
+    // opening xb = λ_α⊕X, yb = λ_β⊕Y, then σ = Z ⊕ xb·Y ⊕ yb·X (+ the xb·yb
+    // λ_{αβ}⊕=1 correction) — the proven generic σ derivation. With the in-place
+    // representative yb is identically 0 (Y already = λ_β), so this opens
+    // num_ands bits on the a-side; the b-side reveal is the constant 0.
+    std::vector<unsigned char> xb_me(L), yb_me(L), xb_pe(L), yb_pe(L);
+    for (int i = 0; i < L; ++i) {
+      xb_me[i] = (unsigned char)(LSB(rep_a[i].mac) ^ LSB(acc_mac[i]));
+      yb_me[i] = (unsigned char)(LSB(rep_b[i].mac) ^ LSB(acc_mac[L + i]));
+    }
+    {
+      vector<future<void>> res;
+      res.push_back(pool->enqueue([&, this]() {
+        send_io->send_bool((const bool *)xb_me.data(), L);
+        send_io->send_bool((const bool *)yb_me.data(), L);
+        send_io->flush();
+      }));
+      res.push_back(pool->enqueue([&, this]() {
+        recv_io->recv_bool((bool *)xb_pe.data(), L);
+        recv_io->recv_bool((bool *)yb_pe.data(), L);
+      }));
+      joinNclean(res);
+    }
+    out_sigma.resize(L);
+    {
+      block dxor = Delta ^ bit0_mask;
+      for (int i = 0; i < L; ++i) {
+        unsigned char xb = xb_me[i] ^ xb_pe[i];
+        unsigned char yb = yb_me[i] ^ yb_pe[i];
+        AShareBundle &sb = out_sigma[i];
+        sb.mac = acc_mac[2 * L + i] ^ (select_mask[xb] & acc_mac[L + i])
+                                    ^ (select_mask[yb] & acc_mac[i]);
+        sb.key = acc_key[2 * L + i] ^ (select_mask[xb] & acc_key[L + i])
+                                    ^ (select_mask[yb] & acc_key[i]);
+        block both = select_mask[xb & yb];
+        if (party != 1) sb.key = sb.key ^ (both & dxor);
+        else            sb.mac = sb.mac ^ (both & bit0_mask);
+      }
+    }
+    AG2PC_TP("a-side reconcile (sigma)");
+  }
 
-    BlockVec MAC_dbg(MAC, MAC + 3 * length);
-    BlockVec KEY_dbg(KEY, KEY + 3 * length);
-    check_MAC(io, MAC_dbg, KEY_dbg, Delta, length * 3, party);
-    check_correctness(io, MAC_dbg, length, party);
-#endif
+  // Mint `length` AND triples into MAC/KEY, slot-major a/b/c: share bit s of
+  // triple k is bit0(MAC[s*length+k]), bit0(KEY)=0. If out_aos is non-null the
+  // triples are also written as AoS TripleBundles (the layout draw() serves).
+  void compute(block *MAC, block *KEY, int length,
+               TripleBundle *out_aos = nullptr) {
+    compute_halfgate(MAC, KEY, length, out_aos);
   }
 
   // Vector overload: resize output buffers and dispatch to the pointer-array

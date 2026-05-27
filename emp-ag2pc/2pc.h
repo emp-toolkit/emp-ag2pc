@@ -144,8 +144,9 @@ private:
     AShareBundleVec wire_slot;          // share bundles, indexed by slot
     BlockVec label_slot;                    // m_{w,0} at Pi (i>=2), by slot
     BlockVec eval_slot;                // m_{w,Λ} at P1 (single garbler P2)
-    TripleBundleVec ANDS_bundle;        // AND triples, by and_index
-    AShareBundleVec sigma;              // Beaver-corrected AND shares
+    AShareBundleVec rep_a, rep_b;       // each AND gate's input masks λ_α, λ_β (by and_index)
+    AShareBundleVec lambda_gamma;       // fresh AND-output masks λ_γ (by and_index)
+    AShareBundleVec sigma;              // σ = λ_α∧λ_β from the in-place leaky-AND
     MITCCRH<8> mitc;                   // half-gate hash (garble / evaluate)
     AShareBundle &WIRE(int w) { return wire_slot[phys[w]]; }
     block &LABEL(int w) { return label_slot[phys[w]]; }
@@ -157,8 +158,10 @@ private:
   // the orchestrator that runs them in protocol order.
   void load_inputs(ComputeCtx &ctx, const SecureWires *const *inputs,
                    int n_inputs);
-  void draw_and_seed(ComputeCtx &ctx);          // step 4: triples + AND-out seed
-  void beaver_pass(ComputeCtx &ctx);            // step 5
+  // step 4-5: one share-prop sweep that seeds each AND output's fresh mask λ_γ and
+  // materializes every AND gate's input masks (λ_α, λ_β) into rep_a/rep_b, which the
+  // in-place leaky-AND then consumes (no generic triple, no Beaver x/y exchange).
+  void collect_masks(ComputeCtx &ctx);
   // Garbled tables are streamed: garble_and_ship sends them in kGarbleChunk-
   // AND-gate chunks; p1_evaluate recvs each chunk on demand during evaluation,
   // so neither side ever holds the full-circuit G buffer.
@@ -282,8 +285,13 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
 
   AG2PC_PHASE_BEGIN();
   load_inputs(ctx, inputs, n_inputs);     AG2PC_PHASE("load_inputs");
-  draw_and_seed(ctx);                      AG2PC_PHASE("draw_and_seed[step4]");
-  beaver_pass(ctx);                        AG2PC_PHASE("beaver_pass[step5]");
+  // Step 4: fresh AND-output masks λ_γ. Step 5a: one share-prop sweep seeds them and
+  // materializes every AND gate's input masks (λ_α,λ_β). Step 5b: the in-place
+  // leaky-AND turns those into σ=λ_α∧λ_β directly — no generic triple, no Beaver.
+  fpre->draw(ctx.num_ands, ctx.lambda_gamma); AG2PC_PHASE("draw lambda_gamma[step4]");
+  collect_masks(ctx);                      AG2PC_PHASE("collect_masks[step5a]");
+  fpre->compute_inplace(ctx.rep_a, ctx.rep_b, ctx.num_ands, ctx.sigma);
+  AG2PC_PHASE("inplace_triples[step5b]");
   // Half-gate hash start point: drawn fresh from the FS transcript (identical on
   // both parties via get_digest's canonical d_AB‖d_BA; advances every reactive
   // round so the gid-derived gate tweaks never repeat).
@@ -306,7 +314,8 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
     ag2pc_mem_row("wire_slot",    (double)ctx.wire_slot.capacity() * sizeof(AShareBundle), A);
     ag2pc_mem_row("eval/label",   (double)(party == 1 ? ctx.eval_slot.capacity()
                                   : ctx.label_slot.capacity()) * sizeof(block), A);
-    ag2pc_mem_row("ANDS_bundle",  (double)ctx.ANDS_bundle.capacity() * sizeof(TripleBundle), A);
+    ag2pc_mem_row("rep_a+rep_b",  (double)(ctx.rep_a.capacity() + ctx.rep_b.capacity()) * sizeof(AShareBundle), A);
+    ag2pc_mem_row("lambda_gamma", (double)ctx.lambda_gamma.capacity() * sizeof(AShareBundle), A);
     ag2pc_mem_row("sigma",        (double)ctx.sigma.capacity() * sizeof(AShareBundle), A);
     ag2pc_mem_row("circuit.gates", (double)cf->num_gate * sizeof(Gate), A);
     if (cf->last_use) ag2pc_mem_row("circuit.last_use", (double)cf->num_gate * sizeof(int), A);
@@ -337,120 +346,33 @@ void C2PC::load_inputs(ComputeCtx &ctx, const SecureWires *const *inputs,
   }
 }
 
-// Step 4: draw the AND triples — ANDS_bundle[ai].b[s] is triple ai's slot-s
-// share bundle, the slot-s share-bit is bit0(.mac). The AND-output seed draw and
-// its seeding sweep are folded into beaver_pass (one circuit walk for both).
-void C2PC::draw_and_seed(ComputeCtx &ctx) {
-  const int num_ands = ctx.num_ands;
-#ifdef AG2PC_PROFILE
-  int64_t _all0 = io_count(send_io, recv_io);
-  uint64_t _cot0 = g_ag2pc_cot_bytes, _phi0 = g_ag2pc_phi_bytes;
-#endif
-  fpre->draw(num_ands, ctx.ANDS_bundle);
-#ifdef AG2PC_PROFILE
-  if (party == 1) {
-    uint64_t all = (uint64_t)(io_count(send_io, recv_io) - _all0), cot = g_ag2pc_cot_bytes - _cot0,
-             phi = g_ag2pc_phi_bytes - _phi0;
-    printf("[ag2pc]   draw_and_seed split: COT %llu B, phi-exchange %llu B, "
-           "other-non-COT %lld B\n",
-           (unsigned long long)cot, (unsigned long long)phi,
-           (long long)(all - cot - phi));
-  }
-#endif
-}
-
-// Step 5: fused free-XOR/NOT share propagation + Beaver derivation of the AND
-// gates' corrected shares (sigma). Pass A recomputes the share bundle for every
-// XOR/NOT output (fabric wires land in recycled slots, freed at last read) and,
-// on each AND, reads its (now-live) input shares to form the Beaver masks x/y.
-// Fusing share-prop with Beaver is required: fabric slots are recycled within
-// the sweep, so a later standalone Beaver pass would read stale slots. The bit-0
-// share encoding XORs / copies with the high bits, so λ_w propagates implicitly.
-// sigma[ai] is AND-gate ai's corrected share-bundle: the slot-s share of triple
-// ai lives in bit0(ANDS_bundle[ai].b[s].mac), and the Beaver XOR pattern gives
-// bit0(sigma) = ANDS[2] ⊕ (xb?ANDS[1]) ⊕ (yb?ANDS[0]). The xb && yb correction is
-// "λ_{αβ} ⊕= 1" (P1-only): at P1 flip bit0 of sb.mac; at non-P1 update sb.key by
-// (Δ ⊕ e_0) so bit0(KEY)=0 stays pinned.
-void C2PC::beaver_pass(ComputeCtx &ctx) {
+// Step 4-5a: one share-prop sweep. Free-XOR/NOT propagate each wire's share bundle
+// (fabric wires recycle within the sweep, so this must materialize per-AND data as
+// it goes — a later pass would read stale slots). For every AND gate it copies the
+// (now-live) input masks λ_α,λ_β into rep_a/rep_b and seeds the output wire with a
+// fresh mask λ_γ. The in-place leaky-AND (TriplePool::compute_inplace) then consumes
+// rep_a/rep_b to build σ=λ_α∧λ_β directly — no generic triple, no Beaver x/y exchange.
+void C2PC::collect_masks(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto &ANDS_bundle = ctx.ANDS_bundle;
-  auto &sigma = ctx.sigma;
-  sigma.resize(num_ands);
-  std::vector<unsigned char> x[3], y[3];
-  for (int j = 1; j <= 2; ++j) {
-    x[j].resize(num_ands);
-    y[j].resize(num_ands);
-  }
-  // Step 4 (folded in): draw the AND-output seed shares and seed them during this
-  // same share-prop sweep — fabric slots are recycled here, so seeding in a
-  // separate earlier pass would just walk the circuit twice. preprocess_bundle
-  // frees at function end, before the heavy garble allocations.
+  ctx.rep_a.resize(num_ands);
+  ctx.rep_b.resize(num_ands);
   AG2PC_TP_BEGIN();
-  AShareBundleVec preprocess_bundle;
-  fpre->draw(num_ands, preprocess_bundle);
-  AG2PC_TP("aShare draw (AND-out masks)");
-  {
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      if (g.is_and()) {
-        int ai = g.and_index();
-        unsigned char v_in0 = (unsigned char)LSB(WIRE(g.in0).mac);
-        unsigned char v_in1 = (unsigned char)LSB(WIRE(g.in1).mac);
-        unsigned char a0 = (unsigned char)LSB(ANDS_bundle[ai].b[0].mac);
-        unsigned char a1 = (unsigned char)LSB(ANDS_bundle[ai].b[1].mac);
-        x[party][ai] = v_in0 ^ a0;
-        y[party][ai] = v_in1 ^ a1;
-        WIRE(g.out) = preprocess_bundle[ai];  // seed AND-output share state
-      } else if (g.is_not()) {
-        WIRE(g.out) = WIRE(g.in0);
-      } else {  // XOR
-        xor_share(WIRE(g.out), WIRE(g.in0), WIRE(g.in1));
-      }
+  for (int gi = 0; gi < cf->num_gate; ++gi) {
+    const Gate &g = cf->gates[gi];
+    if (g.is_and()) {
+      int ai = g.and_index();
+      ctx.rep_a[ai] = WIRE(g.in0);            // λ_α (value copy survives slot recycle)
+      ctx.rep_b[ai] = WIRE(g.in1);            // λ_β
+      WIRE(g.out) = ctx.lambda_gamma[ai];     // seed fresh AND-output mask λ_γ
+    } else if (g.is_not()) {
+      WIRE(g.out) = WIRE(g.in0);
+    } else {  // XOR
+      xor_share(WIRE(g.out), WIRE(g.in0), WIRE(g.in1));
     }
   }
-  AG2PC_TP("share-prop + x/y masks");
-  std::vector<future<void>> res;
-  { const int party2 = 3 - party;
-    res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-      send_io->send_bool((const bool *)x[party].data(), num_ands);  // 1 bit/AND, packed
-      send_io->send_bool((const bool *)y[party].data(), num_ands);
-      send_io->flush();
-    }));
-    res.push_back(pool->enqueue([this, &x, &y, num_ands, party2]() {
-      recv_io->recv_bool((bool *)x[party2].data(), num_ands);
-      recv_io->recv_bool((bool *)y[party2].data(), num_ands);
-    }));
-  }
-  joinNclean(res);
-  AG2PC_TP("x/y exchange");
-  { const int i = 2;
-    for (int j = 0; j < num_ands; ++j) {
-      x[1][j] = x[1][j] ^ x[i][j];
-      y[1][j] = y[1][j] ^ y[i][j];
-    } }
-  {
-    block dxor = Delta ^ bit0_mask;
-    // σ depends only on ai-indexed data (ANDS_bundle + the exchanged x/y), never
-    // on wire structure, so this is a tight per-AND loop, not a gate sweep.
-    for (int ai = 0; ai < num_ands; ++ai) {
-      AShareBundle &sb = sigma[ai];
-      const TripleBundle &tb = ANDS_bundle[ai];
-      bool xb = x[1][ai], yb = y[1][ai];
-      // Beaver select-XOR on both fields: σ = ANDS[2] ⊕ (xb?ANDS[1]) ⊕ (yb?ANDS[0]).
-      sb.mac = tb.b[2].mac ^ (select_mask[xb] & tb.b[1].mac)
-                           ^ (select_mask[yb] & tb.b[0].mac);
-      sb.key = tb.b[2].key ^ (select_mask[xb] & tb.b[1].key)
-                           ^ (select_mask[yb] & tb.b[0].key);
-      // λ_{αβ} ⊕= 1 correction, gated on xb·yb: P1 flips bit0(mac), peer flips
-      // key by (Δ ⊕ e_0). The party split is loop-invariant; only xb·yb is data.
-      block both = select_mask[xb & yb];
-      if (party != 1) sb.key = sb.key ^ (both & dxor);
-      else            sb.mac = sb.mac ^ (both & bit0_mask);
-    }
-  }
-  AG2PC_TP("sigma derive");
+  AG2PC_TP("share-prop + collect rep masks");
 }
 
 // Steps 6-7: the garbler P2 garbles each AND gate and ships to P1. Per gate γ:
