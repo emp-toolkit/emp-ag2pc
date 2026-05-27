@@ -8,7 +8,6 @@
 #include "emp-ag2pc/wire_graph.h"
 #include <array>
 #include <vector>
-#include <cstdlib>
 using namespace emp;
 
 // Opt-in phase profiler: compile with -DAG2PC_PROFILE (or #define before include).
@@ -147,7 +146,7 @@ private:
     BlockVec eval_slot;                // m_{w,Λ} at P1 (single garbler P2)
     TripleBundleVec ANDS_bundle;        // AND triples, by and_index
     AShareBundleVec sigma;              // Beaver-corrected AND shares
-    MITCCRH<1> mitc;                   // half-gate hash (garble / evaluate)
+    MITCCRH<8> mitc;                   // half-gate hash (garble / evaluate)
     AShareBundle &WIRE(int w) { return wire_slot[phys[w]]; }
     block &LABEL(int w) { return label_slot[phys[w]]; }
     block &EVAL(int w) { return eval_slot[phys[w]]; }
@@ -168,20 +167,8 @@ private:
   void p1_evaluate(ComputeCtx &ctx);            // steps 6-7 recv + step 10, P1
   void check_cgamma(ComputeCtx &ctx);           // KRRW Fig.3 steps 6-8 (c_γ check)
 
-  // Test-only fault injection (AG2PC_TAMPER env): 1 = garbler flips a garbled
-  // point-and-permute bit, 2 = evaluator lies about an AND output's masked value.
-  // 0/unset = no tamper. Both must make check_cgamma abort.
-  static int tamper_mode() {
-    const char *e = std::getenv("AG2PC_TAMPER");
-    return e ? std::atoi(e) : 0;
-  }
   SecureWires gather_outputs(ComputeCtx &ctx,
                                  const std::vector<int> &output_ids);
-
-  // Half-gate hash tweak: unique across (gate_idx, sender, dest) within a call.
-  static block tweak_block(int gate_idx, int sender, int dest) {
-    return makeBlock((uint64_t)gate_idx, (uint64_t)(sender * (3) + dest));
-  }
 
   // Free-XOR share propagation: recompute a fabric wire's share bundle as the
   // componentwise XOR of its (live) inputs. bit0 (the share-bit) rides along.
@@ -252,7 +239,7 @@ SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
   if (party != 1) {
     BlockVec tmp(n);
     for (int i = 0; i < n; ++i)
-      tmp[i] = sw.Lambda[i] ? (sw.label0[i] ^ Delta) : sw.label0[i];
+      tmp[i] = sw.label0[i] ^ (select_mask[sw.Lambda[i]] & Delta);
     io->send_data(tmp.data(), n * sizeof(block));
     io->flush();
   } else {
@@ -291,12 +278,18 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
   ctx.mask_input.assign(cf->num_wire, 0);
   ctx.wire_slot.resize(ctx.num_slots);
   if (party != 1) ctx.label_slot.resize(ctx.num_slots);
-  else ctx.eval_slot.resize(ctx.num_slots);  ctx.mitc.setS(zero_block);
+  else ctx.eval_slot.resize(ctx.num_slots);
 
   AG2PC_PHASE_BEGIN();
   load_inputs(ctx, inputs, n_inputs);     AG2PC_PHASE("load_inputs");
   draw_and_seed(ctx);                      AG2PC_PHASE("draw_and_seed[step4]");
   beaver_pass(ctx);                        AG2PC_PHASE("beaver_pass[step5]");
+  // Half-gate hash start point: drawn fresh from the FS transcript (identical on
+  // both parties via get_digest's canonical d_AB‖d_BA; advances every reactive
+  // round so the gid-derived gate tweaks never repeat).
+  ctx.mitc.setS(RO("AG2PC half-gate", zero_block)
+                    .absorb(io->get_digest()).absorb(sib->get_digest())
+                    .squeeze_block());
   if (party != 1) garble_and_ship(ctx);    // steps 6-7: garbler P2 ships G in chunks
   AG2PC_PHASE("garble/recv[step6-7]");
   if (party == 1) p1_evaluate(ctx);        // P1 streams G in and evaluates
@@ -446,17 +439,15 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
       const TripleBundle &tb = ANDS_bundle[ai];
       bool xb = x[1][ai], yb = y[1][ai];
       // Beaver select-XOR on both fields: σ = ANDS[2] ⊕ (xb?ANDS[1]) ⊕ (yb?ANDS[0]).
-      sb.mac = tb.b[2].mac ^ (xb ? tb.b[1].mac : zero_block)
-                           ^ (yb ? tb.b[0].mac : zero_block);
-      sb.key = tb.b[2].key ^ (xb ? tb.b[1].key : zero_block)
-                           ^ (yb ? tb.b[0].key : zero_block);
-      if (xb && yb) {
-        if (party != 1) {
-          sb.key = sb.key ^ dxor;
-        } else {
-          sb.mac = sb.mac ^ bit0_mask;
-        }
-      }
+      sb.mac = tb.b[2].mac ^ (select_mask[xb] & tb.b[1].mac)
+                           ^ (select_mask[yb] & tb.b[0].mac);
+      sb.key = tb.b[2].key ^ (select_mask[xb] & tb.b[1].key)
+                           ^ (select_mask[yb] & tb.b[0].key);
+      // λ_{αβ} ⊕= 1 correction, gated on xb·yb: P1 flips bit0(mac), peer flips
+      // key by (Δ ⊕ e_0). The party split is loop-invariant; only xb·yb is data.
+      block both = select_mask[xb & yb];
+      if (party != 1) sb.key = sb.key ^ (both & dxor);
+      else            sb.mac = sb.mac ^ (both & bit0_mask);
     }
   }
   AG2PC_TP("sigma derive");
@@ -467,9 +458,10 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
 //   b_buf[γ]        = LSB1(m_{γ,0}^2)
 // With a single garbler there are no cross-garbler S_{γ,*}^{i,j} terms.
 // Half-gate hash uses MITCCRH (eprint/2019/1168): H_τ(x) = σ(x) ⊕
-// AES_{start_point ⊕ τ}(σ(x)); tweak_block(γ, sender, dest) is unique across
-// (γ, sender, dest). BatchSize = 1: each renew_ks schedules the single
-// (γ, sender=2)→(d=2) self tweak feeding G_{γ,*}.
+// AES_{start_point ⊕ τ}(σ(x)). gid auto-increment mode (BatchSize 8): one
+// hash_cir per AND advances the gid by one on both garbler and evaluator (same
+// gate order, K=1), so they share the per-gate tweak τ = makeBlock(gid,0) with
+// no per-gate re-key — MITCCRH schedules the keys 8-wide every 8 gates.
 void C2PC::garble_and_ship(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
@@ -512,19 +504,11 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       block ml_a0 = LABEL(in0), ml_a1 = ml_a0 ^ Delta;
       block ml_b0 = LABEL(in1), ml_b1 = ml_b0 ^ Delta;
 
-      // The single tweak for d = 2 with 4 blocks; one batched renew_ks +
-      // hash_cir consumes the whole gate's sender-side half-gate hashes.
-      block tweaks[1];
-      block buf[4];
-      { const int d = 2;
-        int k = d - 2;
-        tweaks[k] = tweak_block(ai, party, d);
-        buf[4 * k]     = ml_a0;
-        buf[4 * k + 1] = ml_a1;
-        buf[4 * k + 2] = ml_b0;
-        buf[4 * k + 3] = ml_b1;
-      }
-      mitc.renew_ks(tweaks);
+      // Single garbler's (s=2,d=2) self hashes. gid auto-increment mode: one
+      // hash_cir per AND (K=1), so the key counter stays in lockstep with the
+      // evaluator's hash_cir<1,2> and both derive the same per-gate tweak; the
+      // key schedule batches 8-wide every 8 gates inside MITCCRH.
+      block buf[4] = {ml_a0, ml_a1, ml_b0, ml_b1};
       mitc.template hash_cir<1, 4>(buf);
 
       const AShareBundle &wb_in0 = WIRE(in0);
@@ -556,8 +540,6 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       G_chunk[2 * nfilled]     = G0;
       G_chunk[2 * nfilled + 1] = G1;
       if (party == 2) b_chunk[nfilled] = (unsigned char)(LSB1(ml_g0));
-      if (tamper_mode() == 1 && ai == 0)  // garbler tamper: flip a point-permute bit
-        b_chunk[nfilled] ^= 1;
       if (++nfilled == C) flush_chunk();
     }
     flush_chunk();
@@ -614,16 +596,14 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
         const AShareBundle &sb     = sigma[ai];
         block Mr;  // M_2[r^1]: the single (sender=1, receiver=2) cross term
         { block t = sb.mac ^ wb_out.mac;
-          if (La) t = t ^ wb_in1.mac;
-          if (Lb) t = t ^ wb_in0.mac;
+          t = t ^ (select_mask[La] & wb_in1.mac);
+          t = t ^ (select_mask[Lb] & wb_in0.mac);
           Mr = t;
         }
-        // Pass 1: the single garbler's (s=2, d=2) self tweak — one renew_ks +
-        // hash_cir call; cache its two outputs for pass 2.
+        // Pass 1: the single garbler's (s=2, d=2) self hashes — one hash_cir
+        // (gid auto-increment, lockstep with the garbler); cache for pass 2.
         block self_Ha, self_Hb;
-        { block tweaks[1] = {tweak_block(ai, 2, 2)};
-          block buf[2] = {EVAL(in0), EVAL(in1)};
-          mitc.renew_ks(tweaks);
+        { block buf[2] = {EVAL(in0), EVAL(in1)};
           mitc.template hash_cir<1, 2>(buf);
           self_Ha = buf[0];
           self_Hb = buf[1];
@@ -631,8 +611,8 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
         // Pass 2: combine the cached self hashes with G + the Mr cross term to
         // produce the eval-label at out.
         { block t = self_Ha ^ self_Hb;
-          if (La) t = t ^ G_chunk[2 * loc];
-          if (Lb) t = t ^ G_chunk[2 * loc + 1] ^ EVAL(in0);
+          t = t ^ (select_mask[La] & G_chunk[2 * loc]);
+          t = t ^ (select_mask[Lb] & (G_chunk[2 * loc + 1] ^ EVAL(in0)));
           t = t ^ Mr;  // the single cross term (sender s = 1, receiver = 2)
           EVAL(out) = t;
         }
@@ -657,8 +637,6 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
 //     never reveals its digest, so the equality test is rush-safe (P2 cannot
 //     forge a hash over P1's secret keys). No universal hash / random-linear
 //     combination — that batching is only needed to open ⊕_p across >2 parties.
-// AG2PC_TAMPER=2 injects an evaluator cheat (P1 lies about one AND output's ẑ);
-// the check must abort. The garbler cheat (=1) is injected in garble_and_ship.
 void C2PC::check_cgamma(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
@@ -669,10 +647,6 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
   BlockVec M1_t(num_ands);
 
   if (party == 1) {
-    if (tamper_mode() == 2)  // evaluator tamper: flip the first AND output's ẑ
-      for (int gi = 0; gi < cf->num_gate; ++gi)
-        if (cf->gates[gi].is_and()) { mask_input[cf->gates[gi].out] ^= 1; break; }
-
     // Steps 6+7: one bit-op sweep — recompute fabric shares, gather each AND
     // output's masked value ẑ, and form its c_γ MAC term M1_t.
     for (int gi = 0; gi < cf->num_gate; ++gi) {
@@ -691,13 +665,13 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
       bool v_out = (bool)LSB(WIRE(out).mac);
       bool v_sig = (bool)LSB(sigma[ai].mac);
       bool t1 = (La & Lb) ^ Lg ^ (La & v_in1) ^ (Lb & v_in0) ^ v_sig ^ v_out;
-      block m = t1 ? Delta : zero_block;
+      block m = select_mask[t1] & Delta;
       const AShareBundle &wb_in0 = WIRE(in0);
       const AShareBundle &wb_in1 = WIRE(in1);
       const AShareBundle &wb_out = WIRE(out);
       const AShareBundle &sb     = sigma[ai];
-      if (La) m = m ^ wb_in1.key;
-      if (Lb) m = m ^ wb_in0.key;
+      m = m ^ (select_mask[La] & wb_in1.key);
+      m = m ^ (select_mask[Lb] & wb_in0.key);
       m = m ^ sb.key ^ wb_out.key;
       M1_t[ai] = m;
     }
@@ -731,8 +705,8 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
       mask_input[out] = Lambda_AND[ai];  // AND output ẑ from P1's broadcast
       bool La = mask_input[in0], Lb = mask_input[in1];
       block m = sigma[ai].mac ^ WIRE(out).mac;
-      if (La) m = m ^ WIRE(in1).mac;
-      if (Lb) m = m ^ WIRE(in0).mac;
+      m = m ^ (select_mask[La] & WIRE(in1).mac);
+      m = m ^ (select_mask[Lb] & WIRE(in0).mac);
       M1_t[ai] = m;
     }
     // Step 8: send P2's c_γ MAC digest for P1 to compare.

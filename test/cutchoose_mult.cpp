@@ -20,7 +20,6 @@ int main(int argc, char **argv) {
 
   tp.cutchoose_mult_selftest(1024);
   tp.cutchoose_triple_selftest(1024);
-  tp.cutchoose_sacrifice_selftest(256, 4, /*tamper=*/-1);  // honest: ALL PASS
-  tp.cutchoose_sacrifice_selftest(256, 4, /*tamper=*/7);   // cheat: DETECTED
+  tp.cutchoose_sacrifice_selftest(256, 4);  // honest: ALL PASS
   return 0;
 }

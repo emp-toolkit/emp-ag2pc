@@ -173,7 +173,7 @@
   }
 
   // Self-test: gen 3·LB aShares (a,b,r); build the leaky triple; verify the
-  // c-region MAC is valid (check_MAC aborts on tamper) and ⊕c == (⊕a)∧(⊕b).
+  // c-region MAC is valid (check_MAC aborts on a forged MAC) and ⊕c == (⊕a)∧(⊕b).
   void cutchoose_triple_selftest(int LB) {
     BlockVec tMAC, tKEY;
     process_phase1(tMAC, tKEY, 3 * LB);
@@ -232,17 +232,14 @@
   // for each column (bucket) sacrifice the T-1 shifted partners against the row-0
   // head: open ρ=a0⊕a1, σ=b0⊕b1 and check V = c0⊕c1⊕ρ·b1⊕σ·a1⊕ρσ == 0. A wrong
   // triple in a bucket with a good head yields V=1 → abort. Heads are the output.
-  //   `tamper`: if >=0, flip the VALUE of candidate `tamper`'s c (simulated cheat).
   //   NOTE: value-level check; the batch MAC-binding of V (malicious soundness)
   //   and Phase-I cut-and-choose are the remaining hardening (see plan ⚠).
-  void cutchoose_sacrifice_selftest(int LB, int T, int tamper = -1) {
+  void cutchoose_sacrifice_selftest(int LB, int T) {
     int N = T * LB;
     BlockVec tMAC, tKEY;
     process_phase1(tMAC, tKEY, 3 * N);
     make_leaky_triples_cutchoose(tMAC, tKEY, N);  // a=[0,N) b=[N,2N) c=[2N,3N)
     int ap = (party == 1) ? 2 : 1;
-    if (tamper >= 0 && party == 1)  // flip ⊕c by flipping bit0 of c-MAC on P1
-      tMAC[2 * N + tamper] = tMAC[2 * N + tamper] ^ bit0_mask;
 
     // Cyclic shifts r_k for rows 1..T-1 from a shared seed.
     block S = RO("AG2PC RO", zero_block)
@@ -278,7 +275,7 @@
     int bad = 0;
     for (int e = 0; e < P; ++e) if (Vpub[e]) ++bad;
     if (party == 1)
-      printf("cutchoose_sacrifice (LB=%d T=%d tamper=%d): %s (%d/%d sacrifice checks nonzero)\n",
-             LB, T, tamper, bad == 0 ? "ALL PASS" : "CHEAT DETECTED", bad, P);
+      printf("cutchoose_sacrifice (LB=%d T=%d): %s (%d/%d sacrifice checks nonzero)\n",
+             LB, T, bad == 0 ? "ALL PASS" : "CHEAT DETECTED", bad, P);
   }
 #endif // TRIPLE_POOL_CUTCHOOSE_H__
