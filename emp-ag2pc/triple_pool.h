@@ -313,12 +313,11 @@ public:
     _mark = io_count(send_io, recv_io);
 #endif
     AG2PC_TP("COT begin (+base OT)");
-    // [EXPERIMENT] Unfused: run the COT for the whole stream first (both abits
-    // in parallel), then the half-gate for the whole stream (garbler + eval in
-    // parallel), separated by a thread join instead of a per-chunk barrier. The
-    // abit2 thread derives tr from tMAC after its COTs; the half-gate re-reads
-    // tKEY/tMAC/tr after the COT phase has fully written them (cold across the
-    // phase boundary, vs. cache-warm per-chunk in the fused version).
+    // Unfused: run the COT for the whole stream first (both abits in parallel),
+    // then the half-gate for the whole stream (garbler + eval in parallel),
+    // separated by a thread join instead of a per-chunk barrier. The abit2
+    // thread derives tr (= bit0 of tMAC) per chunk while that chunk is still
+    // cache-hot; the half-gate then re-reads tKEY/tMAC/tr after the COT join.
     const int nchunks = (LB + W - 1) / W;
 #ifdef AG2PC_PROFILE
     // Per-thread phase timing. s_=garbler thread, r_=eval thread; cot=COT
@@ -390,9 +389,13 @@ public:
           else { abit2->next(stageM.data());
                  memcpy(dst, stageM.data(), (size_t)Wc * sizeof(block)); }
         }
+        // derive tr (= bit0 of tMAC) for this chunk while tMAC is still
+        // cache-hot, instead of a cold full re-read pass after the loop.
+        for (int reg = 0; reg <= 2; ++reg)
+          for (int k = st; k < ed; ++k)
+            tr[(size_t)reg * LB + k] = LSB(tMAC[(size_t)reg * LB + k]);
         io_abit2->flush();
       }
-      for (int k = 0; k < abit_len; ++k) tr[k] = LSB(tMAC[k]);
 #ifdef AG2PC_PROFILE
       s_cot_ns += _ns(_c0, _now());
 #endif
