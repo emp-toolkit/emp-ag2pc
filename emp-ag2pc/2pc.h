@@ -8,6 +8,7 @@
 #include "emp-ag2pc/wire_graph.h"
 #include <array>
 #include <vector>
+#include <cstdlib>
 using namespace emp;
 
 // Opt-in phase profiler: compile with -DAG2PC_PROFILE (or #define before include).
@@ -147,7 +148,6 @@ private:
     TripleBundleVec ANDS_bundle;        // AND triples, by and_index
     AShareBundleVec sigma;              // Beaver-corrected AND shares
     MITCCRH<1> mitc;                   // half-gate hash (garble / evaluate)
-    block hp_seed;                          // step-11 hash seed (used in 12, 13)
     AShareBundle &WIRE(int w) { return wire_slot[phys[w]]; }
     block &LABEL(int w) { return label_slot[phys[w]]; }
     block &EVAL(int w) { return eval_slot[phys[w]]; }
@@ -166,7 +166,15 @@ private:
   static constexpr int kGarbleChunk = 1 << 16;
   void garble_and_ship(ComputeCtx &ctx);        // steps 6-7, garbler P2
   void p1_evaluate(ComputeCtx &ctx);            // steps 6-7 recv + step 10, P1
-  void check_fused(ComputeCtx &ctx);            // steps 11-13 (label-hash + t_γ, one sweep)
+  void check_cgamma(ComputeCtx &ctx);           // KRRW Fig.3 steps 6-8 (c_γ check)
+
+  // Test-only fault injection (AG2PC_TAMPER env): 1 = garbler flips a garbled
+  // point-and-permute bit, 2 = evaluator lies about an AND output's masked value.
+  // 0/unset = no tamper. Both must make check_cgamma abort.
+  static int tamper_mode() {
+    const char *e = std::getenv("AG2PC_TAMPER");
+    return e ? std::atoi(e) : 0;
+  }
   SecureWires gather_outputs(ComputeCtx &ctx,
                                  const std::vector<int> &output_ids);
 
@@ -293,7 +301,7 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
   AG2PC_PHASE("garble/recv[step6-7]");
   if (party == 1) p1_evaluate(ctx);        // P1 streams G in and evaluates
   AG2PC_PHASE("p1_evaluate[step10]");
-  check_fused(ctx);                        AG2PC_PHASE("check[step12-13]");
+  check_cgamma(ctx);                       AG2PC_PHASE("check[c_gamma]");
   SecureWires r = gather_outputs(ctx, output_ids);  AG2PC_PHASE("gather_outputs");
 #ifdef AG2PC_MEMPROFILE
   if (party == 1) {
@@ -336,31 +344,16 @@ void C2PC::load_inputs(ComputeCtx &ctx, const SecureWires *const *inputs,
   }
 }
 
-// Step 4: draw AND triples + seed each AND-output wire's share state from the
-// preprocessing pool. ANDS_bundle[ai].b[s] holds triple ai's slot-s share
-// bundle; the slot-s share-bit is implicit in bit0(.mac).
+// Step 4: draw the AND triples — ANDS_bundle[ai].b[s] is triple ai's slot-s
+// share bundle, the slot-s share-bit is bit0(.mac). The AND-output seed draw and
+// its seeding sweep are folded into beaver_pass (one circuit walk for both).
 void C2PC::draw_and_seed(ComputeCtx &ctx) {
-  const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
 #ifdef AG2PC_PROFILE
   int64_t _all0 = io_count(send_io, recv_io);
   uint64_t _cot0 = g_ag2pc_cot_bytes, _phi0 = g_ag2pc_phi_bytes;
 #endif
   fpre->draw(num_ands, ctx.ANDS_bundle);
-
-  // Seed AND-output share state from the per-aShare preprocessing pool.
-  // Scoped: preprocess_bundle dies at the closing brace, freeing num_ands
-  // aShares before the heavy garble allocations.
-  {
-    AShareBundleVec preprocess_bundle;
-    fpre->draw(num_ands, preprocess_bundle);
-
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      if (g.is_and()) WIRE(g.out) = preprocess_bundle[g.and_index()];
-    }
-  }
 #ifdef AG2PC_PROFILE
   if (party == 1) {
     uint64_t all = (uint64_t)(io_count(send_io, recv_io) - _all0), cot = g_ag2pc_cot_bytes - _cot0,
@@ -397,6 +390,12 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
     x[j].resize(num_ands);
     y[j].resize(num_ands);
   }
+  // Step 4 (folded in): draw the AND-output seed shares and seed them during this
+  // same share-prop sweep — fabric slots are recycled here, so seeding in a
+  // separate earlier pass would just walk the circuit twice. preprocess_bundle
+  // frees at function end, before the heavy garble allocations.
+  AShareBundleVec preprocess_bundle;
+  fpre->draw(num_ands, preprocess_bundle);
   {
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
@@ -408,6 +407,7 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
         unsigned char a1 = (unsigned char)LSB(ANDS_bundle[ai].b[1].mac);
         x[party][ai] = v_in0 ^ a0;
         y[party][ai] = v_in1 ^ a1;
+        WIRE(g.out) = preprocess_bundle[ai];  // seed AND-output share state
       } else if (g.is_not()) {
         WIRE(g.out) = WIRE(g.in0);
       } else {  // XOR
@@ -435,10 +435,9 @@ void C2PC::beaver_pass(ComputeCtx &ctx) {
     } }
   {
     block dxor = Delta ^ bit0_mask;
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      if (!g.is_and()) continue;
-      int ai = g.and_index();
+    // σ depends only on ai-indexed data (ANDS_bundle + the exchanged x/y), never
+    // on wire structure, so this is a tight per-AND loop, not a gate sweep.
+    for (int ai = 0; ai < num_ands; ++ai) {
       AShareBundle &sb = sigma[ai];
       const TripleBundle &tb = ANDS_bundle[ai];
       bool xb = x[1][ai], yb = y[1][ai];
@@ -552,6 +551,8 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
       G_chunk[2 * nfilled]     = G0;
       G_chunk[2 * nfilled + 1] = G1;
       if (party == 2) b_chunk[nfilled] = (unsigned char)(LSB1(ml_g0));
+      if (tamper_mode() == 1 && ai == 0)  // garbler tamper: flip a point-permute bit
+        b_chunk[nfilled] ^= 1;
       if (++nfilled == C) flush_chunk();
     }
     flush_chunk();
@@ -637,51 +638,41 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
   }
 }
 
-// Steps 11-13 fused: the label-hash check (step 12) and the t_γ check (step 13)
-// share the hash seed h'_seed and traverse the same gate list, so they run in a
-// SINGLE circuit sweep per party instead of two. Wire behaviour is unchanged —
-// identical bytes in identical order (hp_seed‖Lambda_AND‖acc P1→P2, then z P2→P1):
-// the two folds are independent (label folds EVAL/LABEL labels; t_γ folds the M[·]
-// keys into M1_t), so interleaving them per gate yields bit-identical messages.
-// Both labels and shares are re-propagated from the persisted base on the fly;
-// h'_s({a_w}) = ⊕_w a_w·s^{w+1} is linear, which the step-13 ⊕_p z_p check needs.
-void C2PC::check_fused(ComputeCtx &ctx) {
+// KRRW Figure 3 correctness check (steps 6-8), specialized to 2 parties. After
+// evaluation P1 holds the public masked value ẑ_w = z_w ⊕ λ_w of every wire.
+//   Step 6: P1 broadcasts the AND-output ẑ (Lambda_AND); P2 derives the rest by
+//     propagation (XOR/NOT masks are linear).
+//   Step 7: each party forms its authenticated share of the check bit
+//     c_γ = (ẑ_α⊕λ_α)∧(ẑ_β⊕λ_β) ⊕ (ẑ_γ⊕λ_γ) = z_α z_β ⊕ z_γ, which is 0 on a
+//     correct gate. c_γ is affine in the authenticated masks (λ_α,λ_β,λ_γ and
+//     λ*_γ=λ_α∧λ_β via σ), so the share — its MAC term M1_t[ai] — is local: pure
+//     bit-ops + 128-bit XORs, no gfmul.
+//   Step 8: "c_γ = 0 for all γ" is, for 2 parties, exactly M1_t^{P1} == M1_t^{P2}
+//     (their XOR is c_γ·Δ). So P2 sends H(M1_t) and P1 compares to its own; P1
+//     never reveals its digest, so the equality test is rush-safe (P2 cannot
+//     forge a hash over P1's secret keys). No universal hash / random-linear
+//     combination — that batching is only needed to open ⊕_p across >2 parties.
+// AG2PC_TAMPER=2 injects an evaluator cheat (P1 lies about one AND output's ẑ);
+// the check must abort. The garbler cheat (=1) is injected in garble_and_ship.
+void C2PC::check_cgamma(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
-  const int num_in = ctx.num_in;
   const int num_ands = ctx.num_ands;
   auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
-  auto EVAL = [&](int w) -> block & { return ctx.EVAL(w); };
   auto &mask_input = ctx.mask_input;
   auto &sigma = ctx.sigma;
-  block &hp_seed = ctx.hp_seed;
   std::vector<unsigned char> Lambda_AND(num_ands);
   BlockVec M1_t(num_ands);
 
   if (party == 1) {
-    prg.random_block(&hp_seed, 1);
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      if (g.is_and()) Lambda_AND[g.and_index()] = mask_input[g.out];
-    }
-    BlockVec coeff_ands(num_ands);
-    if (num_ands > 0) uni_hash_coeff_gen(coeff_ands.data(), hp_seed, num_ands);
+    if (tamper_mode() == 2)  // evaluator tamper: flip the first AND output's ẑ
+      for (int gi = 0; gi < cf->num_gate; ++gi)
+        if (cf->gates[gi].is_and()) { mask_input[cf->gates[gi].out] ^= 1; break; }
 
-    // Single sweep: label-hash acc over EVAL labels (coeff[w] = hp_seed^(w+1),
-    // position-keyed) AND the per-AND M1_t key term. Fabric EVAL labels and WIRE
-    // shares are both re-propagated here; the two are independent arrays.
-    block acc = zero_block, pw = hp_seed, term;
-    for (int w = 0; w < num_in; ++w) {
-      gfmul(EVAL(w), pw, &term); acc = acc ^ term;
-      gfmul(pw, hp_seed, &pw);
-    }
+    // Steps 6+7: one bit-op sweep — recompute fabric shares, gather each AND
+    // output's masked value ẑ, and form its c_γ MAC term M1_t.
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
       int in0 = g.in0, in1 = g.in1, out = g.out;
-      if (!g.is_and())  // AND output eval-labels persist (set during evaluation)
-        EVAL(out) = g.is_not() ? EVAL(in0) : EVAL(in0) ^ EVAL(in1);
-      gfmul(EVAL(out), pw, &term); acc = acc ^ term;
-      gfmul(pw, hp_seed, &pw);
       if (!g.is_and()) {  // recompute fabric share for downstream ANDs
         if (g.is_not()) { WIRE(out) = WIRE(in0); }
         else { xor_share(WIRE(out), WIRE(in0), WIRE(in1)); }
@@ -689,6 +680,7 @@ void C2PC::check_fused(ComputeCtx &ctx) {
       }
       int ai = g.and_index();
       bool La = mask_input[in0], Lb = mask_input[in1], Lg = mask_input[out];
+      Lambda_AND[ai] = (unsigned char)Lg;  // step 6: ẑ of this AND output
       bool v_in0 = (bool)LSB(WIRE(in0).mac);
       bool v_in1 = (bool)LSB(WIRE(in1).mac);
       bool v_out = (bool)LSB(WIRE(out).mac);
@@ -704,70 +696,44 @@ void C2PC::check_fused(ComputeCtx &ctx) {
       m = m ^ sb.key ^ wb_out.key;
       M1_t[ai] = m;
     }
-    // Step 12 message (label hash), then step 13 verdict (t_γ).
-    io->send_data(&hp_seed, sizeof(block));
-    io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // 1 bit/AND, packed
-    io->send_data(&acc, sizeof(block));
+    io->send_bool((const bool *)Lambda_AND.data(), num_ands);  // step 6: 1 bit/AND
     io->flush();
-    block z1 = zero_block;
-    if (num_ands > 0)
-      vector_inn_prdt_sum_red(&z1, M1_t.data(), coeff_ands.data(), num_ands);
-    block z_recv;
-    io->recv_data(&z_recv, sizeof(block));
-    block sum = z1 ^ z_recv;
-    if (!cmpBlock(&sum, &zero_block, 1))
-      error("cheat in t_gamma check (step 13)");
+    // Step 8: c_γ = 0 ∀γ ⟺ M1_t^{P1} == M1_t^{P2}; compare digests (rush-safe).
+    char D1[Hash::DIGEST_SIZE], D2[Hash::DIGEST_SIZE];
+    Hash::hash_once(D1, M1_t.data(), (size_t)num_ands * sizeof(block));
+    io->recv_data(D2, Hash::DIGEST_SIZE);
+    if (memcmp(D1, D2, Hash::DIGEST_SIZE) != 0)
+      error("cheat in c_gamma check (KRRW Fig.3)");
   } else {
-    block h_i;
-    io->recv_data(&hp_seed, sizeof(block));
-    io->recv_bool((bool *)Lambda_AND.data(), num_ands);
-    io->recv_data(&h_i, sizeof(block));
-    BlockVec coeff_ands(num_ands);
-    if (num_ands > 0) uni_hash_coeff_gen(coeff_ands.data(), hp_seed, num_ands);
-
-    // Single sweep: re-propagate Λ + labels from the persisted base, fold the
-    // shifted label (mask ? label^Δ : label) into acc, and compute M1_t. AND
-    // output masks come from P1's broadcast (Lambda_AND); the t_γ term reads the
-    // input masks set earlier in this same gate-ordered sweep.
-    block acc = zero_block, pw = hp_seed, term;
-    auto fold = [&](int w) {
-      block lab = LABEL(w);
-      block sh = mask_input[w] ? (lab ^ Delta) : lab;
-      gfmul(sh, pw, &term); acc = acc ^ term;
-      gfmul(pw, hp_seed, &pw);
-    };
-    for (int w = 0; w < num_in; ++w) fold(w);
+    io->recv_bool((bool *)Lambda_AND.data(), num_ands);  // step 6
+    // Steps 6+7: propagate masks from the broadcast ẑ, recompute fabric shares,
+    // form each AND's c_γ MAC term M1_t. The t_γ term reads the input masks set
+    // earlier in this same gate-ordered sweep.
     for (int gi = 0; gi < cf->num_gate; ++gi) {
       const Gate &g = cf->gates[gi];
       int in0 = g.in0, in1 = g.in1, out = g.out;
-      if (g.is_and()) {
-        mask_input[out] = Lambda_AND[g.and_index()];  // AND output label persists
-      } else if (g.is_not()) {
-        mask_input[out] = mask_input[in0] ^ 1;
-        LABEL(out) = LABEL(in0) ^ Delta;
-      } else {  // XOR
-        mask_input[out] = mask_input[in0] ^ mask_input[in1];
-        LABEL(out) = LABEL(in0) ^ LABEL(in1);
-      }
-      fold(out);
-      if (!g.is_and()) {  // recompute fabric share for downstream ANDs
-        if (g.is_not()) { WIRE(out) = WIRE(in0); }
-        else { xor_share(WIRE(out), WIRE(in0), WIRE(in1)); }
+      if (!g.is_and()) {
+        if (g.is_not()) {
+          mask_input[out] = mask_input[in0] ^ 1;
+          WIRE(out) = WIRE(in0);
+        } else {  // XOR
+          mask_input[out] = mask_input[in0] ^ mask_input[in1];
+          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
+        }
         continue;
       }
       int ai = g.and_index();
+      mask_input[out] = Lambda_AND[ai];  // AND output ẑ from P1's broadcast
       bool La = mask_input[in0], Lb = mask_input[in1];
       block m = sigma[ai].mac ^ WIRE(out).mac;
       if (La) m = m ^ WIRE(in1).mac;
       if (Lb) m = m ^ WIRE(in0).mac;
       M1_t[ai] = m;
     }
-    if (!cmpBlock(&h_i, &acc, 1))
-      error("cheat in label-hash check (step 12)");
-    block z_i = zero_block;
-    if (num_ands > 0)
-      vector_inn_prdt_sum_red(&z_i, M1_t.data(), coeff_ands.data(), num_ands);
-    io->send_data(&z_i, sizeof(block));
+    // Step 8: send P2's c_γ MAC digest for P1 to compare.
+    char D2[Hash::DIGEST_SIZE];
+    Hash::hash_once(D2, M1_t.data(), (size_t)num_ands * sizeof(block));
+    io->send_data(D2, Hash::DIGEST_SIZE);
     io->flush();
   }
 }
