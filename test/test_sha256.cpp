@@ -9,8 +9,8 @@
 // 50 puts L above 2^20 so the bucket sizer picks B=3 at the default ssp=40
 // (any N ≥ 43 suffices; 50 leaves a small margin). All secret inputs are fed
 // up front and a single reveal closes the circuit: a secret feed after the
-// first gate, or a mid-circuit reveal, forces a chunk boundary
-// (flush_keep_all) that would carry every prior wire forward (O(N^2)).
+// first gate, or a mid-circuit reveal, forces a chunk boundary that would
+// carry every alive wire forward (O(N^2) if msg is still in scope).
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/circuits/sha256_circuit.h"
 #include "emp-ag2pc/emp-ag2pc.h"
@@ -19,18 +19,22 @@
 using namespace std;
 using namespace emp;
 
-using U = UnsignedInt_T<block, 32>;
-
 // Compress one pre-fed message into 256 output wire-carriers. The public IV is
-// created here (public constants record no gates and never flush).
-static void sha_compress(const U msg[16], block buf[256]) {
+// created here (public constants record no gates and never flush). Templated
+// so the same helper compiles for both the ag2pc backend (Wire=AG2PCWire) and
+// the clear backend (Wire=block).
+template <typename Wire>
+static void sha_compress(const UnsignedInt_T<Wire, 32> msg[16], Wire buf[256]) {
+  using U = UnsignedInt_T<Wire, 32>;
   U state[8], m[16];
   for (int i = 0; i < 8; ++i) state[i] = U(sha256_detail::H0[i], PUBLIC);  // IV
   for (int j = 0; j < 16; ++j) m[j] = msg[j];
-  sha256_compress<block>(state, m);
+  sha256_compress<Wire>(state, m);
+  // Copy each output Bit's wire-carrier (the .bit member) into buf via
+  // assignment — for AG2PCWire that's a refcount-aware copy.
   for (int i = 0; i < 8; ++i)
     for (int b = 0; b < 32; ++b)
-      memcpy(&buf[i * 32 + b], &state[i].bits[b], sizeof(block));
+      buf[i * 32 + b] = state[i].bits[b].bit;
 }
 
 int main(int argc, char **argv) {
@@ -52,35 +56,37 @@ int main(int argc, char **argv) {
   setup_ag2pc(io, &pool, party);
   io->flush();
 
-  // SHA_CHECKPOINT=K (env, default 0=off): checkpoint every K compressions so the
-  // recorded gate list + per-wire arrays stay at one chunk's worth instead of the
-  // whole N-circuit. The compressions are independent, so the only wires carried
-  // across a checkpoint are the output bits produced so far (revealed at the end).
-  // A chunk's inputs are fed at its start (gates_ empty) so an interleaved feed
-  // never triggers flush_keep_all.
+  // SHA_CHECKPOINT=K (env, default 0=off): checkpoint every K compressions so
+  // peak gate-list memory stays at one chunk's worth. `msg` is scoped to die
+  // before the checkpoint so checkpoint_keep_all drops its wires automatically
+  // — only `buf` (and any other still-pinned Bits) survives.
   const char *cenv = getenv("SHA_CHECKPOINT");
   const int K = cenv ? atoi(cenv) : 0;
 
-  vector<block> buf(256 * N);
+  using AU = UnsignedInt_T<AG2PCWire, 32>;
+  vector<AG2PCWire> buf(256 * N);
   if (K <= 0) {
     // Feed ALL secret inputs first, then record all N compressions (single chunk).
-    vector<array<U, 16>> msg(N);
+    vector<array<AU, 16>> msg(N);
     for (int n = 0; n < N; ++n)
       for (int j = 0; j < 16; ++j)
-        msg[n][j] = U((party == 2) ? blk[n][j] : 0, /*owner=*/2);
-    for (int n = 0; n < N; ++n) sha_compress(msg[n].data(), buf.data() + n * 256);
+        msg[n][j] = AU((party == 2) ? blk[n][j] : 0, /*owner=*/2);
+    for (int n = 0; n < N; ++n)
+      sha_compress<AG2PCWire>(msg[n].data(), buf.data() + n * 256);
   } else {
-    // Per-chunk: feed [c,hi) inputs, record their compressions, checkpoint keeping
-    // every output produced so far (ids compact to [0, hi*256) for the next chunk).
+    // Per-chunk: feed [c,hi) inputs, record their compressions, checkpoint
+    // keeping every Bit still in scope (= buf's wires; msg dies first).
     for (int c = 0; c < N; c += K) {
       int hi = (c + K < N) ? c + K : N;
-      vector<array<U, 16>> msg(hi - c);
-      for (int n = c; n < hi; ++n)
-        for (int j = 0; j < 16; ++j)
-          msg[n - c][j] = U((party == 2) ? blk[n][j] : 0, /*owner=*/2);
-      for (int n = c; n < hi; ++n)
-        sha_compress(msg[n - c].data(), buf.data() + n * 256);
-      checkpoint_ag2pc(buf.data(), hi * 256);
+      {
+        vector<array<AU, 16>> msg(hi - c);
+        for (int n = c; n < hi; ++n)
+          for (int j = 0; j < 16; ++j)
+            msg[n - c][j] = AU((party == 2) ? blk[n][j] : 0, /*owner=*/2);
+        for (int n = c; n < hi; ++n)
+          sha_compress<AG2PCWire>(msg[n - c].data(), buf.data() + n * 256);
+      }  // msg out of scope → its wires drop at the next checkpoint.
+      checkpoint_ag2pc_keep_all();
     }
   }
 
@@ -109,12 +115,13 @@ int main(int argc, char **argv) {
 
   if (party == 1) {
     setup_clear_backend("");
+    using CU = UnsignedInt_T<block, 32>;
     bool ok = true;
     for (int n = 0; n < N; ++n) {
-      U cmsg[16];
-      for (int j = 0; j < 16; ++j) cmsg[j] = U(blk[n][j], PUBLIC);
+      CU cmsg[16];
+      for (int j = 0; j < 16; ++j) cmsg[j] = CU(blk[n][j], PUBLIC);
       block rbuf[256];
-      sha_compress(cmsg, rbuf);
+      sha_compress<block>(cmsg, rbuf);
       bool out_ref[256];
       backend->reveal(out_ref, 1, rbuf, 256);
       for (int b = 0; b < 256; ++b)

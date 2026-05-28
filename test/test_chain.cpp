@@ -1,8 +1,10 @@
 // Capability test: chain AES twice, C2 = AES(K2, AES(K1, P)), with a mid-stream
-// checkpoint_ag2pc() between the two AES instances. The checkpoint forces the ag2pc
-// protocol to evaluate the first AES, keeps the intermediate (C1) + the still-
-// needed K2 live as authenticated wires, and discards the first AES's gate list
-// — so peak gate-list memory is one AES, not two. Oracle: the same 2x chain in
+// checkpoint_ag2pc_keep_all() between the two AES instances. The checkpoint
+// forces the ag2pc protocol to evaluate the first AES; every wire still pinned
+// by a live Bit handle (C1, K2) carries forward as authenticated state; every
+// wire whose Bit has gone out of scope (the 1408-wire expanded key ek1, scoped
+// to die before the checkpoint) is dropped — no `keep[]` list to maintain. So
+// peak gate-list memory is one AES, not two. Oracle: the same 2x chain in
 // plaintext via setup_clear_backend (no checkpoint).
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
@@ -23,26 +25,26 @@ static void aes2(const bool k1b[128], const bool k2b[128], const bool pb[128],
   for (int i = 0; i < 128; ++i) p[i] = B(pb[i], p_owner);  // all inputs first
 
   AES_Calculator_T<Wire> aes;
-  B ek1[1408], c1[128];
-  aes.key_schedule(k1, ek1);
-  aes.encrypt(p, ek1, c1);
-
-  if (do_ckpt) {
-    // Keep C1 and K2 (K2 is still needed by the second AES) across the chunk.
-    B keep[256];
-    for (int i = 0; i < 128; ++i) keep[i] = c1[i];
-    for (int i = 0; i < 128; ++i) keep[128 + i] = k2[i];
-    checkpoint_ag2pc(keep, 256);
-    for (int i = 0; i < 128; ++i) c1[i] = keep[i];
-    for (int i = 0; i < 128; ++i) k2[i] = keep[128 + i];
+  B c1[128];
+  {
+    // Scope ek1 (the 1408-wire expanded round key) so it dies BEFORE the
+    // checkpoint — checkpoint_keep_all then drops those wires automatically.
+    B ek1[1408];
+    aes.key_schedule(k1, ek1);
+    aes.encrypt(p, ek1, c1);
   }
+
+  if (do_ckpt) checkpoint_ag2pc_keep_all();
 
   B ek2[1408], c2[128];
   aes.key_schedule(k2, ek2);
   aes.encrypt(c1, ek2, c2);
 
-  block buf[128];
-  for (int i = 0; i < 128; ++i) memcpy(&buf[i], &c2[i], sizeof(block));
+  // Bulk reveal: copy to a Wire-typed scratch (operator= preserves AG2PCWire
+  // refcounts; the raw memcpy that worked for sizeof(block)==sizeof(Bit) does
+  // not, with the new 4-byte AG2PCWire carrier).
+  Wire buf[128];
+  for (int i = 0; i < 128; ++i) buf[i] = c2[i].bit;
   backend->reveal(ct_out, 1, buf, 128);
 }
 
@@ -69,7 +71,7 @@ int main(int argc, char **argv) {
     pb[i] = (party == 2) ? pt[i] : false;
   }
   bool ct_ag2pc[128];
-  aes2<block>(k1a, k2a, pb, /*k_owner=*/1, /*p_owner=*/2, /*do_ckpt=*/true, ct_ag2pc);
+  aes2<AG2PCWire>(k1a, k2a, pb, /*k_owner=*/1, /*p_owner=*/2, /*do_ckpt=*/true, ct_ag2pc);
   finalize_ag2pc();
 
   if (party == 1) {

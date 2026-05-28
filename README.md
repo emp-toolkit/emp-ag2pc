@@ -118,7 +118,8 @@ helper and checks the secure output against a cleartext oracle:
 |---|---|
 | `test_aes`        | AES-128 in the native Bit frontend vs plaintext AES |
 | `test_sha256`     | SHA-256 compression (`SHA_BLOCKS=N` for N back-to-back blocks) |
-| `test_chain`      | AES ×2 with a mid-circuit `checkpoint_ag2pc` (bounded memory) |
+| `test_chain`      | AES ×2 with a mid-circuit `checkpoint_ag2pc_keep_all()` (bounded memory) |
+| `test_keep_all`   | RAII liveness: `{Bit b;}` wires drop at the next checkpoint |
 | `test_reactive`   | reveal-to-`PUBLIC` host branching (reactive SPMD) |
 | `test_recording`  | the record → `WireGraph` → `C2PC` path on a tiny circuit |
 | `test_rounds`     | input batching (one `process_input` per owner) |
@@ -134,8 +135,8 @@ does not own.
 ```cpp
 #include <emp-ag2pc/emp-ag2pc.h>
 #include <emp-ag2pc/ag2pc_backend.h>
+#include <emp-ag2pc/ag2pc_circuit_types.h>   // Bit / Integer / ... = *_T<AG2PCWire>
 using namespace emp;
-EMP_USE_CIRCUIT_TYPES_ALL(block);   // Bit / Integer / ... = *_T<block>
 
 // One NetIO to the peer (party 1 server, party 2 client); the protocol spawns
 // its own sibling channel internally (NetIO::make_sibling).
@@ -160,30 +161,39 @@ For host branching, `reveal<bool>(PUBLIC)` opens to both parties.
 
 The backend records the whole circuit before the (single, terminal) reveal, so a
 long or repeated composition — AES ×k, SHA-256 ×N, … — would otherwise hold the
-entire gate list in memory. `checkpoint_ag2pc(keep, n)` cuts it into chunks: it
-evaluates everything recorded so far, keeps only the `n` wires you carry forward
-live, and frees the rest — so peak gate-list memory stays at one chunk.
-
-Pack every still-live `Bit` into one contiguous array, checkpoint, then read them
-back out (they are re-bound into the next chunk):
+entire gate list in memory. `checkpoint_ag2pc_keep_all()` cuts it into chunks:
+it evaluates everything recorded so far, carries every wire still pinned by a
+live user-side `Bit` handle forward as authenticated state, and frees the rest.
+The wire-carrier (`AG2PCWire`) is RAII-tracked, so wires whose `Bit` handle has
+gone out of scope are dropped automatically — no `keep[]` list to maintain, no
+stale-handle footgun.
 
 ```cpp
 // C2 = AES(K2, AES(K1, P)), with a checkpoint between the two AES calls.
-Bit c1[128] = /* AES(K1, P)            */;   // chunk 1's output
-Bit k2[128] = /* still needed by AES#2 */;
+Bit c1[128];
+{
+  // Scope `ek1` (the 1408-wire expanded round key) so it dies BEFORE the
+  // checkpoint — checkpoint_keep_all then drops it automatically. K2 and
+  // c1 are still in outer scope, so they carry across.
+  Bit ek1[1408];
+  aes.key_schedule(k1, ek1);
+  aes.encrypt(p, ek1, c1);
+}
+checkpoint_ag2pc_keep_all();          // evaluates AES #1; ek1 dropped, c1+k2 carried
 
-Bit keep[256];                                // everything that must survive
-for (int i = 0; i < 128; ++i) { keep[i] = c1[i]; keep[128 + i] = k2[i]; }
-checkpoint_ag2pc(keep, 256);                  // evaluate AES#1, free its gate list
-for (int i = 0; i < 128; ++i) { c1[i] = keep[i]; k2[i] = keep[128 + i]; }
-
-Bit c2[128] = /* AES(K2, c1) */;              // chunk 2 builds on the kept wires
-bool out = c2[0].reveal<bool>(1);             // ... reveal as usual
+Bit ek2[1408], c2[128];
+aes.key_schedule(k2, ek2);
+aes.encrypt(c1, ek2, c2);
+bool out = c2[0].reveal<bool>(1);     // ... reveal as usual
 ```
 
-Feed each chunk's fresh inputs at its start (before recording its gates). See
-`test_chain` (AES ×2) and `test_sha256` (`SHA_CHECKPOINT=K` checkpoints every K
-compressions, so a 100M-gate circuit fits a small box).
+Feed each chunk's fresh inputs at its start (before recording its gates). The
+common idiom is to wrap each stage's transient state (round keys, intermediate
+arrays) in its own brace block so the wires die before the next
+`checkpoint_ag2pc_keep_all()` — see `test_chain` (AES ×2) and `test_sha256`
+(`SHA_CHECKPOINT=K` checkpoints every K compressions, so a 100M-gate circuit
+fits a small box). `test_keep_all` is the smoke test that verifies the
+`{ Bit b; }`-style drop actually happens.
 
 ## How it works
 

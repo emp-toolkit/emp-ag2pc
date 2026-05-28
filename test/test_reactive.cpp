@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
   setup_ag2pc(io, &pool, party);
   io->flush();
   bool got[3];
-  reactive<block>(a_in, b_in, d_in, got);   // all parties branch on revealed v
+  reactive<AG2PCWire>(a_in, b_in, d_in, got);   // all parties branch on revealed v
   finalize_ag2pc();
 
   // Every party should hold identical revealed values (decode-to-all).

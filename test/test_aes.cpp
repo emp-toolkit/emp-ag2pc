@@ -21,9 +21,11 @@ static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
   AES_Calculator_T<Wire> aes;
   aes.key_schedule(key, expanded);
   aes.encrypt(pt, expanded, ct);
-  // Bulk reveal all 128 ciphertext wires to party 1 in ONE backend call.
-  block buf[128];
-  for (int i = 0; i < 128; ++i) memcpy(&buf[i], &ct[i], sizeof(block));
+  // Bulk reveal all 128 ciphertext wires to party 1 in ONE backend call. Use a
+  // Wire-typed scratch (not block) so AG2PCWire's refcount semantics travel
+  // correctly via operator= instead of being bypassed by memcpy.
+  Wire buf[128];
+  for (int i = 0; i < 128; ++i) buf[i] = ct[i].bit;
   backend->reveal(ct_out, 1, buf, 128);
 }
 
@@ -52,7 +54,7 @@ int main(int argc, char **argv) {
     pb[i] = (party == 2) ? pt_bits[i] : false;
   }
   bool ct_ag2pc[128];
-  aes_ct<block>(ka, pb, /*key_owner=*/1, /*pt_owner=*/2, ct_ag2pc);
+  aes_ct<AG2PCWire>(ka, pb, /*key_owner=*/1, /*pt_owner=*/2, ct_ag2pc);
   finalize_ag2pc();
 
   if (party == 1) {

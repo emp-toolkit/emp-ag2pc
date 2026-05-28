@@ -5,9 +5,9 @@
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
 #include "emp-ag2pc/ag2pc_backend.h"
+#include "emp-ag2pc/ag2pc_circuit_types.h"  // Bit / Integer / ... = *_T<AG2PCWire>
 using namespace std;
 using namespace emp;
-EMP_USE_CIRCUIT_TYPES_ALL(block);  // Bit / Integer / ... = *_T<block>
 
 
 int main(int argc, char **argv) {
