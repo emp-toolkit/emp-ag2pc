@@ -10,7 +10,7 @@
 // backends (IKNP / SoftSpoken / Ferret) for the merged COT mesh.
 #include "emp-ag2pc/triple_pool.h"
 #include "emp-ag2pc/helper.h"
-#include "emp-ag2pc/secure_wires.h"
+#include "emp-ag2pc/share_bundle.h"
 #include "emp-ag2pc/circuit_layout.h"
 #include "emp-ag2pc/2pc.h"
 #endif // EMP_AG2PC_H__

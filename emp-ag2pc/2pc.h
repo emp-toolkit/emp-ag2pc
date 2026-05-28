@@ -1,50 +1,14 @@
 #ifndef C2PC_H__
 #define C2PC_H__
 #include "emp-ag2pc/triple_pool.h"
+#include "emp-ag2pc/profiling.h"
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-ag2pc/share_bundle.h"
-#include "emp-ag2pc/secure_wires.h"
 #include "emp-ag2pc/circuit_layout.h"
 #include "emp-ag2pc/wire_graph.h"
 #include <array>
 #include <vector>
 using namespace emp;
-
-// Opt-in phase profiler: compile with -DAG2PC_PROFILE (or #define before include).
-// At P1, each AG2PC_PHASE prints the wall time and this party's send+recv byte
-// delta since the matching AG2PC_PHASE_BEGIN. Zero-cost when AG2PC_PROFILE is unset.
-// Requires `send_io`/`recv_io` (NetIO*) and `party` in scope — C2PC members.
-#ifdef AG2PC_PROFILE
-#include <chrono>
-#include <cstdio>
-// With -DAG2PC_MEMPROFILE each phase line also carries the peak RSS reached by
-// its end (ag2pc_peak_rss_kib, defined in triple_pool.h); the jump between two
-// phases is that phase's contribution to the high-water mark.
-#ifdef AG2PC_MEMPROFILE
-#define AG2PC_PHASE_RSS_FMT "  peakRSS %8ld KiB"
-#define AG2PC_PHASE_RSS_ARG , ag2pc_peak_rss_kib()
-#else
-#define AG2PC_PHASE_RSS_FMT ""
-#define AG2PC_PHASE_RSS_ARG
-#endif
-#define AG2PC_PHASE_BEGIN()                                                      \
-  auto _ag2pc_t = std::chrono::steady_clock::now();                              \
-  int64_t _ag2pc_c = io_count(send_io, recv_io)
-#define AG2PC_PHASE(name)                                                        \
-  do {                                                                         \
-    auto _n = std::chrono::steady_clock::now();                                \
-    int64_t _c = io_count(send_io, recv_io);                                                  \
-    if (party == 1)                                                            \
-      printf("[ag2pc] %-22s %9.3f ms  %12lld B" AG2PC_PHASE_RSS_FMT "\n", (name), \
-             std::chrono::duration<double, std::milli>(_n - _ag2pc_t).count(),   \
-             (long long)(_c - _ag2pc_c) AG2PC_PHASE_RSS_ARG);                     \
-    _ag2pc_t = _n;                                                               \
-    _ag2pc_c = _c;                                                               \
-  } while (0)
-#else
-#define AG2PC_PHASE_BEGIN() ((void)0)
-#define AG2PC_PHASE(name) ((void)0)
-#endif
 
 // Two-party authenticated garbling protocol Π_MPC of agc.tex
 // (Figures P:MPC-1, P:MPC-2, P:MPC-3) specialized to two parties. The half-gate
@@ -304,7 +268,7 @@ SecureWires C2PC::compute_impl(const CircuitView *cf,
   AG2PC_PHASE("p1_evaluate[step10]");
   check_cgamma(ctx);                       AG2PC_PHASE("check[c_gamma]");
   SecureWires r = gather_outputs(ctx, output_ids);  AG2PC_PHASE("gather_outputs");
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
   if (party == 1) {
     const double A = (double)std::max(1, ctx.num_ands);
     printf("[ag2pc-mem] ComputeCtx  num_wire=%d num_slots=%d num_ands=%d "

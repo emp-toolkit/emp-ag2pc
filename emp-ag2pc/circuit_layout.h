@@ -61,7 +61,7 @@ inline WireLayout compute_wire_layout(const CircuitView &cf, int num_in,
   int next_slot = 0;
   for (int w = 0; w < num_in; ++w) phys[w] = next_slot++;  // inputs: slots [0,num_in)
   std::vector<int> freelist;
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
   long n_persist = 0, n_fabric = 0, n_free = 0, n_reuse = 0, n_grow_persist = 0,
        n_grow_fabric_empty = 0; size_t max_free = 0;
   for (int w = 0; w < W; ++w) if (persist[w]) ++n_persist; else ++n_fabric;
@@ -85,17 +85,17 @@ inline WireLayout compute_wire_layout(const CircuitView &cf, int num_in,
     int out = cf.gates[gi].out;
     if (phys[out] == -1) {
       if (persist[out]) { phys[out] = next_slot++;  // permanent
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
         ++n_grow_persist;
 #endif
       }
       else if (!freelist.empty()) { phys[out] = freelist.back(); freelist.pop_back();
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
         ++n_reuse;
 #endif
       }
       else { phys[out] = next_slot++;
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
         ++n_grow_fabric_empty;
 #endif
       }
@@ -104,13 +104,13 @@ inline WireLayout compute_wire_layout(const CircuitView &cf, int num_in,
       int w = (k == 0) ? a : b;
       if (k == 1 && b == a) continue;  // avoid double-free when in0 == in1
       if (!persist[w] && last_rd[w] == gi) { freelist.push_back(phys[w]);
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
         ++n_free; if (freelist.size() > max_free) max_free = freelist.size();
 #endif
       }
     }
   }
-#ifdef AG2PC_MEMPROFILE
+#ifdef AG2PC_PROFILE
   printf("[ag2pc-mem] layout  W=%d persist=%ld fabric=%ld  slots=%d | "
          "free=%ld reuse=%ld grow{persist=%ld,fabric_empty=%ld} max_freelist=%zu\n",
          W, n_persist, n_fabric, next_slot, n_free, n_reuse, n_grow_persist,

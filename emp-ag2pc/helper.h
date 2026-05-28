@@ -67,19 +67,6 @@ bool joinNcleanCheat(vector<future<bool>> &res) {
 }
 
 
-template <int B>
-void send_partial_block(NetIO *io, const block *data, int length) {
-  for (int i = 0; i < length; ++i) {
-    io->send_data(&(data[i]), B);
-  }
-}
-
-template <int B> void recv_partial_block(NetIO *io, block *data, int length) {
-  for (int i = 0; i < length; ++i) {
-    io->recv_data(&(data[i]), B);
-  }
-}
-
 inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 // Bit 1 (second-lowest) of a block. Reserved for the half-gate Λ_γ recovery
 // invariant LSB1(⊕_p Δ_p) = 1; bit 0 is reserved for share-value encoding
