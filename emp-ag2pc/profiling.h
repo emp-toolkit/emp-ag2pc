@@ -10,8 +10,8 @@
 //
 //   * AG2PC_PHASE(name)        per-step wall time + this party's send+recv byte
 //                              delta + peak RSS  (the [ag2pc] lines). Requires
-//                              io_count / send_io / recv_io / party in scope
-//                              (C2PC members) — the macro expands at the call site.
+//                              io_count / send_io / recv_io / party visible at
+//                              the call site — the macro expands there.
 //   * AG2PC_TP(name)           leaky-AND sub-phase wall timer (the [ag2pc-tp] lines).
 //   * g_tp_* / g_ag2pc_*       sub-phase accumulators + COT/phi byte counters.
 //   * ag2pc_peak_rss_kib()     monotonic peak RSS (KiB); the jump between two
@@ -28,7 +28,7 @@
 #include <sys/resource.h>
 
 // This party's send+recv bytes in the half-gate phi exchange and (separately)
-// the COT (rcot) extension.
+// the COT extension.
 inline uint64_t g_ag2pc_phi_bytes = 0;
 inline uint64_t g_ag2pc_cot_bytes = 0;
 // Sub-phase wall accumulators for the layered leaky-AND (reset per compute_*):

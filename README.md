@@ -15,8 +15,9 @@
 > - **New projects, or willing to migrate: track the development branch**
 >   (this branch). It will become `1.0.0-alpha` after a polish pass and then
 >   `1.0.0`. It is a ground-up rewrite: a native emp-tool Bit/Integer
->   frontend (no hand-written Bristol files), a slot-reused wire layout, an
->   amortized COT-based triple pool, and the KRRW (eprint 2018/578) leaky-AND.
+>   frontend (no hand-written Bristol files), a slot-reused wire layout, and the
+>   KRRW (eprint 2018/578) function-dependent leaky-AND (computed in place on
+>   each AND gate's own input masks).
 >   The API is not yet frozen and headers may move between alphas. Requires
 >   emp-tool ≥ 1.0 and emp-ot ≥ 1.0.
 
@@ -27,10 +28,11 @@ emp-tool's native `Bit` / `Integer` frontend and run through a recording
 backend — no BristolFormat files to hand-write or ship.
 
 The protocol is authenticated garbling [WRK17] with the
-[KRRW18](https://eprint.iacr.org/2018/578) optimizations: a half-gate
-leaky-AND (eprint 2018/578, Fig. 5) checked with an `F_eq` equality, then
-cyclic-shift bucketing to remove leakage, all fed by an amortized
-correlated-OT triple pool (SoftSpoken⟨8⟩ from emp-ot by default).
+[KRRW18](https://eprint.iacr.org/2018/578) optimizations: a **function-dependent**
+half-gate leaky-AND (KRRW §5.2) that runs in place on each gate's own input
+masks, a batched `F_eq` consistency check, then cyclic-shift bucketing to remove
+leakage. Correlated OT comes from a single lifetime-open SoftSpoken⟨4⟩ session in
+emp-ot, whose consistency check is run before every reveal so it gates output.
 
 > **Heads up — AI-assisted rewrite, not yet audited.** The development branch
 > is under active refactoring and review; do not deploy it without your own
@@ -121,7 +123,6 @@ helper and checks the secure output against a cleartext oracle:
 | `test_recording`  | the record → `WireGraph` → `C2PC` path on a tiny circuit |
 | `test_rounds`     | input batching (one `process_input` per owner) |
 | `wire_graph_test` | the `WireGraph` IR end to end |
-| `cutchoose_mult`  | the cut-and-choose leaky-AND self-tests (incl. a tamper → abort) |
 
 ## Usage
 
@@ -136,15 +137,13 @@ does not own.
 using namespace emp;
 EMP_USE_CIRCUIT_TYPES_ALL(block);   // Bit / Integer / ... = *_T<block>
 
-// Two duplex NetIO channels to the peer: io1 carries 1->2, io2 carries 2->1.
-NetIO *io1, *io2;
-if (party == 1) { io1 = new NetIO(nullptr, port);          // server
-                  io2 = new NetIO("127.0.0.1", port + 1); } // client
-else            { io1 = new NetIO("127.0.0.1", port);       // client
-                  io2 = new NetIO(nullptr, port + 1); }     // server
+// One NetIO to the peer (party 1 server, party 2 client); the protocol spawns
+// its own sibling channel internally (NetIO::make_sibling).
+NetIO *io = (party == 1) ? new NetIO(nullptr, port)        // server
+                         : new NetIO("127.0.0.1", port);   // client
 
 ThreadPool pool(4);
-setup_ag2pc(io1, io2, &pool, party);
+setup_ag2pc(io, &pool, party);
 
 Bit a(in_a, /*owner=*/1);           // party 1's secret input
 Bit b(in_b, /*owner=*/2);           // party 2's secret input
@@ -157,9 +156,38 @@ finalize_ag2pc();
 `Integer`, `Float`, and the rest of emp-tool's frontend work the same way.
 For host branching, `reveal<bool>(PUBLIC)` opens to both parties.
 
+### Checkpointing for bounded memory
+
+The backend records the whole circuit before the (single, terminal) reveal, so a
+long or repeated composition — AES ×k, SHA-256 ×N, … — would otherwise hold the
+entire gate list in memory. `checkpoint_ag2pc(keep, n)` cuts it into chunks: it
+evaluates everything recorded so far, keeps only the `n` wires you carry forward
+live, and frees the rest — so peak gate-list memory stays at one chunk.
+
+Pack every still-live `Bit` into one contiguous array, checkpoint, then read them
+back out (they are re-bound into the next chunk):
+
+```cpp
+// C2 = AES(K2, AES(K1, P)), with a checkpoint between the two AES calls.
+Bit c1[128] = /* AES(K1, P)            */;   // chunk 1's output
+Bit k2[128] = /* still needed by AES#2 */;
+
+Bit keep[256];                                // everything that must survive
+for (int i = 0; i < 128; ++i) { keep[i] = c1[i]; keep[128 + i] = k2[i]; }
+checkpoint_ag2pc(keep, 256);                  // evaluate AES#1, free its gate list
+for (int i = 0; i < 128; ++i) { c1[i] = keep[i]; k2[i] = keep[128 + i]; }
+
+Bit c2[128] = /* AES(K2, c1) */;              // chunk 2 builds on the kept wires
+bool out = c2[0].reveal<bool>(1);             // ... reveal as usual
+```
+
+Feed each chunk's fresh inputs at its start (before recording its gates). See
+`test_chain` (AES ×2) and `test_sha256` (`SHA_CHECKPOINT=K` checkpoints every K
+compressions, so a 100M-gate circuit fits a small box).
+
 ## How it works
 
-The stack is four header layers, each consuming the one below:
+The stack is three header layers, each consuming the one below:
 
 - **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend`. Authenticated
   garbling is multi-pass, so it records the frontend into a `WireGraph` and
@@ -167,15 +195,16 @@ The stack is four header layers, each consuming the one below:
   composition (e.g. AES ×k) into one chunk so gate-list memory stays bounded.
 - **`C2PC`** (`2pc.h`) — the protocol: `process_input` shares inputs, `compute`
   garbles/evaluates the circuit with the half-gate construction and runs the
-  malicious checks (label-hash and t_γ), `decode` opens outputs.
-- **`TriplePool`** (`triple_pool.h`) — malicious authenticated AND-triple
-  generation: a half-gate leaky-AND (eprint 2018/578, Fig. 5) with an `F_eq`
-  consistency check, then cyclic-shift bucketing to remove leakage, served
-  from an amortized pool. An OT-based cut-and-choose alternative lives in
-  `triple_pool_cutchoose.h`.
-- **`AuthSharePool`** (`auth_share_pool.h`) — authenticated bit-shares
-  (`MAC = KEY ⊕ x·Δ`) minted directly from emp-ot correlated OT, with a
-  bit-0/bit-1 Δ pinning that folds the share bit into the COT choice bit.
+  malicious checks (the leaky-AND `F_eq` and the KRRW Fig. 3 `c_γ` check),
+  `decode` opens outputs.
+- **`TriplePool`** (`triple_pool.h`) — the correlated-OT mesh plus malicious
+  authenticated AND-share generation. aShares (`MAC = KEY ⊕ x·Δ`) are minted
+  from emp-ot correlated OT with a bit-0/bit-1 Δ pinning that folds the share
+  bit into the COT choice bit; each AND gate's `σ = λ_α∧λ_β` is then built by a
+  function-dependent half-gate leaky-AND (KRRW §5.2) run in place on the gate's
+  own input masks, a batched `F_eq` check, and cyclic-shift bucketing. The COT
+  session is opened once and held for the object's lifetime, its consistency
+  check run before each reveal so it gates output release.
 
 The two parties hold a **duplex pair** of `NetIO` channels (`send_io` /
 `recv_io`): the two COT instances run one per socket, and parallel send/recv
@@ -183,8 +212,10 @@ overlap without head-of-line blocking.
 
 ### Profiling
 
-Compile with `-DAG2PC_PROFILE` to print, at party 1, a per-phase wall-time and
-communication breakdown (tagged `[ag2pc]`) for each `compute`.
+Compile with `-DAG2PC_PROFILE` (the single flag for all instrumentation) to
+print, at party 1, a per-step wall-time + communication + peak-RSS breakdown
+(`[ag2pc]`), the leaky-AND sub-phase timers (`[ag2pc-tp]`), and a per-array
+memory census (`[ag2pc-mem]`).
 
 ## [Acknowledgement, Reference, and Questions](https://github.com/emp-toolkit/emp-readme/blob/master/README.md#citation)
 

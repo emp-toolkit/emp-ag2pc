@@ -29,7 +29,3 @@ add_test_case_with_run(test_rounds)
 add_test_case_with_run(test_chain)
 add_test_case_with_run(test_reactive)
 add_test_case_with_run(test_sha256)
-# cutchoose_mult: the cut-and-choose leaky-AND path is no longer wired in
-# (triple_pool.h no longer #includes triple_pool_cutchoose.h). Re-enable the
-# include there to build this again.
-# add_test_case_with_run(cutchoose_mult)

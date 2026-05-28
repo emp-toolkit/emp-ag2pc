@@ -77,9 +77,8 @@ inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1
 // F_eq (eprint 2018/578): rush-safe equality test on a precomputed digest Dme.
 // P1 commits H(Dme‖r) first, P2 replies with its Dme, then P1 opens (Dme, r) —
 // the commit-before-open order is rush-safe and the nonce r keeps the commitment
-// hiding. Aborts via error(fail_msg) when the two digests differ. The leaky-AND
-// feeds every bucket layer's L-vector into one running Hash and calls this once
-// per reveal segment, so the commit-open costs a single round, not one per layer.
+// hiding. Aborts via error(fail_msg) when the two digests differ. Dme may be a
+// digest over a whole batched vector, so one call (one round) checks many values.
 inline void feq_check(NetIO *io, int party, const char *Dme,
                       const char *fail_msg) {
   char Dpeer[Hash::DIGEST_SIZE];

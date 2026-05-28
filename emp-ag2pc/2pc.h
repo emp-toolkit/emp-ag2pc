@@ -47,13 +47,14 @@ public:
   block Delta;
   PRG prg;
 
-  // Takes a single NetIO; spawns and owns the sibling channel.
-  C2PC(NetIO *io, ThreadPool *pool_, int party_)
+  // Takes a single NetIO; spawns and owns the sibling channel. ssp is the
+  // statistical security parameter forwarded to TriplePool (bucket sizing).
+  C2PC(NetIO *io, ThreadPool *pool_, int party_, int ssp = 40)
       : io(io), sib_owned(io->make_sibling()), sib(sib_owned.get()),
         send_io(party_ == 1 ? io : sib_owned.get()),
         recv_io(party_ == 1 ? sib_owned.get() : io),
         pool(pool_), party(party_) {
-    fpre = new TriplePool(io, sib_owned.get(), pool_, party_);
+    fpre = new TriplePool(io, sib_owned.get(), pool_, party_, ssp);
     Delta = fpre->Delta;
   }
   ~C2PC() { delete fpre; }

@@ -24,9 +24,9 @@ namespace emp {
 // gates (c0 = XOR(w,w), c1 = NOT(c0)) so the protocol needs no special handling.
 class AG2PCBackend : public Backend {
 public:
-  AG2PCBackend(NetIO *io, ThreadPool *pool_, int party_) {
+  AG2PCBackend(NetIO *io, ThreadPool *pool_, int party_, int ssp = 40) {
     this->party = party_;
-    mpc = new C2PC(io, pool_, party_);
+    mpc = new C2PC(io, pool_, party_, ssp);
   }
   ~AG2PCBackend() override { delete mpc; }
 
@@ -265,8 +265,9 @@ private:
   }
 };
 
-inline AG2PCBackend *setup_ag2pc(NetIO *io, ThreadPool *pool, int party) {
-  auto *b = new AG2PCBackend(io, pool, party);
+inline AG2PCBackend *setup_ag2pc(NetIO *io, ThreadPool *pool, int party,
+                                 int ssp = 40) {
+  auto *b = new AG2PCBackend(io, pool, party, ssp);
   backend = b;
   return b;
 }

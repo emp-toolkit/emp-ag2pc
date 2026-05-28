@@ -4,10 +4,12 @@
 // of party 2; the IV (H0) is public, matching real SHA-256. Oracle: the same
 // compression under setup_clear_backend(""), so we verify ag2pc == plaintext.
 //
-// SHA_BLOCKS (env var, default 1) compressions form ONE circuit of
-// SHA_BLOCKS * ~24.7k ANDs — a knob for the AND-dominated regime. All secret
-// inputs are fed up front and a single reveal closes the circuit: a secret feed
-// after the first gate, or a mid-circuit reveal, forces a chunk boundary
+// SHA_BLOCKS (env var, default 50) compressions form ONE circuit of
+// SHA_BLOCKS * ~24.7k ANDs — a knob for the AND-dominated regime. The default
+// 50 puts L above 2^20 so the bucket sizer picks B=3 at the default ssp=40
+// (any N ≥ 43 suffices; 50 leaves a small margin). All secret inputs are fed
+// up front and a single reveal closes the circuit: a secret feed after the
+// first gate, or a mid-circuit reveal, forces a chunk boundary
 // (flush_keep_all) that would carry every prior wire forward (O(N^2)).
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/circuits/sha256_circuit.h"
@@ -37,7 +39,7 @@ int main(int argc, char **argv) {
   if (party > 2) return 0;
 
   const char *env = getenv("SHA_BLOCKS");
-  const int N = env ? atoi(env) : 1;
+  const int N = env ? atoi(env) : 50;
 
   // N distinct blocks so each compression is independent (no trivial reuse).
   vector<array<uint32_t, 16>> blk(N);

@@ -10,6 +10,7 @@
 #include "emp-ot/ot_extension/ferret/ferret.h"
 #include "emp-ot/ot_extension/softspoken/softspoken.h"
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <thread>
 
@@ -54,6 +55,9 @@ class TriplePool {
 public:
   ThreadPool *pool;
   int party;
+  // Statistical security parameter: get_bucket_size targets residual leakage
+  // ≤ 2^{-ssp} when picking B (see its comment for the bound).
+  int ssp;
   // io = primary channel (sequential comm). sib_owned holds the spawned sibling
   // when this object created it (the one-io ctor); it's null when a sibling was
   // handed in. send_io/recv_io alias (io, sib) by party for the duplex sites.
@@ -70,16 +74,16 @@ public:
   NetIO *io_abit1, *io_abit2;
   block Delta;
 
-  // Borrowing ctor: the caller (C2PC) owns the sibling and threads it in.
-  TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party)
-      : pool(pool), party(party), io(io), sib(sib),
+  // Borrowing ctor: the caller owns the sibling channel and threads it in.
+  TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party, int ssp = 40)
+      : pool(pool), party(party), ssp(ssp), io(io), sib(sib),
         send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io) {
     init_abit_();
   }
 
   // Owning ctor: spawn (and own) the sibling channel from the single io.
-  TriplePool(NetIO *io, ThreadPool *pool, int party)
-      : pool(pool), party(party), io(io),
+  TriplePool(NetIO *io, ThreadPool *pool, int party, int ssp = 40)
+      : pool(pool), party(party), ssp(ssp), io(io),
         sib_owned(io->make_sibling()), sib(sib_owned.get()),
         send_io(party == 1 ? io : sib_owned.get()),
         recv_io(party == 1 ? sib_owned.get() : io) {
@@ -160,11 +164,11 @@ public:
   }
 
   // Run the COT session's deferred consistency check now, then reopen a fresh
-  // session. The caller (C2PC::decode) invokes this before every reveal so the
-  // subspace-VOLE check — which validates every COT minted since the last
-  // begin() — gates output release: a malicious peer's malformed COTs abort here,
-  // before any secret is opened, rather than at teardown. end() carries the only
-  // I/O (sacrificial chunk + check open), so cross abit1/abit2 concurrently as in
+  // session. Call before opening any secret (a reveal) so the subspace-VOLE
+  // check — which validates every COT minted since the last begin() — gates
+  // output release: a malicious peer's malformed COTs abort here, before the
+  // secret is opened, rather than at teardown. end() carries the only I/O
+  // (sacrificial chunk + check open), so cross abit1/abit2 concurrently as in
   // the ctor; the immediate begin() just resets the per-session counters (the
   // base-OT bootstrap already ran), so it is local and adds no round.
   void flush_cot_check() {
@@ -192,31 +196,16 @@ public:
     }
   }
 
-  // Bucket size B vs. number of triples ℓ_2 — picked from the leak-rate bound
-  // max(1/2^ssp + (2B+1)/ℓ^{B-1}, ...) (see triple.tex theorem for Π_aAND).
-  // Floor at 320 so tiny calls still hit safe (B,ℓ) pairs.
-  int get_bucket_size(int size) {
-    size = max(size, 320);
-    if (size >= 280 * 1000)
-      return 3;
-    else if (size >= 3100)
-      return 4;
-    else
-      return 5;
-  }
-
-  // Leaky-AND method. The COT/aShare generation and the Π_aAND bucketing are
-  // shared; only the middle leaky-AND step differs. HalfGate = garbled
-  // half-gate (active). CutChoose = OT-based cut-and-choose (see
-  // triple_pool_cutchoose.h).
-  enum class LeakyAnd { HalfGate, CutChoose };
-  static constexpr LeakyAnd kLeakyAnd = LeakyAnd::HalfGate;
-  static constexpr int cutchoose_T = 3;  // correctness-sacrifice bucket size
-
-  // Authenticated bits to mint for LB leaky-triple slots: half-gate needs 3·LB
-  // (a, b, r); cut-and-choose mints T× more candidates for its sacrifice.
-  static int leaky_abit_len(int LB) {
-    return kLeakyAnd == LeakyAnd::HalfGate ? 3 * LB : 3 * cutchoose_T * LB;
+  // Bucket size B for the Π_aAND leakage bound: pick the smallest B ≥ 2 such
+  // that log₂(L) > ssp/(B−1). Then the residual leakage ~ 2^{-(B−1)·log₂(L)} is
+  // strictly below the statistical-security target 2^{-ssp}. Floor L at 1024 so
+  // tiny calls still pick a safe (B, L) pair.
+  int get_bucket_size(int size) const {
+    size = std::max(size, 1024);
+    const double log2_L = std::log2((double)size);
+    int B = 2;
+    while (log2_L * (B - 1) <= (double)ssp) ++B;
+    return B;
   }
 
   // ===== Leaky-AND layer primitives (eprint 2018/578, Fig. 5 + P:aAND) =====
@@ -378,33 +367,37 @@ public:
 #endif
   }
 
-  // Generate B-1 fresh sacrifice layers (COT + half-gate), then bucket them all
-  // into acc. The shifts are drawn from the public coin AFTER every candidate is
-  // committed (all leaky-ANDs done), so a cheater cannot bias which candidates
-  // co-bucket. On return acc holds L secure triples (a/b = layer 0's, c secure).
-  // The caller has already filled+leaky'd layer 0 (acc) with gmitc/emitc, which
-  // continue here so each layer's tweaks stay distinct.
+  // Fold B-1 sacrifice layers into acc, one layer at a time and reusing a single
+  // sac buffer — peak transient is acc + one sac (12L blocks), independent of B,
+  // instead of holding all B-1 sacrifices at once. Per layer k: COT-mint into the
+  // reused sac, leaky-AND, derive the shift r_k from the current FS transcript
+  // (which now commits layers 0..k), bucket sac into acc, then overwrite for k+1.
+  //
+  // Security: r_k is drawn from the FS state at sac[k]'s leaky-AND completion,
+  // which is AFTER sac[k]'s COT shares were minted. So r_k is unpredictable to the
+  // adversary at the moment sac[k]'s shares are generated — the same property the
+  // post-commitment coin gave globally, now per-layer. The B-1 shifts are
+  // computationally independent (each from a distinct, growing transcript), so the
+  // joint distribution and Π_aAND leakage bound carry over.
+  //
+  // On return acc holds L secure triples (a/b = layer 0's, c secure). The caller
+  // has already filled+leaky'd layer 0 (acc) with gmitc/emitc, which continue
+  // here so each layer's tweaks stay distinct.
   void layered_bucket_into_acc(block *am, block *ak, int B,
                                int L, MITCCRH<8> &gmitc, MITCCRH<8> &emitc,
                                Hash &feq) {
-    struct Lyr { BlockVec mac, key; };
-    std::vector<Lyr> sac(B - 1);
+    BlockVec sac_mac((size_t)3 * L), sac_key((size_t)3 * L);
     for (int k = 0; k < B - 1; ++k) {
-      sac[k].mac.resize((size_t)3 * L);
-      sac[k].key.resize((size_t)3 * L);
-      gen_cot_shares(sac[k].mac.data(), sac[k].key.data(), 3 * L);
-      leaky_and_halfgate(sac[k].mac.data(), sac[k].key.data(), L, gmitc, emitc, feq);
+      gen_cot_shares(sac_mac.data(), sac_key.data(), 3 * L);
+      leaky_and_halfgate(sac_mac.data(), sac_key.data(), L, gmitc, emitc, feq);
+      // Per-layer public coin: same labeled (io, sib) digests on both ends → same S.
+      block S = RO("AG2PC RO", zero_block)
+                    .absorb(io->get_digest()).absorb(sib->get_digest()).squeeze_block();
+      uint32_t raw;
+      { PRG prg2(&S); prg2.random_data(&raw, sizeof(uint32_t)); }
+      int r_k = (int)(raw % (uint32_t)L);
+      bucket_one_layer(am, ak, sac_mac.data(), sac_key.data(), L, r_k);
     }
-    // Public coin: same labeled (io, sib) digests on both ends -> same S.
-    block S = RO("AG2PC RO", zero_block)
-                  .absorb(io->get_digest()).absorb(sib->get_digest()).squeeze_block();
-    std::vector<int> rk(B - 1);
-    { PRG prg2(&S);
-      std::vector<uint32_t> raw(B - 1);
-      prg2.random_data(raw.data(), (B - 1) * sizeof(uint32_t));
-      for (int k = 0; k < B - 1; ++k) rk[k] = (int)(raw[k] % (uint32_t)L); }
-    for (int k = 0; k < B - 1; ++k)
-      bucket_one_layer(am, ak, sac[k].mac.data(), sac[k].key.data(), L, rk[k]);
   }
 
   // In-place (function-dependent) AND-share generation (KRRW §5.2 bucket-saving).
