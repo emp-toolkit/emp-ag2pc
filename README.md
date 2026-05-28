@@ -119,8 +119,8 @@ helper and checks the secure output against a cleartext oracle:
 | `test_aes`        | AES-128 in the native Bit frontend vs plaintext AES |
 | `test_sha256`     | SHA-256 compression (`SHA_BLOCKS=N` for N back-to-back blocks) |
 | `test_chain`      | AES ×2 with a mid-circuit `checkpoint_ag2pc_keep_all()` (bounded memory) |
-| `test_keep_all`   | RAII liveness: `{Bit b;}` wires drop at the next checkpoint |
-| `test_reactive`   | reveal-to-`PUBLIC` host branching (reactive SPMD) |
+| `test_keep_all`   | `{ Bit b; }`-scoped wires really do drop at the next checkpoint |
+| `test_reactive`   | reveal-to-`PUBLIC` host branching |
 | `test_recording`  | the record → `WireGraph` → `C2PC` path on a tiny circuit |
 | `test_rounds`     | input batching (one `process_input` per owner) |
 | `wire_graph_test` | the `WireGraph` IR end to end |
@@ -162,29 +162,37 @@ For host branching, `reveal<bool>(PUBLIC)` opens to both parties.
 The backend records the whole circuit before the (single, terminal) reveal, so a
 long or repeated composition — AES ×k, SHA-256 ×N, … — would otherwise hold the
 entire gate list in memory. `checkpoint_ag2pc_keep_all()` cuts it into chunks:
-it evaluates everything recorded so far, carries every wire still pinned by a
-live user-side `Bit` handle forward as authenticated state, and frees the rest.
-The wire-carrier (`AG2PCWire`) is RAII-tracked, so wires whose `Bit` handle has
-gone out of scope are dropped automatically — no `keep[]` list to maintain, no
-stale-handle footgun.
+it evaluates everything recorded so far, carries every wire still held by a
+live `Bit` forward as authenticated state, and frees the rest. Wires whose
+`Bit` has gone out of scope are dropped automatically, so brace-scoping a
+stage's transient state is enough to bound memory.
 
 ```cpp
 // C2 = AES(K2, AES(K1, P)), with a checkpoint between the two AES calls.
+// Setup (assumed already fed at chunk-1 start):
+AES_Calculator_T<AG2PCWire> aes;
+Bit k1[128], k2[128], p[128];         // ... input-fed via Bit ctors ...
+
 Bit c1[128];
 {
-  // Scope `ek1` (the 1408-wire expanded round key) so it dies BEFORE the
-  // checkpoint — checkpoint_keep_all then drops it automatically. K2 and
-  // c1 are still in outer scope, so they carry across.
+  // Brace-scope the 1408-wire expanded round key so it dies BEFORE the
+  // checkpoint — checkpoint_keep_all then drops it automatically. c1 stays in
+  // outer scope, so it carries across; k1/k2/p are still alive too.
   Bit ek1[1408];
   aes.key_schedule(k1, ek1);
   aes.encrypt(p, ek1, c1);
 }
-checkpoint_ag2pc_keep_all();          // evaluates AES #1; ek1 dropped, c1+k2 carried
+checkpoint_ag2pc_keep_all();          // ek1 dropped; c1 + k1, k2, p carry
 
-Bit ek2[1408], c2[128];
-aes.key_schedule(k2, ek2);
-aes.encrypt(c1, ek2, c2);
-bool out = c2[0].reveal<bool>(1);     // ... reveal as usual
+Bit c2[128];
+{                                      // same pattern for AES #2
+  Bit ek2[1408];
+  aes.key_schedule(k2, ek2);
+  aes.encrypt(c1, ek2, c2);
+}
+
+bool out[128];                         // reveal the full ciphertext to party 1
+backend->reveal(out, /*to=*/1, c2, 128);
 ```
 
 Feed each chunk's fresh inputs at its start (before recording its gates). The
@@ -198,24 +206,23 @@ fits a small box). `test_keep_all` is the smoke test that verifies the
 Per-chunk peak memory scales as `≈ 400 · A + 40 · X` bytes (ignoring inputs)
 where `A` and `X` are the per-chunk AND and XOR gate counts. The AND term
 covers the triple-gen transient (~192 B/AND), the per-AND share bundles
-(rep / λ_γ / σ ≈ 128 B/AND), and the wire-slot / label arrays (~80 B/AND); the
-XOR term is just the recorder log + per-wire metadata (the existing
-fabric-slot reuse keeps XORs out of the heavy AShareBundle arrays). So picking
-`K` to keep `400 · A_chunk + 40 · X_chunk` under your memory budget bounds the
-whole run — and a circuit's AND/XOR mix tells you which term dominates.
+(~128 B/AND), and the wire / label arrays (~80 B/AND); XORs are free-XOR, so
+the XOR term is just the gate-log entry plus per-wire metadata. Picking `K`
+to keep `400 · A_chunk + 40 · X_chunk` under your memory budget bounds the
+whole run — a circuit's AND/XOR mix tells you which term dominates.
 
 ## How it works
 
 The stack is three header layers, each consuming the one below:
 
-- **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend` over the 4-byte
-  `AG2PCWire` carrier (RAII-refcounted via a backend singleton). Authenticated
-  garbling is multi-pass, so it records the frontend into per-wire flat metadata
-  arrays + a per-chunk gate log, and runs the protocol per chunk. Slot ids
-  released by dead `Bit`s return to a free list and are reused at the next
-  chunk boundary. `checkpoint_ag2pc_keep_all()` flushes a long composition
-  (e.g. AES ×k) — carries every wire still pinned by a live `Bit`, drops the
-  rest — so per-chunk peak memory is bounded.
+- **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend` over a 4-byte
+  wire carrier (`AG2PCWire`) that reference-counts each frontend `Bit`.
+  Authenticated garbling is multi-pass, so it records the frontend into
+  per-wire metadata arrays plus a per-chunk gate log, then runs the protocol
+  per chunk. Wire slots released by dead `Bit`s are reused at the next chunk
+  boundary. `checkpoint_ag2pc_keep_all()` flushes a long composition (e.g.
+  AES ×k) — carries every wire still held by a live `Bit`, drops the rest —
+  so per-chunk peak memory is bounded.
 - **`C2PC`** (`2pc.h`) — the protocol: `process_input` shares inputs, `compute`
   garbles/evaluates the circuit with the half-gate construction and runs the
   malicious checks (the leaky-AND `F_eq` and the KRRW Fig. 3 `c_γ` check),
