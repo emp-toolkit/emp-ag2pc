@@ -24,16 +24,17 @@ using namespace emp;
 //   decode(wires, recipient)      → vector<bool> // step 14
 //
 // Output wires of compute() carry full SecureWire state. process_input() and
-// compute() draw aShares/triples from TriplePool (which mints aShares via COT
-// and amortizes triples in a pool); preprocess(num_triples) pre-mints triples.
+// compute() draw aShares from TriplePool (COT-minted) and build each AND gate's
+// σ = λ_α∧λ_β in place via TriplePool::compute_inplace (no generic triple pool).
 // The frontend (a recording backend, see ag2pc_backend.h) drives this from native
 // Bit/Integer code; circuits are consumed as WireGraph, not BristolFormat.
 
 class C2PC {
 public:
-  // Long-lived setup: TriplePool (COT mesh + Δ + the triple pool). Constructed
-  // once per session and reused across all process_input / compute / decode
-  // calls; the triple pool amortizes refill costs across draw() calls.
+  // Long-lived setup: TriplePool (COT mesh + Δ). Constructed once per session and
+  // reused across all process_input / compute / decode calls; it holds the COT
+  // session open across compute() calls and runs the COT consistency check before
+  // each reveal (decode) so the check gates output release.
   TriplePool *fpre = nullptr;
   // io = primary channel (sequential comm); sib = a second channel spawned from
   // it, owned here. send_io/recv_io alias (io, sib) by party for the duplex
@@ -57,14 +58,6 @@ public:
   }
   ~C2PC() { delete fpre; }
 
-  // Eagerly mint num_triples triples into TriplePool's pool so subsequent
-  // compute() calls draw from cache. aShares are minted lazily inside each
-  // process_input / compute call (no aShare pool). num_abits is accepted for
-  // backward-compat signature but unused.
-  void preprocess(size_t num_triples, size_t /*num_abits*/) {
-    fpre->preprocess(num_triples);
-  }
-
   // ====== New API ======
 
   // Steps 3 + 8 + 9 of agc.tex on n new input wires owned by `owner`.
@@ -80,8 +73,8 @@ public:
 
   // Steps 4-13 of agc.tex on a WireGraph. Input bundles must already be
   // process_input'd and supplied in WireGraph.inputs (per-owner) order; they
-  // occupy wires [0, num_in). Mints AND triples + AND-output share pool fresh
-  // inside this call (preprocessing on-demand). Aborts via error() on
+  // occupy wires [0, num_in). Mints each AND gate's σ-share (compute_inplace) and
+  // fresh λ_γ output masks inside this call. Aborts via error() on
   // cheating-detection failure. Outputs are extracted by explicit id
   // (g.output_ids), in that order; output wires carry full state.
   SecureWires compute(const WireGraph &g,
@@ -650,6 +643,11 @@ std::vector<bool> C2PC::decode(const SecureWires &wires,
     return out;
   }
   std::vector<bool> result;
+  // Gate this reveal on the COT correlation check: close + reopen the COT
+  // session so its deferred subspace-VOLE check runs over every COT minted since
+  // the last reveal. A malicious peer's malformed COTs abort here, before any
+  // λ-share is opened below — not at teardown after the secret is out.
+  fpre->flush_cot_check();
   // Each party reads its own λ-share from bit0 of any peer slot's MAC.
   std::vector<unsigned char> my_share(n);
   for (int i = 0; i < n; ++i)

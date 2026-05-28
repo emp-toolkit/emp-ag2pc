@@ -2,6 +2,7 @@
 #define __HELPER
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-tool/crypto/ro.h"
+#include "emp-tool/crypto/prg.h"
 #include <future>
 #include <memory>
 #include <type_traits>
@@ -72,6 +73,38 @@ inline uint8_t LSB(const block &b) { return _mm_extract_epi8(b, 0) & 0x1; }
 // invariant LSB1(⊕_p Δ_p) = 1; bit 0 is reserved for share-value encoding
 // (see share_bundle.h).
 inline uint8_t LSB1(const block &b) { return (_mm_extract_epi8(b, 0) >> 1) & 0x1; }
+
+// F_eq (eprint 2018/578): rush-safe equality test on a precomputed digest Dme.
+// P1 commits H(Dme‖r) first, P2 replies with its Dme, then P1 opens (Dme, r) —
+// the commit-before-open order is rush-safe and the nonce r keeps the commitment
+// hiding. Aborts via error(fail_msg) when the two digests differ. The leaky-AND
+// feeds every bucket layer's L-vector into one running Hash and calls this once
+// per reveal segment, so the commit-open costs a single round, not one per layer.
+inline void feq_check(NetIO *io, int party, const char *Dme,
+                      const char *fail_msg) {
+  char Dpeer[Hash::DIGEST_SIZE];
+  if (party == 1) {
+    block r; PRG().random_block(&r, 1);
+    char com[Hash::DIGEST_SIZE];
+    { Hash h; h.put(Dme, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(com); }
+    io->send_data(com, Hash::DIGEST_SIZE);
+    io->recv_data(Dpeer, Hash::DIGEST_SIZE);
+    io->send_data(Dme, Hash::DIGEST_SIZE);
+    io->send_data(&r, sizeof(block)); io->flush();
+  } else {
+    char com[Hash::DIGEST_SIZE], chk[Hash::DIGEST_SIZE];
+    block r;
+    io->recv_data(com, Hash::DIGEST_SIZE);
+    io->send_data(Dme, Hash::DIGEST_SIZE);
+    io->recv_data(Dpeer, Hash::DIGEST_SIZE);
+    io->recv_data(&r, sizeof(block));
+    { Hash h; h.put(Dpeer, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(chk); }
+    if (memcmp(chk, com, Hash::DIGEST_SIZE) != 0)
+      error("F_eq: commit-open mismatch");
+  }
+  if (memcmp(Dme, Dpeer, Hash::DIGEST_SIZE) != 0)
+    error(fail_msg);
+}
 
 // Sequential request/response checks: one channel suffices (party 1 sends,
 // party 2 verifies — party-ordered, so no second socket needed).

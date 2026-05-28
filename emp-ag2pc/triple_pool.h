@@ -26,10 +26,10 @@ using namespace emp;
 // below k=2's bandwidth; raise toward k=8 on a bandwidth-tight link.
 using OTExt = emp::SoftSpoken<4>;
 
-// Leaky-AND (eprint 2018/578, Fig. 5) followed by Π_Prep bucketing + amortized
-// pool: per-triple half-gate garbled-AND with an F_eq consistency check, then
-// circular-shift bucketing to remove leakage (P:aAND). The leaky-AND is batched
-// over LB triples; see produce_leaky_ands_halfgate.
+// Leaky-AND (eprint 2018/578, Fig. 5) followed by Π_aAND bucketing: per-candidate
+// half-gate garbled-AND with an F_eq consistency check, then circular-shift
+// bucketing to remove leakage. The leaky-AND is batched over L candidates; see
+// leaky_and_halfgate.
 //
 // (1) No shared-zero mask. The y-contribution C^me = y·Δ_me ⊕ K[y] ⊕ M[y] is
 //     computed locally; C^A ⊕ C^B = y·(Δ_A⊕Δ_B) holds from the MAC relation,
@@ -44,16 +44,12 @@ using OTExt = emp::SoftSpoken<4>;
 //     all-to-all exchange of the full d-vector, dropping the bucket
 //     combine to one round.
 //
-// Pool semantics:
-//   - compute() is the refill primitive: mints exactly `length` fresh
-//     triples into caller-supplied buffers. Bucket size B drops with
-//     `length` (5 / 4 / 3 at thresholds 3.1K / 280K), so big batches
-//     shrink the per-triple cost — hence the min_refill floor sits at the
-//     bucket-4 threshold (3100) so a small draw never forces a worse bucket.
-//   - draw(n, ...) is the amortized API: pulls n triples from an
-//     internal pool, refilling via compute(min_refill) when short.
-//   - preprocess(n) eagerly mints up to n triples for measured-window
-//     benchmarks.
+// Triple API: compute_inplace is the sole triple primitive (function-dependent,
+// KRRW §5.2 — see its comment). aShares come from draw(); both route through
+// gen_cot_shares, which draws from a COT session held open for the object's
+// lifetime (begin in the ctor, end in the dtor — see init_abit_). No persistent
+// triple pool: each call mints exactly what it needs, abit straight into the
+// caller's buffers.
 class TriplePool {
 public:
   ThreadPool *pool;
@@ -74,15 +70,6 @@ public:
   NetIO *io_abit1, *io_abit2;
   block Delta;
 
-  // AoS-by-triple pool: pool_triples[t] holds the three AShareBundles (a/b/c)
-  // of triple t; share bit s is bit0(.b[s].mac). draw() serves from here.
-  TripleBundleVec pool_triples;
-  size_t cursor = 0;
-  // Floor on the refill batch so small draws still amortize the per-call
-  // overhead. 3100 is the bucket_size=4 threshold, so the floor never forces a
-  // worse bucket; large workloads refill at their own size (≥280K → B=3).
-  size_t min_refill = 3100;
-
   // Borrowing ctor: the caller (C2PC) owns the sibling and threads it in.
   TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party)
       : pool(pool), party(party), io(io), sib(sib),
@@ -97,6 +84,19 @@ public:
         send_io(party == 1 ? io : sib_owned.get()),
         recv_io(party == 1 ? sib_owned.get() : io) {
     init_abit_();
+  }
+
+  // Close the COT sessions opened in init_abit_ (and reopened after the last
+  // reveal by flush_cot_check). end() runs the final segment's deferred
+  // subspace-VOLE check and must fire before abit1/abit2 destruct
+  // (StreamingExtension aborts if torn down mid-session). abit1 (recv_io) and
+  // abit2 (send_io) close on different channels and cross to the peer's opposite
+  // role, so run them concurrently to avoid a cross-party end/end deadlock.
+  ~TriplePool() {
+    vector<future<void>> res;
+    res.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
+    res.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
+    joinNclean(res);
   }
 
   // ===== COT-based aShare generation =====
@@ -118,14 +118,26 @@ public:
     abit2 = std::make_unique<OTExt>(BOB,   io_abit2);
     abit1->set_delta(tmp);
     Delta = abit1->Delta;
+    // Open the COT sessions: begin() does the base-OT bootstrap (first call) and
+    // starts a session; gen_cot_shares then draws via next_n. The session stays
+    // open across compute() calls and is closed (subspace-VOLE check) + reopened
+    // at each reveal by flush_cot_check, so the round-end work amortizes over a
+    // whole reveal segment instead of firing per draw, while still gating output.
+    // begin() must run after set_delta (it consumes Δ) and concurrently on
+    // abit1/abit2 (they bootstrap on different channels, crossing to the peer's
+    // opposite role).
+    vector<future<void>> res;
+    res.push_back(pool->enqueue([this]() { abit1->begin(); io_abit1->flush(); }));
+    res.push_back(pool->enqueue([this]() { abit2->begin(); io_abit2->flush(); }));
+    joinNclean(res);
   }
 
-  // Share generator: mint `count` checked random authenticated shares into the
-  // mac/key spans (one COT session per call — abit1->rcot is begin/next*/end with
-  // a single consistency check). bit0(mac)=x, mac = key ⊕ x·Δ. Pointer form so a
-  // leaky-AND layer can fill a whole region triple (3·L) or just one region (the
-  // in-place representative's fresh r). Shared by the leaky-AND layers,
-  // process_phase1 / draw, and the cut-and-choose path.
+  // Share generator: mint `count` random authenticated shares into the mac/key
+  // spans by drawing from the open COT session (next_n refills the chunk buffer
+  // as needed; the consistency check is deferred to the next reveal's
+  // flush_cot_check, or teardown). bit0(mac)=x, mac = key ⊕ x·Δ. Pointer form so a leaky-AND
+  // layer can fill a whole region triple (3·L) or just one region (the in-place
+  // representative's fresh r). Shared by the leaky-AND layers and draw().
   void gen_cot_shares(block *mac, block *key, int count) {
 #ifdef AG2PC_PROFILE
     int64_t _cot0 = io_count(send_io, recv_io);
@@ -133,11 +145,11 @@ public:
 #endif
     vector<future<void>> res;
     res.push_back(pool->enqueue([this, key, count]() {
-      abit1->rcot(key, count);
+      abit1->next_n(key, count);
       io_abit1->flush();
     }));
     res.push_back(pool->enqueue([this, mac, count]() {
-      abit2->rcot(mac, count);
+      abit2->next_n(mac, count);
       io_abit2->flush();
     }));
     joinNclean(res);
@@ -147,18 +159,32 @@ public:
 #endif
   }
 
-  // One-shot COT extension: mint `length` aShares into MAC/KEY (resized).
-  void process_phase1(BlockVec &MAC, BlockVec &KEY, int length) {
-    MAC.resize(length);
-    KEY.resize(length);
-    gen_cot_shares(MAC.data(), KEY.data(), length);
+  // Run the COT session's deferred consistency check now, then reopen a fresh
+  // session. The caller (C2PC::decode) invokes this before every reveal so the
+  // subspace-VOLE check — which validates every COT minted since the last
+  // begin() — gates output release: a malicious peer's malformed COTs abort here,
+  // before any secret is opened, rather than at teardown. end() carries the only
+  // I/O (sacrificial chunk + check open), so cross abit1/abit2 concurrently as in
+  // the ctor; the immediate begin() just resets the per-session counters (the
+  // base-OT bootstrap already ran), so it is local and adds no round.
+  void flush_cot_check() {
+    vector<future<void>> res;
+    res.push_back(pool->enqueue([this]() {
+      abit1->end(); io_abit1->flush(); abit1->begin();
+    }));
+    res.push_back(pool->enqueue([this]() {
+      abit2->end(); io_abit2->flush(); abit2->begin();
+    }));
+    joinNclean(res);
   }
 
-  // AoS draw: n aShares as AShareBundle{mac,key} (the layout 2pc consumes).
-  // No persistent pool — each call mints fresh, so prefer one large draw.
+  // AoS draw: n aShares as AShareBundle{mac,key} (the layout 2pc consumes for
+  // wire / λ_γ masks). Each call mints fresh from the COT session, so prefer one
+  // large draw. abit hands back two contiguous streams (mac, key); interleaving
+  // them into the AoS bundle is the one unavoidable copy here.
   void draw(int n, AShareBundleVec &out_bundle) {
-    BlockVec tmac, tkey;
-    process_phase1(tmac, tkey, n);
+    BlockVec tmac(n), tkey(n);
+    gen_cot_shares(tmac.data(), tkey.data(), n);
     out_bundle.resize(n);
     for (int i = 0; i < n; ++i) {
       out_bundle[i].mac = tmac[i];
@@ -193,11 +219,6 @@ public:
     return kLeakyAnd == LeakyAnd::HalfGate ? 3 * LB : 3 * cutchoose_T * LB;
   }
 
-  // The CutChoose leaky-AND path lives in its own file (OT multiply, sacrifice,
-  // self-tests). It is #included inside the class so the methods stay inline
-  // TriplePool members; dormant while kLeakyAnd == HalfGate.
-  #include "emp-ag2pc/triple_pool_cutchoose.h"
-
   // ===== Leaky-AND layer primitives (eprint 2018/578, Fig. 5 + P:aAND) =====
   // A "layer" is L candidate triples in SoA region-major order, stride L:
   // region a=[0,L), b=[L,2L), r/c=[2L,3L); the share bit of region g triple i is
@@ -208,16 +229,18 @@ public:
 
   // Half-gate leaky-AND over the L candidates whose 3L authenticated shares are in
   // mac/key. The garbler ships G on send_io; the eval recovers S^me on recv_io and
-  // writes it locally; an s-open folds d into region 2 (r -> c = a∧b) in place; the
-  // F_eq equality check (rush-safe) aborts on a cheating multiplication. The
-  // per-element share bit is just LSB(mac[...]), read inline (cache-hot — mac is
-  // loaded for the hashes anyway), so there is no separate tr array. gmitc/emitc
-  // persist across a bucket's layers (one setS in the caller), so the per-gate
-  // tweak (gid) keeps advancing and never repeats. No COT: the shares are given
-  // (COT and/or copied wire masks), which is why this serves both representative
-  // and sacrifices.
+  // writes it locally; an s-open folds d into region 2 (r -> c = a∧b) in place.
+  // Rather than run the F_eq equality check here, the post-fold L-vector is fed
+  // into the running hash `feq`: the caller hashes every bucket layer in and runs
+  // one batched F_eq (feq_check) after all B layers, since any single inconsistent
+  // layer changes the combined digest. The per-element share bit is just
+  // LSB(mac[...]), read inline (cache-hot — mac is loaded for the hashes anyway),
+  // so there is no separate tr array. gmitc/emitc persist across a bucket's layers
+  // (one setS in the caller), so the per-gate tweak (gid) keeps advancing and never
+  // repeats. No COT: the shares are given (COT and/or copied wire masks), which is
+  // why this serves both representative and sacrifices.
   void leaky_and_halfgate(block *mac, block *key, int L,
-                          MITCCRH<8> &gmitc, MITCCRH<8> &emitc) {
+                          MITCCRH<8> &gmitc, MITCCRH<8> &emitc, Hash &feq) {
     BlockVec Sout(L);
     vector<future<void>> res;
 #ifdef AG2PC_PROFILE
@@ -305,31 +328,10 @@ public:
     uint64_t _fq0 = tp_now_ns();
 #endif
 
-    // F_eq: EQ on D = H(L-vector) (eprint 2018/578). A commits H(x‖r), B sends y,
-    // A opens (x,r); asymmetric order is rush-safe, the nonce keeps it hiding.
-    char Dme[Hash::DIGEST_SIZE], Dpeer[Hash::DIGEST_SIZE];
-    Hash::hash_once(Dme, Sout.data(), (size_t)L * sizeof(block));
-    if (party == 1) {
-      block r; PRG().random_block(&r, 1);
-      char com[Hash::DIGEST_SIZE];
-      { Hash h; h.put(Dme, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(com); }
-      io->send_data(com, Hash::DIGEST_SIZE);
-      io->recv_data(Dpeer, Hash::DIGEST_SIZE);
-      io->send_data(Dme, Hash::DIGEST_SIZE);
-      io->send_data(&r, sizeof(block)); io->flush();
-    } else {
-      char com[Hash::DIGEST_SIZE], chk[Hash::DIGEST_SIZE];
-      block r;
-      io->recv_data(com, Hash::DIGEST_SIZE);
-      io->send_data(Dme, Hash::DIGEST_SIZE);
-      io->recv_data(Dpeer, Hash::DIGEST_SIZE);
-      io->recv_data(&r, sizeof(block));
-      { Hash h; h.put(Dpeer, Hash::DIGEST_SIZE); h.put(&r, sizeof(block)); h.digest(chk); }
-      if (memcmp(chk, com, Hash::DIGEST_SIZE) != 0)
-        error("LaAND F_eq: commit-open mismatch");
-    }
-    if (memcmp(Dme, Dpeer, Hash::DIGEST_SIZE) != 0)
-      error("LaAND F_eq: leaky-AND check failed");
+    // Accumulate this layer's L-vector into the batched F_eq hash. The actual
+    // commit-open equality (feq_check) runs once in the caller after every layer
+    // is folded in — one round instead of one per layer.
+    feq.put(Sout.data(), (size_t)L * sizeof(block));
 #ifdef AG2PC_PROFILE
     g_tp_feq_ns += tp_now_ns() - _fq0;
 #endif
@@ -383,14 +385,15 @@ public:
   // The caller has already filled+leaky'd layer 0 (acc) with gmitc/emitc, which
   // continue here so each layer's tweaks stay distinct.
   void layered_bucket_into_acc(block *am, block *ak, int B,
-                               int L, MITCCRH<8> &gmitc, MITCCRH<8> &emitc) {
+                               int L, MITCCRH<8> &gmitc, MITCCRH<8> &emitc,
+                               Hash &feq) {
     struct Lyr { BlockVec mac, key; };
     std::vector<Lyr> sac(B - 1);
     for (int k = 0; k < B - 1; ++k) {
       sac[k].mac.resize((size_t)3 * L);
       sac[k].key.resize((size_t)3 * L);
       gen_cot_shares(sac[k].mac.data(), sac[k].key.data(), 3 * L);
-      leaky_and_halfgate(sac[k].mac.data(), sac[k].key.data(), L, gmitc, emitc);
+      leaky_and_halfgate(sac[k].mac.data(), sac[k].key.data(), L, gmitc, emitc, feq);
     }
     // Public coin: same labeled (io, sib) digests on both ends -> same S.
     block S = RO("AG2PC RO", zero_block)
@@ -404,48 +407,11 @@ public:
       bucket_one_layer(am, ak, sac[k].mac.data(), sac[k].key.data(), L, rk[k]);
   }
 
-  // Generic half-gate triple generation: layer 0 (the output MAC/KEY, all COT) +
-  // B-1 fresh sacrifice layers, bucketed. Output is the slot-major a/b/c triple in
-  // MAC/KEY (+ AoS out_aos) — identical contract to the old fused compute().
-  void compute_halfgate(block *MAC, block *KEY, int length, TripleBundle *out_aos) {
-    if (length == 0) return;     // AND-free chunk: nothing to mint
-    const int B = get_bucket_size(length);
-    const int L = length;
-    const block pair_seed = makeBlock((uint64_t)std::min(party, 3 - party),
-                                      (uint64_t)std::max(party, 3 - party));
-    MITCCRH<8> gmitc, emitc;
-    gmitc.setS(pair_seed);
-    emitc.setS(pair_seed);
-    AG2PC_TP_BEGIN();
-    gen_cot_shares(MAC, KEY, 3 * L);                          // layer 0 = MAC/KEY
-    leaky_and_halfgate(MAC, KEY, L, gmitc, emitc);
-    AG2PC_TP("layer 0 (gen+leaky)");
-    layered_bucket_into_acc(MAC, KEY, B, L, gmitc, emitc);
-    AG2PC_TP("sacrifice layers + bucket");
-    if (out_aos) {
-      for (int i = 0; i < L; ++i) {
-        out_aos[i].b[0].mac = MAC[i];         out_aos[i].b[0].key = KEY[i];
-        out_aos[i].b[1].mac = MAC[L + i];     out_aos[i].b[1].key = KEY[L + i];
-        out_aos[i].b[2].mac = MAC[2 * L + i]; out_aos[i].b[2].key = KEY[2 * L + i];
-      }
-    }
-#ifdef AG2PC_PROFILE
-    if (party == 1) {
-      const double A = (double)std::max(1, length);
-      printf("[ag2pc-mem] compute_halfgate length=%d bucket=%d (acc + %d sacrifice "
-             "layers, 3L each)\n", length, B, B - 1);
-      ag2pc_mem_row("acc MAC+KEY", 2.0 * 3.0 * (double)L * sizeof(block), A);
-      ag2pc_mem_row("sacrifice", 2.0 * 3.0 * (double)L * sizeof(block) * (B - 1), A);
-      printf("[ag2pc-mem]   peakRSS-so-far %8ld KiB\n", ag2pc_peak_rss_kib());
-    }
-#endif
-  }
-
   // In-place (function-dependent) AND-share generation (KRRW §5.2 bucket-saving).
   // For each AND gate the bucket's representative (layer 0) is the leaky-AND of the
   // gate's OWN input wire masks (rep_a = λ_α, rep_b = λ_β) instead of fresh random
   // (a,b); only its output randomness r is freshly COT'd. The B-1 sacrifice layers
-  // are fresh, exactly as in compute_halfgate. So per gate we mint (3B-2)·num_ands
+  // are fresh generic candidates. So per gate we mint (3B-2)·num_ands
   // COTs (vs 3B·num_ands generic) and the Beaver x/y reconciliation is gone — the
   // representative is already on the real masks. out_sigma[ai] is the authenticated
   // share of σ = λ_α∧λ_β (bit0(mac)=σ, bit0(key)=0), drop-in for the garbler /
@@ -474,11 +440,26 @@ public:
       acc_mac[i]     = rep_a[i].mac;  acc_key[i]     = rep_a[i].key;
       acc_mac[L + i] = rep_b[i].mac;  acc_key[L + i] = rep_b[i].key;
     }
+    // One running F_eq hash over every layer's L-vector; checked once below.
+    Hash feq;
     gen_cot_shares(acc_mac.data() + 2 * L, acc_key.data() + 2 * L, L);   // region r
-    leaky_and_halfgate(acc_mac.data(), acc_key.data(), L, gmitc, emitc);
+    leaky_and_halfgate(acc_mac.data(), acc_key.data(), L, gmitc, emitc, feq);
     AG2PC_TP("in-place layer 0 (rep + r + leaky)");
-    layered_bucket_into_acc(acc_mac.data(), acc_key.data(), B, L, gmitc, emitc);
+    layered_bucket_into_acc(acc_mac.data(), acc_key.data(), B, L, gmitc, emitc, feq);
     AG2PC_TP("sacrifice layers + bucket");
+    // Single batched F_eq for the whole bucket: any one inconsistent layer changes
+    // the combined digest, so this one commit-open replaces the per-layer checks.
+    {
+#ifdef AG2PC_PROFILE
+      uint64_t _fq = tp_now_ns();
+#endif
+      char Dme[Hash::DIGEST_SIZE]; feq.digest(Dme);
+      feq_check(io, party, Dme, "LaAND F_eq: leaky-AND check failed");
+#ifdef AG2PC_PROFILE
+      g_tp_feq_ns += tp_now_ns() - _fq;
+#endif
+    }
+    AG2PC_TP("F_eq (batched)");
     // The bucketing combines the a-inputs, so acc now holds a valid triple
     // (X, Y, Z=X∧Y) with X = λ_α ⊕ Σ(sacrifice a) and Y = λ_β (the b-region is
     // kept, not combined). Reconcile (X,Y) back to (λ_α,λ_β) with the Beaver
@@ -535,68 +516,5 @@ public:
 #endif
   }
 
-  // Mint `length` AND triples into MAC/KEY, slot-major a/b/c: share bit s of
-  // triple k is bit0(MAC[s*length+k]), bit0(KEY)=0. If out_aos is non-null the
-  // triples are also written as AoS TripleBundles (the layout draw() serves).
-  void compute(block *MAC, block *KEY, int length,
-               TripleBundle *out_aos = nullptr) {
-    compute_halfgate(MAC, KEY, length, out_aos);
-  }
-
-  // Vector overload: resize output buffers and dispatch to the pointer-array
-  // implementation. MAC/KEY peer-slots are sized length*3 (slot-major a/b/c).
-  // MAC[party]/KEY[party] are unused; share-bits are recoverable as
-  // bit0(MAC[k]). out_aos forwards as-is.
-  void compute(BlockVec &MAC, BlockVec &KEY, int length,
-               TripleBundle *out_aos = nullptr) {
-    MAC.resize(length * 3);
-    KEY.resize(length * 3);
-    compute(MAC.data(), KEY.data(), length, out_aos);
-  }
-
-  // ==== Pool API ====
-
-  // Available pool entries (i.e. unconsumed triples).
-  size_t available() const { return pool_triples.size() - cursor; }
-
-  void set_min_refill(size_t n) { min_refill = n; }
-
-  // Ensure the pool holds at least n unconsumed triples. Refills via a
-  // single compute(batch) call where batch = max(needed, min_refill).
-  void preprocess(size_t n) {
-    if (available() >= n) return;
-    size_t need = n - available();
-    size_t batch = std::max(need, min_refill);
-    refill_internal(batch);
-  }
-
-  // Pull n triples from the pool. out_triples[i] holds the three slot
-  // bundles (mac, key for every peer) of triple i. Slot s's share-bit is
-  // recoverable as bit0(out_triples[i].b[s].mac).
-  void draw(int n, TripleBundleVec &out_triples) {
-    if (available() < (size_t)n)
-      preprocess(n);
-    out_triples.resize(n);
-    memcpy(out_triples.data(), pool_triples.data() + cursor,
-           n * sizeof(TripleBundle));
-    cursor += n;
-  }
-
-private:
-  // Compact (drop consumed prefix), grow pool_triples by `batch`, then run
-  // compute() with out_aos pointing into the freshly grown slots. Bucketing
-  // writes the AoS bundles in place during its per-row XOR loop; the SoA
-  // tmac/tkey buffers are compute()'s scratch / output for the debug check_MAC
-  // path but the pool no longer reads them post-compute.
-  void refill_internal(size_t batch) {
-    if (cursor > 0) {
-      pool_triples.erase(pool_triples.begin(), pool_triples.begin() + cursor);
-      cursor = 0;
-    }
-    size_t base = pool_triples.size();
-    pool_triples.resize(base + batch);
-    BlockVec tmac, tkey;
-    compute(tmac, tkey, (int)batch, pool_triples.data() + base);
-  }
 };
 #endif // TRIPLE_POOL_H__
