@@ -3,8 +3,10 @@
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-tool/crypto/ro.h"
 #include "emp-tool/crypto/prg.h"
+#include <condition_variable>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -52,6 +54,73 @@ inline void _phase(const char *name, int party) {
   _pt = clock_start();
 }
 #endif
+
+// Bounded single-producer / single-consumer pipe of T values, used to overlap a
+// blocking IO call with compute on the *same* socket: one thread runs the IO,
+// the other runs compute, the pipe holds the chunks in flight. At depth N (the
+// default 2 is enough for one-step lookahead) the producer can fill slot k+1
+// while the consumer drains slot k.
+//
+// Producer side (one thread): producer_slot() blocks until a slot is free and
+// returns it for filling; producer_publish() marks it full and wakes the
+// consumer; producer_close() declares no more chunks will come. Consumer side
+// (one thread): consumer_slot() blocks until a slot is full (or the producer
+// has closed and the pipe is drained, in which case it returns nullptr);
+// consumer_release() marks the consumed slot free and wakes the producer.
+//
+// Slots are pre-constructed once via the Init callback so a chunk's buffers can
+// be sized to the per-call cap up front (no allocation in the hot path).
+template <typename T>
+class chunk_pipe {
+public:
+  template <typename Init>
+  chunk_pipe(size_t depth, Init init) : slots_(depth) {
+    for (auto &s : slots_) init(s);
+  }
+
+  T &producer_slot() {
+    std::unique_lock<std::mutex> lk(mu_);
+    cv_free_.wait(lk, [&] { return count_ < slots_.size(); });
+    return slots_[(consumer_head_ + count_) % slots_.size()];
+  }
+  void producer_publish() {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      ++count_;
+    }
+    cv_full_.notify_one();
+  }
+  void producer_close() {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      closed_ = true;
+    }
+    cv_full_.notify_one();
+  }
+
+  T *consumer_slot() {
+    std::unique_lock<std::mutex> lk(mu_);
+    cv_full_.wait(lk, [&] { return count_ > 0 || closed_; });
+    if (count_ == 0) return nullptr;            // drained + closed
+    return &slots_[consumer_head_];
+  }
+  void consumer_release() {
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      consumer_head_ = (consumer_head_ + 1) % slots_.size();
+      --count_;
+    }
+    cv_free_.notify_one();
+  }
+
+private:
+  std::vector<T> slots_;
+  size_t consumer_head_ = 0;
+  size_t count_ = 0;
+  bool closed_ = false;
+  std::mutex mu_;
+  std::condition_variable cv_full_, cv_free_;
+};
 
 template <typename T> void joinNclean(vector<future<T>> &res) {
   for (auto &v : res)

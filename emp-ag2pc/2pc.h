@@ -349,81 +349,97 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
   auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
-  {
-    // Ship G in chunks of kGarbleChunk AND gates (in and_index order) so the
-    // full-circuit G buffer never materializes; the send is one-directional
-    // (P2 -> P1), so chunking adds flushes but no extra rounds.
-    const int C = kGarbleChunk;
-    const int cap = std::min(C, num_ands);
-    BlockVec G_chunk(2 * cap);
-    std::vector<unsigned char> b_chunk(party == 2 ? cap : 0);
+  // Ship G in chunks of kGarbleChunk AND gates (in and_index order) so the
+  // full-circuit G buffer never materializes; the send is one-directional
+  // (P2 -> P1), so chunking adds flushes but no extra rounds. The compute
+  // (this thread) fills chunks into the pipe; a pool thread drains them with
+  // blocking send + flush, so the next chunk's hashes overlap the previous
+  // chunk's send.
+  struct GarbleChunk {
+    BlockVec G;
+    std::vector<unsigned char> b;
     int nfilled = 0;
-    auto flush_chunk = [&]() {
-      if (nfilled == 0) return;
-      send_io->send_data(G_chunk.data(), (size_t)2 * nfilled * sizeof(block));
-      if (party == 2) send_io->send_data(b_chunk.data(), nfilled);
+  };
+  const int C = kGarbleChunk;
+  const int cap = std::min(C, num_ands);
+  chunk_pipe<GarbleChunk> pipe(2, [&](GarbleChunk &c) {
+    c.G.resize(2 * cap);
+    if (party == 2) c.b.resize(cap);
+  });
+  auto sender_fut = pool->enqueue([&] {
+    while (auto *slot = pipe.consumer_slot()) {
+      send_io->send_data(slot->G.data(), (size_t)2 * slot->nfilled * sizeof(block));
+      if (party == 2) send_io->send_data(slot->b.data(), slot->nfilled);
       send_io->flush();
-      nfilled = 0;
-    };
-
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      int in0 = g.in0, in1 = g.in1, out = g.out;
-      if (!g.is_and()) {
-        if (g.is_not()) {
-          LABEL(out) = LABEL(in0) ^ Delta;
-          WIRE(out) = WIRE(in0);
-        } else {  // XOR
-          LABEL(out) = LABEL(in0) ^ LABEL(in1);
-          // Recompute fabric share into its (recycled) slot for downstream ANDs.
-          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-        }
-        continue;
-      }
-      int ai = g.and_index();
-      block ml_a0 = LABEL(in0), ml_a1 = ml_a0 ^ Delta;
-      block ml_b0 = LABEL(in1), ml_b1 = ml_b0 ^ Delta;
-
-      // Single garbler's (s=2,d=2) self hashes. gid auto-increment mode: one
-      // hash_cir per AND (K=1), so the key counter stays in lockstep with the
-      // evaluator's hash_cir<1,2> and both derive the same per-gate tweak; the
-      // key schedule batches 8-wide every 8 gates inside MITCCRH.
-      block buf[4] = {ml_a0, ml_a1, ml_b0, ml_b1};
-      mitc.template hash_cir<1, 4>(buf);
-
-      const AShareBundle &wb_in0 = WIRE(in0);
-      const AShareBundle &wb_in1 = WIRE(in1);
-      const AShareBundle &wb_out = WIRE(out);
-      const AShareBundle &sb     = sigma[ai];
-
-      // Single garbler (d == party == 2): only the self tweak fires, so the
-      // four self hashes are just buf[0..3]; no cross-garbler S terms.
-      block H_a0_self = buf[0], H_a1_self = buf[1];
-      block H_b0_self = buf[2], H_b1_self = buf[3];
-
-      block sumK_a  = wb_in0.key;
-      block sumK_b  = wb_in1.key;
-      block sumK_ab = sb.key;
-      block sumK_g  = wb_out.key;
-      // λ_w^i is bit0(mac). Branchless: select_mask[bit] gives 0 or all-ones,
-      // so (Δ & select_mask[bit]) collapses to bit ? Δ : 0.
-      block la_dot  = select_mask[LSB(wb_in0.mac)] & Delta;
-      block lb_dot  = select_mask[LSB(wb_in1.mac)] & Delta;
-      block lab_dot = select_mask[LSB(sb.mac)]     & Delta;
-      block lg_dot  = select_mask[LSB(wb_out.mac)] & Delta;
-
-      block G0 = H_a0_self ^ H_a1_self ^ sumK_b ^ lb_dot;
-      block G1 = H_b0_self ^ H_b1_self ^ ml_a0 ^ sumK_a ^ la_dot;
-      block ml_g0 = H_a0_self ^ H_b0_self ^ sumK_ab ^ lab_dot ^ sumK_g ^ lg_dot;
-
-      LABEL(out) = ml_g0;
-      G_chunk[2 * nfilled]     = G0;
-      G_chunk[2 * nfilled + 1] = G1;
-      if (party == 2) b_chunk[nfilled] = (unsigned char)(LSB1(ml_g0));
-      if (++nfilled == C) flush_chunk();
+      pipe.consumer_release();
     }
-    flush_chunk();
+  });
+
+  GarbleChunk *cur = &pipe.producer_slot();
+  cur->nfilled = 0;
+  for (int gi = 0; gi < cf->num_gate; ++gi) {
+    const Gate &g = cf->gates[gi];
+    int in0 = g.in0, in1 = g.in1, out = g.out;
+    if (!g.is_and()) {
+      if (g.is_not()) {
+        LABEL(out) = LABEL(in0) ^ Delta;
+        WIRE(out) = WIRE(in0);
+      } else {  // XOR
+        LABEL(out) = LABEL(in0) ^ LABEL(in1);
+        // Recompute fabric share into its (recycled) slot for downstream ANDs.
+        xor_share(WIRE(out), WIRE(in0), WIRE(in1));
+      }
+      continue;
+    }
+    int ai = g.and_index();
+    block ml_a0 = LABEL(in0), ml_a1 = ml_a0 ^ Delta;
+    block ml_b0 = LABEL(in1), ml_b1 = ml_b0 ^ Delta;
+
+    // Single garbler's (s=2,d=2) self hashes. gid auto-increment mode: one
+    // hash_cir per AND (K=1), so the key counter stays in lockstep with the
+    // evaluator's hash_cir<1,2> and both derive the same per-gate tweak; the
+    // key schedule batches 8-wide every 8 gates inside MITCCRH.
+    block buf[4] = {ml_a0, ml_a1, ml_b0, ml_b1};
+    mitc.template hash_cir<1, 4>(buf);
+
+    const AShareBundle &wb_in0 = WIRE(in0);
+    const AShareBundle &wb_in1 = WIRE(in1);
+    const AShareBundle &wb_out = WIRE(out);
+    const AShareBundle &sb     = sigma[ai];
+
+    // Single garbler (d == party == 2): only the self tweak fires, so the
+    // four self hashes are just buf[0..3]; no cross-garbler S terms.
+    block H_a0_self = buf[0], H_a1_self = buf[1];
+    block H_b0_self = buf[2], H_b1_self = buf[3];
+
+    block sumK_a  = wb_in0.key;
+    block sumK_b  = wb_in1.key;
+    block sumK_ab = sb.key;
+    block sumK_g  = wb_out.key;
+    // λ_w^i is bit0(mac). Branchless: select_mask[bit] gives 0 or all-ones,
+    // so (Δ & select_mask[bit]) collapses to bit ? Δ : 0.
+    block la_dot  = select_mask[LSB(wb_in0.mac)] & Delta;
+    block lb_dot  = select_mask[LSB(wb_in1.mac)] & Delta;
+    block lab_dot = select_mask[LSB(sb.mac)]     & Delta;
+    block lg_dot  = select_mask[LSB(wb_out.mac)] & Delta;
+
+    block G0 = H_a0_self ^ H_a1_self ^ sumK_b ^ lb_dot;
+    block G1 = H_b0_self ^ H_b1_self ^ ml_a0 ^ sumK_a ^ la_dot;
+    block ml_g0 = H_a0_self ^ H_b0_self ^ sumK_ab ^ lab_dot ^ sumK_g ^ lg_dot;
+
+    LABEL(out) = ml_g0;
+    cur->G[2 * cur->nfilled]     = G0;
+    cur->G[2 * cur->nfilled + 1] = G1;
+    if (party == 2) cur->b[cur->nfilled] = (unsigned char)(LSB1(ml_g0));
+    if (++cur->nfilled == C) {
+      pipe.producer_publish();
+      cur = &pipe.producer_slot();
+      cur->nfilled = 0;
+    }
   }
+  if (cur->nfilled > 0) pipe.producer_publish();
+  pipe.producer_close();
+  sender_fut.get();
 }
 
 // Step 10: P1 evaluates each gate topologically, recovering eval-labels and the
@@ -437,70 +453,91 @@ void C2PC::p1_evaluate(ComputeCtx &ctx) {
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
   const int num_ands = ctx.num_ands;
-  // Stream the garbled tables: recv one kGarbleChunk-AND-gate chunk at a time,
-  // on demand as evaluation reaches each AND gate (in and_index order), so the
-  // full-circuit G buffer never materializes.
+  // Stream the garbled tables: a pool thread blocks on recv one
+  // kGarbleChunk-AND-gate chunk at a time and hands it to the compute loop via
+  // the pipe; the compute loop drains chunks in and_index order. The depth-2
+  // pipe lets the next chunk arrive while the current one is being evaluated,
+  // so the recv stall overlaps the per-AND hash work.
+  struct EvalChunk {
+    BlockVec G;
+    std::vector<unsigned char> b;
+    int len = 0;
+  };
   const int C = kGarbleChunk;
   const int cap = std::min(C, num_ands);
-  BlockVec G_chunk(2 * cap);
-  std::vector<unsigned char> b_chunk(cap);
-  int chunk_base = 0, chunk_len = 0;   // current chunk covers ai in [base, base+len)
-  {
-    for (int gi = 0; gi < cf->num_gate; ++gi) {
-      const Gate &g = cf->gates[gi];
-      int in0 = g.in0, in1 = g.in1, out = g.out;
-      if (!g.is_and()) {
-        if (g.is_not()) {
-          mask_input[out] = mask_input[in0] ^ 1;
-          EVAL(out) = EVAL(in0);
-          WIRE(out) = WIRE(in0);
-        } else {  // XOR
-          EVAL(out) = EVAL(in0) ^ EVAL(in1);
-          mask_input[out] = mask_input[in0] ^ mask_input[in1];
-          // Recompute fabric share for the per-AND Mr term below.
-          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-        }
-      } else {  // AND
-        int ai = g.and_index();
-        if (ai >= chunk_base + chunk_len) {        // pull the next garbled-table chunk
-          chunk_base += chunk_len;
-          chunk_len = std::min(C, num_ands - chunk_base);
-          recv_io->recv_data(G_chunk.data(), (size_t)2 * chunk_len * sizeof(block));
-          recv_io->recv_data(b_chunk.data(), chunk_len);
-        }
-        const int loc = ai - chunk_base;
-        bool La = mask_input[in0], Lb = mask_input[in1];
-        const AShareBundle &wb_in0 = WIRE(in0);
-        const AShareBundle &wb_in1 = WIRE(in1);
-        const AShareBundle &wb_out = WIRE(out);
-        const AShareBundle &sb     = sigma[ai];
-        block Mr;  // M_2[r^1]: the single (sender=1, receiver=2) cross term
-        { block t = sb.mac ^ wb_out.mac;
-          t = t ^ (select_mask[La] & wb_in1.mac);
-          t = t ^ (select_mask[Lb] & wb_in0.mac);
-          Mr = t;
-        }
-        // Pass 1: the single garbler's (s=2, d=2) self hashes — one hash_cir
-        // (gid auto-increment, lockstep with the garbler); cache for pass 2.
-        block self_Ha, self_Hb;
-        { block buf[2] = {EVAL(in0), EVAL(in1)};
-          mitc.template hash_cir<1, 2>(buf);
-          self_Ha = buf[0];
-          self_Hb = buf[1];
-        }
-        // Pass 2: combine the cached self hashes with G + the Mr cross term to
-        // produce the eval-label at out.
-        { block t = self_Ha ^ self_Hb;
-          t = t ^ (select_mask[La] & G_chunk[2 * loc]);
-          t = t ^ (select_mask[Lb] & (G_chunk[2 * loc + 1] ^ EVAL(in0)));
-          t = t ^ Mr;  // the single cross term (sender s = 1, receiver = 2)
-          EVAL(out) = t;
-        }
-        mask_input[out] =
-            (unsigned char)(b_chunk[loc] ^ LSB1(EVAL(out)));
-      }
+  chunk_pipe<EvalChunk> pipe(2, [&](EvalChunk &c) {
+    c.G.resize(2 * cap);
+    c.b.resize(cap);
+  });
+  auto recv_fut = pool->enqueue([&] {
+    int recv_base = 0;
+    while (recv_base < num_ands) {
+      EvalChunk &slot = pipe.producer_slot();
+      slot.len = std::min(C, num_ands - recv_base);
+      recv_io->recv_data(slot.G.data(), (size_t)2 * slot.len * sizeof(block));
+      recv_io->recv_data(slot.b.data(), slot.len);
+      pipe.producer_publish();
+      recv_base += slot.len;
     }
+    pipe.producer_close();
+  });
+
+  EvalChunk *cur = nullptr;
+  int loc = 0;  // ai within cur (0 .. cur->len)
+  for (int gi = 0; gi < cf->num_gate; ++gi) {
+    const Gate &g = cf->gates[gi];
+    int in0 = g.in0, in1 = g.in1, out = g.out;
+    if (!g.is_and()) {
+      if (g.is_not()) {
+        mask_input[out] = mask_input[in0] ^ 1;
+        EVAL(out) = EVAL(in0);
+        WIRE(out) = WIRE(in0);
+      } else {  // XOR
+        EVAL(out) = EVAL(in0) ^ EVAL(in1);
+        mask_input[out] = mask_input[in0] ^ mask_input[in1];
+        // Recompute fabric share for the per-AND Mr term below.
+        xor_share(WIRE(out), WIRE(in0), WIRE(in1));
+      }
+      continue;
+    }
+    if (cur == nullptr || loc == cur->len) {     // drain the next chunk
+      if (cur != nullptr) pipe.consumer_release();
+      cur = pipe.consumer_slot();                // recv side has more by induction
+      loc = 0;
+    }
+    bool La = mask_input[in0], Lb = mask_input[in1];
+    const AShareBundle &wb_in0 = WIRE(in0);
+    const AShareBundle &wb_in1 = WIRE(in1);
+    const AShareBundle &wb_out = WIRE(out);
+    const AShareBundle &sb     = sigma[g.and_index()];
+    block Mr;  // M_2[r^1]: the single (sender=1, receiver=2) cross term
+    { block t = sb.mac ^ wb_out.mac;
+      t = t ^ (select_mask[La] & wb_in1.mac);
+      t = t ^ (select_mask[Lb] & wb_in0.mac);
+      Mr = t;
+    }
+    // Pass 1: the single garbler's (s=2, d=2) self hashes — one hash_cir
+    // (gid auto-increment, lockstep with the garbler); cache for pass 2.
+    block self_Ha, self_Hb;
+    { block buf[2] = {EVAL(in0), EVAL(in1)};
+      mitc.template hash_cir<1, 2>(buf);
+      self_Ha = buf[0];
+      self_Hb = buf[1];
+    }
+    // Pass 2: combine the cached self hashes with G + the Mr cross term to
+    // produce the eval-label at out.
+    { block t = self_Ha ^ self_Hb;
+      t = t ^ (select_mask[La] & cur->G[2 * loc]);
+      t = t ^ (select_mask[Lb] & (cur->G[2 * loc + 1] ^ EVAL(in0)));
+      t = t ^ Mr;  // the single cross term (sender s = 1, receiver = 2)
+      EVAL(out) = t;
+    }
+    mask_input[out] =
+        (unsigned char)(cur->b[loc] ^ LSB1(EVAL(out)));
+    ++loc;
   }
+  if (cur != nullptr) pipe.consumer_release();
+  recv_fut.get();
 }
 
 // KRRW Figure 3 correctness check (steps 6-8), specialized to 2 parties. After
