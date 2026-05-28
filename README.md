@@ -195,14 +195,27 @@ arrays) in its own brace block so the wires die before the next
 fits a small box). `test_keep_all` is the smoke test that verifies the
 `{ Bit b; }`-style drop actually happens.
 
+Per-chunk peak memory scales as `≈ 400 · A + 40 · X` bytes (ignoring inputs)
+where `A` and `X` are the per-chunk AND and XOR gate counts. The AND term
+covers the triple-gen transient (~192 B/AND), the per-AND share bundles
+(rep / λ_γ / σ ≈ 128 B/AND), and the wire-slot / label arrays (~80 B/AND); the
+XOR term is just the recorder log + per-wire metadata (the existing
+fabric-slot reuse keeps XORs out of the heavy AShareBundle arrays). So picking
+`K` to keep `400 · A_chunk + 40 · X_chunk` under your memory budget bounds the
+whole run — and a circuit's AND/XOR mix tells you which term dominates.
+
 ## How it works
 
 The stack is three header layers, each consuming the one below:
 
-- **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend`. Authenticated
-  garbling is multi-pass, so it records the frontend into a `WireGraph` and
-  runs the protocol once. `checkpoint_ag2pc(keep, n)` flushes a long
-  composition (e.g. AES ×k) into one chunk so gate-list memory stays bounded.
+- **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend` over the 4-byte
+  `AG2PCWire` carrier (RAII-refcounted via a backend singleton). Authenticated
+  garbling is multi-pass, so it records the frontend into per-wire flat metadata
+  arrays + a per-chunk gate log, and runs the protocol per chunk. Slot ids
+  released by dead `Bit`s return to a free list and are reused at the next
+  chunk boundary. `checkpoint_ag2pc_keep_all()` flushes a long composition
+  (e.g. AES ×k) — carries every wire still pinned by a live `Bit`, drops the
+  rest — so per-chunk peak memory is bounded.
 - **`C2PC`** (`2pc.h`) — the protocol: `process_input` shares inputs, `compute`
   garbles/evaluates the circuit with the half-gate construction and runs the
   malicious checks (the leaky-AND `F_eq` and the KRRW Fig. 3 `c_γ` check),
