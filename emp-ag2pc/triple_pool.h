@@ -58,12 +58,10 @@ public:
   // Statistical security parameter: get_bucket_size targets residual leakage
   // ≤ 2^{-ssp} when picking B (see its comment for the bound).
   int ssp;
-  // io = primary channel (sequential comm). sib_owned holds the spawned sibling
-  // when this object created it (the one-io ctor); it's null when a sibling was
-  // handed in. send_io/recv_io alias (io, sib) by party for the duplex sites.
-  NetIO *io;
-  std::unique_ptr<NetIO> sib_owned;
-  NetIO *sib, *send_io, *recv_io;
+  // io = primary channel (sequential comm); sib = the caller-owned second
+  // channel paired with io. send_io/recv_io alias (io, sib) by party for the
+  // duplex sites.
+  NetIO *io, *sib, *send_io, *recv_io;
   // aShare / leaky-AND COT mesh. abit1 is the OT-sender (ALICE, produces KEY),
   // abit2 the OT-receiver (BOB, produces MAC) with MAC = KEY ⊕ x·Δ and
   // bit0(MAC)=x. Their sockets adapt to the backend's extend direction
@@ -79,19 +77,11 @@ public:
   // gates in between — skip the subspace-VOLE round trip entirely.
   bool cots_minted_since_check_ = false;
 
-  // Borrowing ctor: the caller owns the sibling channel and threads it in.
+  // The caller owns both io and the paired sib channel and threads them in;
+  // C2PC spawns the sib and passes it along (see 2pc.h).
   TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party, int ssp = 40)
       : pool(pool), party(party), ssp(ssp), io(io), sib(sib),
         send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io) {
-    init_abit_();
-  }
-
-  // Owning ctor: spawn (and own) the sibling channel from the single io.
-  TriplePool(NetIO *io, ThreadPool *pool, int party, int ssp = 40)
-      : pool(pool), party(party), ssp(ssp), io(io),
-        sib_owned(io->make_sibling()), sib(sib_owned.get()),
-        send_io(party == 1 ? io : sib_owned.get()),
-        recv_io(party == 1 ? sib_owned.get() : io) {
     init_abit_();
   }
 

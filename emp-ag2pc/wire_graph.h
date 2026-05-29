@@ -9,12 +9,13 @@ namespace emp {
 // BristolFormat, it states inputs / outputs explicitly rather than by position:
 //   - inputs occupy wire ids [0, num_in) and are grouped per owner, so a
 //     recording frontend batches all owners into one process_inputs call;
-//   - outputs are an explicit (wire-id, recipient) list — no "last n3" tail
-//     convention and no synthesized routing gates;
+//   - outputs are an explicit wire-id list (recipient is supplied to decode()
+//     by the caller, not stored here) — no "last n3" tail convention and no
+//     synthesized routing gates;
 //   - public constants are realized as ordinary gates by the producer (e.g. the
 //     recorder synthesizes c=0 via XOR(w,w)), so there is nothing special here;
-//   - last_use is optional neutral liveness metadata (Stage C): last_use[w] =
-//     largest gate index reading w as an input, -1 if never read, INT_MAX-style
+//   - last_use is optional neutral liveness metadata: last_use[w] = largest
+//     gate index reading w as an input, -1 if never read, INT_MAX-style
 //     "pinned" left to the consumer. Each backend overlays its own pin policy
 //     (ag2pc pins AND-incident/outputs; GMW pins per level).
 //
@@ -41,9 +42,8 @@ struct WireGraph {
   std::vector<InGroup> inputs;      // grouped per owner; together cover [0,num_in)
 
   std::vector<int> output_ids;      // wire id of each revealed output
-  std::vector<int> output_to;       // recipient party for each output (parallel)
 
-  std::vector<int> last_use;        // Stage C; empty until then
+  std::vector<int> last_use;        // optional: per-wire last-read gate index
 
   int num_gate() const { return (int)gates.size(); }
   int num_in() const {

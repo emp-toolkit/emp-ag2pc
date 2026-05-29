@@ -21,17 +21,6 @@ struct AShareBundle {
 using AShareBundleVec =
     std::vector<AShareBundle, default_init_allocator<AShareBundle>>;
 
-// AoS-by-triple packing: three AShareBundles back-to-back, one per share-slot
-// of an AND triple, laid out contiguously per triple so a consumer reading
-// slot 2 / 1 / 0 of the same triple walks sequential memory (good for HW
-// prefetch).
-struct TripleBundle {
-  AShareBundle b[3];
-};
-
-using TripleBundleVec =
-    std::vector<TripleBundle, default_init_allocator<TripleBundle>>;
-
 // Per-wire authenticated-share + half-gate state (the bundle the protocol carries
 // per wire). Notation (Pi = local):
 //   wire_bundle[w]   = (M_j[λ_w^i], K_i[λ_w^j]) for the single peer j ≠ i, in the
@@ -62,16 +51,6 @@ struct SecureWires {
     if (!label0.empty())
       r.label0.assign(label0.begin() + lo, label0.begin() + hi);
     return r;
-  }
-
-  // In-place concatenation (no copy of *this).
-  void append(const SecureWires &b) {
-    Lambda.insert(Lambda.end(), b.Lambda.begin(), b.Lambda.end());
-    wire_bundle.insert(wire_bundle.end(), b.wire_bundle.begin(),
-                       b.wire_bundle.end());
-    eval_label.insert(eval_label.end(), b.eval_label.begin(),
-                      b.eval_label.end());
-    label0.insert(label0.end(), b.label0.begin(), b.label0.end());
   }
 };
 

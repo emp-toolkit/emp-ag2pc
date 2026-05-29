@@ -97,10 +97,6 @@ public:
   // `recipient`; empty vector at non-recipients.
   std::vector<bool> decode(const SecureWires &wires, int recipient);
 
-  // Concatenate two SecureWires bundles wire-by-wire.
-  static SecureWires concat(const SecureWires &a,
-                                const SecureWires &b);
-
 private:
   // Per-call scratch shared across the protocol-step methods below. The heavy
   // arrays size to num_slots (slot-reuse, see circuit_layout.h), not num_wire;
@@ -160,13 +156,6 @@ private:
 // ==========================================================================
 // Implementation
 // ==========================================================================
-
-SecureWires C2PC::concat(const SecureWires &a,
-                                       const SecureWires &b) {
-  SecureWires r = a;
-  r.append(b);
-  return r;
-}
 
 std::vector<SecureWires> C2PC::process_inputs(
     const std::vector<int> &owners,

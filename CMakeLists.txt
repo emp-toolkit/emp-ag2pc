@@ -17,7 +17,6 @@ endif()
 # Options
 # ---------------------------------------------------------------------
 option(EMP_AG2PC_BUILD_TESTS "Build emp-ag2pc tests"      ${PROJECT_IS_TOP_LEVEL})
-option(EMP_AG2PC_DEBUG       "Enable internal MAC / correctness checks (defines EMP_DEBUG_PHASE)" OFF)
 
 # ---------------------------------------------------------------------
 # Dependencies
@@ -45,10 +44,6 @@ target_include_directories(emp-ag2pc INTERFACE
 target_link_libraries(emp-ag2pc INTERFACE
     emp-tool::emp-tool
     emp-ot::emp-ot)
-
-if(EMP_AG2PC_DEBUG)
-    target_compile_definitions(emp-ag2pc INTERFACE EMP_DEBUG_PHASE)
-endif()
 
 # ---------------------------------------------------------------------
 # Tests

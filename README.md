@@ -91,7 +91,6 @@ cmake -S emp-ag2pc -B emp-ag2pc/build \
 | Option | Default | Effect |
 |---|---|---|
 | `EMP_AG2PC_BUILD_TESTS` | `ON` when top-level | Build the test suite under `test/`. |
-| `EMP_AG2PC_DEBUG`       | `OFF`               | Compile in the internal MAC / correctness checks (`EMP_DEBUG_PHASE`). |
 
 ## Consuming from another CMake project
 

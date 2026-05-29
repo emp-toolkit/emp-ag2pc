@@ -52,7 +52,6 @@ int main(int argc, char **argv) {
   push(5, 2, 6, XOR_GATE);
   g.num_ands = ai;
   g.output_ids = {6};
-  g.output_to = {1};
 
   SecureWires outw = mpc.compute(g, {ba, bb});
   vector<bool> res = mpc.decode(outw, /*recipient=*/1);

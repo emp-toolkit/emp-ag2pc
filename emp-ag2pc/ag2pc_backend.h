@@ -83,7 +83,6 @@ class AG2PCBackend : public Backend {
   // c0 = XOR(w0,w0), c1 = NOT c0 — so a constant may legally appear before any
   // input is fed.
   void public_label(void *out, bool b) override {
-    if (b) used_c1_ = true; else used_c0_ = true;
     *static_cast<AG2PCWire *>(out) = AG2PCWire(b ? kConst1 : kConst0);
   }
 
@@ -103,7 +102,7 @@ class AG2PCBackend : public Backend {
     rec.bits.assign(in, in + n);
     rec.ids.resize(n);
     for (size_t i = 0; i < n; ++i) {
-      int id = alloc_id_(OP_INPUT, -1, -1);
+      int id = alloc_id_();
       rec.ids[i] = id;
       *(static_cast<AG2PCWire *>(out) + i) = AG2PCWire(id);
     }
@@ -112,20 +111,20 @@ class AG2PCBackend : public Backend {
 
   void and_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
-    int o = alloc_id_(OP_AND, a, b);
+    int o = alloc_id_();
     chunk_gates_.push_back({a, b, o, Gate::AND_PENDING});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
     ++ands_;
   }
   void xor_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
-    int o = alloc_id_(OP_XOR, a, b);
+    int o = alloc_id_();
     chunk_gates_.push_back({a, b, o, Gate::XOR_TAG});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
   }
   void not_gate(void *out, const void *in) override {
     int a = id_of_(in);
-    int o = alloc_id_(OP_NOT, a, -1);
+    int o = alloc_id_();
     chunk_gates_.push_back({a, 0, o, Gate::NOT_TAG});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
   }
@@ -182,14 +181,12 @@ class AG2PCBackend : public Backend {
   }
 
  private:
-  enum WireOp : uint8_t {
-    OP_NONE = 0, OP_INPUT, OP_AND, OP_XOR, OP_NOT, OP_CONST,
-  };
-
+  // 5 bytes (8 with alignment) per recorder slot — `alive` distinguishes
+  // "allocated, in use" from "free / never allocated"; `refcount` is the
+  // user-side Bit handle count.
   struct WireMeta {
     uint32_t refcount = 0;
-    uint8_t  op = OP_NONE;
-    int      parents[2] = {-1, -1};   // -1 = no parent / sentinel
+    bool     alive = false;
   };
 
   // Per-alive-id authenticated state carried across chunks (sparse — only
@@ -215,7 +212,6 @@ class AG2PCBackend : public Backend {
   std::vector<InputRec> chunk_inputs_;          // current-chunk input registrations
   int next_id_ = 0;                             // gid for never-allocated slots
   uint64_t ands_ = 0;
-  bool used_c0_ = false, used_c1_ = false;
   // Count of slots whose refcount hit 0 mid-chunk; their ids stay reserved
   // until the next checkpoint, then are pushed to free_ids_ in bulk.
   size_t free_buffered_dead_ = 0;
@@ -227,7 +223,7 @@ class AG2PCBackend : public Backend {
 
   // Allocate a slot id for a new wire. Prefer free_ids_ (slot-reuse) for
   // cache compactness; otherwise grow meta_ by one entry.
-  int alloc_id_(WireOp op, int p0, int p1) {
+  int alloc_id_() {
     int id;
     if (!free_ids_.empty()) {
       id = free_ids_.back();
@@ -237,9 +233,7 @@ class AG2PCBackend : public Backend {
       id = next_id_++;
       meta_.emplace_back();
     }
-    meta_[id].op = (uint8_t)op;
-    meta_[id].parents[0] = p0;
-    meta_[id].parents[1] = p1;
+    meta_[id].alive = true;
     return id;
   }
 
@@ -285,7 +279,7 @@ class AG2PCBackend : public Backend {
     if (free_buffered_dead_ == 0) return;
     for (int id = 0; id < (int)meta_.size(); ++id) {
       WireMeta &m = meta_[id];
-      if (m.refcount == 0 && m.op != OP_NONE) {
+      if (m.refcount == 0 && m.alive) {
         free_ids_.push_back(id);
         carried_.erase(id);
         m = WireMeta{};
@@ -306,7 +300,7 @@ class AG2PCBackend : public Backend {
   // 10 M chunk-local wires. The chunk's gate list is moved (not copied) into
   // g.gates and compacted in place, so we never hold two 57 M-entry gate
   // vectors at once.
-  SecureWires run_chunk_() {
+  void run_chunk_() {
     const int N = (int)meta_.size();
     const int G = (int)chunk_gates_.size();
 
@@ -469,7 +463,6 @@ class AG2PCBackend : public Backend {
     g.num_wire = cid;
     g.output_ids.reserve(all_out_recorder.size());
     for (int id : all_out_recorder) g.output_ids.push_back(remap[id]);
-    g.output_to.assign(g.output_ids.size(), 0);
 
     // 6. Liveness + AND-index numbering. Same shape as the old run_chunk;
     //    operates on the compact WireGraph.
@@ -492,10 +485,7 @@ class AG2PCBackend : public Backend {
 
     // 9. Consume per-chunk state; reclaim dead slots onto the free list.
     chunk_inputs_.clear();
-    used_c0_ = used_c1_ = false;
     reclaim_dead_slots_();
-
-    return SecureWires{};
   }
 };
 
