@@ -38,7 +38,7 @@ using TripleBundleVec =
 //                      bundle's .mac / .key fields.
 //   λ_w^i            = LSB(wire_bundle[w].mac) — implicit (bit0(M)=x, bit0(K)=0).
 //   Lambda[w]        = Λ_w           (publicly opened mask; set at every party
-//                                     after process_input or compute)
+//                                     after process_inputs or compute)
 //   label0[w]        = m_{w,0}^1     only at the garbler P1; empty at the evaluator P2
 //   eval_label[w]    = m_{w,Λ_w}^1   only at the evaluator P2; empty at the garbler P1
 // MAC relation: M_j[λ_w^i] = K_j[λ_w^i] ⊕ λ_w^i · Δ_j.
@@ -51,7 +51,7 @@ struct SecureWires {
   size_t size() const { return Lambda.size(); }
 
   // Extract wires [lo, hi) into a fresh bundle. label0 / eval_label are sliced
-  // only when populated (mirroring the process_input / compute layout invariant).
+  // only when populated (mirroring the process_inputs / compute layout invariant).
   SecureWires slice(size_t lo, size_t hi) const {
     SecureWires r;
     r.Lambda.assign(Lambda.begin() + lo, Lambda.begin() + hi);

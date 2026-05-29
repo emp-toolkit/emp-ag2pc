@@ -8,7 +8,7 @@ namespace emp {
 // Purpose-built circuit IR for the ag2pc frontend (and, later, GMW). Unlike a
 // BristolFormat, it states inputs / outputs explicitly rather than by position:
 //   - inputs occupy wire ids [0, num_in) and are grouped per owner, so a
-//     recording frontend can batch one process_input per owner;
+//     recording frontend batches all owners into one process_inputs call;
 //   - outputs are an explicit (wire-id, recipient) list — no "last n3" tail
 //     convention and no synthesized routing gates;
 //   - public constants are realized as ordinary gates by the producer (e.g. the

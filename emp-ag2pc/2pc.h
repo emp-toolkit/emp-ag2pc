@@ -24,11 +24,11 @@ using namespace emp;
 // bit1(Δ_1 ⊕ Δ_2) = 1. Bit 0 is reserved for share-value encoding.
 //
 // API:
-//   process_input(bits, n, owner) → SecureWires  // steps 3 + 8 + 9
-//   compute(WireGraph, inputs)    → SecureWires  // steps 4-13, fpre on demand
-//   decode(wires, recipient)      → vector<bool> // step 14
+//   process_inputs(owners, bits_per_owner) → SecureWires[]  // KRRW Fig.3 inputs
+//   compute(WireGraph, inputs)             → SecureWires    // steps 4-13
+//   decode(wires, recipient)               → vector<bool>   // step 14
 //
-// Output wires of compute() carry full SecureWire state. process_input() and
+// Output wires of compute() carry full SecureWire state. process_inputs() and
 // compute() draw aShares from TriplePool (COT-minted) and build each AND gate's
 // σ = λ_α∧λ_β in place via TriplePool::compute_inplace (no generic triple pool).
 // The frontend (a recording backend, see ag2pc_backend.h) drives this from native
@@ -37,7 +37,7 @@ using namespace emp;
 class C2PC {
 public:
   // Long-lived setup: TriplePool (COT mesh + Δ). Constructed once per session and
-  // reused across all process_input / compute / decode calls; it holds the COT
+  // reused across all process_inputs / compute / decode calls; it holds the COT
   // session open across compute() calls and runs the COT consistency check before
   // each reveal (decode) so the check gates output release.
   TriplePool *fpre = nullptr;
@@ -66,19 +66,25 @@ public:
 
   // ====== New API ======
 
-  // Steps 3 + 8 + 9 of agc.tex on n new input wires owned by `owner`.
-  // At `owner`, `inputs` must point to n cleartext bits; non-owners may
-  // pass nullptr. Internally:
-  //   - fpre->draw mints n authenticated λ-shares
-  //   - the garbler (P1) samples m_{w, 0} at random
-  //   - all parties open Λ_w = ⊕_p λ_w^p ⊕ x_w  (owner's x)
-  //   - the garbler (P1) ships m_{w, Λ_w} = label0 ⊕ Λ·Δ to the evaluator (P2)
-  // Can be called multiple times (e.g. one call per owner, or one call
-  // per logical batch); returned bundles compose via concat().
-  SecureWires process_input(const bool *inputs, int n, int owner);
+  // KRRW Fig.3 input phase, batched across both owners' input wires in a
+  // single protocol call. owners[k] is the owner for bits_per_owner[k]
+  // (length K, typically 1 or 2); returns K SecureWires bundles, one per
+  // owner. Internally:
+  //   - fpre->draw mints all n_total authenticated λ-shares (one COT batch)
+  //   - the garbler samples m_{w, 0} for every wire
+  //   - authenticated share open: each party ships (its λ^self bits + Hash of
+  //     the matching MACs) plus, in the same message, the x_w bits for the
+  //     wires it owns. Sent in parallel on the duplex pair so the whole
+  //     exchange is one one-way latency. Hashes are verified before Γ is used.
+  //   - the garbler ships m_{w,Γ_w} = label0 ⊕ Γ_w·Δ for all wires (one-way).
+  // Net: 2 message rounds (~1 RTT) for the whole input phase, regardless of
+  // owner count.
+  std::vector<SecureWires> process_inputs(
+      const std::vector<int> &owners,
+      const std::vector<std::vector<bool>> &bits_per_owner);
 
   // Steps 4-13 of agc.tex on a WireGraph. Input bundles must already be
-  // process_input'd and supplied in WireGraph.inputs (per-owner) order; they
+  // process_inputs'd and supplied in WireGraph.inputs (per-owner) order; they
   // occupy wires [0, num_in). Mints each AND gate's σ-share (compute_inplace) and
   // fresh λ_γ output masks inside this call. Aborts via error() on
   // cheating-detection failure. Outputs are extracted by explicit id
@@ -162,58 +168,137 @@ SecureWires C2PC::concat(const SecureWires &a,
   return r;
 }
 
-SecureWires C2PC::process_input(const bool *inputs, int n, int owner) {
+std::vector<SecureWires> C2PC::process_inputs(
+    const std::vector<int> &owners,
+    const std::vector<std::vector<bool>> &bits_per_owner) {
   AG2PC_PHASE_BEGIN();
+  const int K = (int)owners.size();
+  int n_total = 0;
+  std::vector<int> off_per_owner(K);
+  for (int k = 0; k < K; ++k) {
+    off_per_owner[k] = n_total;
+    n_total += (int)bits_per_owner[k].size();
+  }
+  if (n_total == 0) {
+    AG2PC_PHASE("process_inputs");
+    return std::vector<SecureWires>(K);
+  }
+
+  // Combined bundle for every input wire across all owners.
   SecureWires sw;
-  sw.Lambda.resize(n);
-  if (party == 1)
-    sw.label0.resize(n);          // garbler-side
-  else
-    sw.eval_label.resize(n);      // evaluator-side
-  // Step 3 (Π_aShare): n authenticated λ-shares — drawn from pool. The pool
-  // stores AoS-by-wire, so draw is a single memcpy into sw.wire_bundle.
-  // Each share-bit λ_w^i is implicit in bit0(sw.wire_bundle[w].mac).
-  fpre->draw(n, sw.wire_bundle);
+  sw.Lambda.resize(n_total);
+  sw.wire_bundle.resize(n_total);
+  if (party == 1) sw.label0.resize(n_total);          // garbler
+  else            sw.eval_label.resize(n_total);      // evaluator
 
-  // Step 3 (cont.): the garbler samples m_{w, 0} for each input wire.
-  if (party == 1)
-    prg.random_block(sw.label0.data(), n);
+  // Step 3 (Π_aShare): n_total authenticated λ-shares from the open COT
+  // session. One draw covers both owners.
+  fpre->draw(n_total, sw.wire_bundle);
 
-  // Step 8: open Λ_w = ⊕_p λ_w^p ⊕ x_w. Owner XORs its bit into the
-  // contribution; non-owners contribute just their share. Read λ_w^i from
-  // bit0 of any peer slot's MAC.
-  std::vector<unsigned char> v(n);
-  for (int i = 0; i < n; ++i)
-    v[i] = (unsigned char)LSB(sw.wire_bundle[i].mac);
-  if (party == owner)
-    for (int i = 0; i < n; ++i) v[i] ^= (unsigned char)inputs[i];
+  // Step 3 (cont.): the garbler samples m_{w,0} for every wire.
+  if (party == 1) prg.random_block(sw.label0.data(), n_total);
 
-  if (party == 1) {
-    io->send_data(v.data(), n);   // garbler ships its contribution
-    io->flush();
-    io->recv_data(sw.Lambda.data(), n);
-  } else {
-    std::vector<unsigned char> tmp(n);
-    io->recv_data(tmp.data(), n);
-    for (int i = 0; i < n; ++i)
-      sw.Lambda[i] = v[i] ^ tmp[i];
-    io->send_data(sw.Lambda.data(), n);
-    io->flush();
+  // Per-wire metadata: which owner, and the x_w bit for wires this party owns
+  // (zero for wires this party doesn't own — those x's are folded in by the
+  // peer in their own message below).
+  std::vector<int> owner_of_wire(n_total);
+  std::vector<unsigned char> own_x_bits(n_total, 0);
+  for (int k = 0; k < K; ++k) {
+    int o = owners[k];
+    bool i_own = (o == party);
+    for (size_t i = 0; i < bits_per_owner[k].size(); ++i) {
+      int idx = off_per_owner[k] + (int)i;
+      owner_of_wire[idx] = o;
+      if (i_own) own_x_bits[idx] = (unsigned char)bits_per_owner[k][i];
+    }
   }
 
-  // Step 9: the garbler (P1) ships m_{w, Λ_w} = label0[w] ⊕ Λ_w · Δ to the
-  // evaluator (P2).
+  // KRRW Fig.3 authenticated share open + (folded into the same message) the
+  // owner's x_w bits, both directions in parallel on the duplex pair.
+  //
+  // Each party ships:
+  //   (a) λ^self bits for ALL wires (n_total bytes) — the raw share open
+  //   (b) Hash of the matching MACs (DIGEST_SIZE bytes) — authenticates (a);
+  //       peer recomputes expected MAC = K_peer ⊕ bit · Δ_peer from its own
+  //       wire_bundle.key + Delta, hashes those, compares — abort on mismatch.
+  //   (c) own_x_bits packed for wires this party owns (n_owned bytes) — the
+  //       unauthenticated owner contribution Γ_w := x_w ⊕ λ_w gets folded in
+  //       by the recipient using (a) + own λ^self below. Γ_w itself is bound
+  //       downstream by the c_γ check that runs at chunk end.
+  std::vector<unsigned char> share_msg(n_total);
+  BlockVec my_macs(n_total);
+  for (int i = 0; i < n_total; ++i) {
+    share_msg[i] = (unsigned char)LSB(sw.wire_bundle[i].mac);
+    my_macs[i]   = sw.wire_bundle[i].mac;
+  }
+  char D_me[Hash::DIGEST_SIZE];
+  Hash::hash_once(D_me, my_macs.data(), (size_t)n_total * sizeof(block));
+
+  std::vector<unsigned char> own_x_packed;
+  std::vector<int> peer_idx_list;             // wire indices peer owns
+  for (int i = 0; i < n_total; ++i) {
+    if (owner_of_wire[i] == party) own_x_packed.push_back(own_x_bits[i]);
+    else                            peer_idx_list.push_back(i);
+  }
+
+  std::vector<unsigned char> peer_share(n_total);
+  char D_peer[Hash::DIGEST_SIZE];
+  std::vector<unsigned char> peer_x_packed(peer_idx_list.size());
+  {
+    std::vector<std::future<void>> res;
+    res.push_back(pool->enqueue([&]() {
+      send_io->send_data(share_msg.data(), n_total);
+      send_io->send_data(D_me, Hash::DIGEST_SIZE);
+      if (!own_x_packed.empty())
+        send_io->send_data(own_x_packed.data(), own_x_packed.size());
+      send_io->flush();
+    }));
+    res.push_back(pool->enqueue([&]() {
+      recv_io->recv_data(peer_share.data(), n_total);
+      recv_io->recv_data(D_peer, Hash::DIGEST_SIZE);
+      if (!peer_x_packed.empty())
+        recv_io->recv_data(peer_x_packed.data(), peer_x_packed.size());
+    }));
+    joinNclean(res);
+  }
+
+  // Verify peer's MAC hash before using their share.
+  BlockVec exp_macs(n_total);
+  for (int i = 0; i < n_total; ++i)
+    exp_macs[i] = sw.wire_bundle[i].key ^ (select_mask[peer_share[i]] & Delta);
+  char D_exp[Hash::DIGEST_SIZE];
+  Hash::hash_once(D_exp, exp_macs.data(), (size_t)n_total * sizeof(block));
+  if (memcmp(D_exp, D_peer, Hash::DIGEST_SIZE) != 0)
+    error("process_inputs: peer share-MAC hash mismatch");
+
+  // Reconstruct Γ_w = λ_w ⊕ x_w = (λ^self ⊕ λ^peer) ⊕ x_w for every wire.
+  // own_x_bits is 0 for peer-owned, so this folds in my own x only.
+  for (int i = 0; i < n_total; ++i)
+    sw.Lambda[i] = (unsigned char)(share_msg[i] ^ peer_share[i] ^ own_x_bits[i]);
+  // Add peer's x bits for the wires they own.
+  for (size_t i = 0; i < peer_idx_list.size(); ++i)
+    sw.Lambda[peer_idx_list[i]] ^= peer_x_packed[i];
+
+  // Garbler ships m_{w,Γ_w} for every input wire.
   if (party == 1) {
-    BlockVec tmp(n);
-    for (int i = 0; i < n; ++i)
-      tmp[i] = sw.label0[i] ^ (select_mask[sw.Lambda[i]] & Delta);
-    io->send_data(tmp.data(), n * sizeof(block));
+    BlockVec labels(n_total);
+    for (int i = 0; i < n_total; ++i)
+      labels[i] = sw.label0[i] ^ (select_mask[sw.Lambda[i]] & Delta);
+    io->send_data(labels.data(), (size_t)n_total * sizeof(block));
     io->flush();
   } else {
-    io->recv_data(sw.eval_label.data(), n * sizeof(block));
+    io->recv_data(sw.eval_label.data(), (size_t)n_total * sizeof(block));
   }
-  AG2PC_PHASE(owner == 1 ? "process_input[owner1]" : "process_input[ownerN]");
-  return sw;
+  AG2PC_PHASE("process_inputs");
+
+  // Slice the combined bundle back into per-owner SecureWires.
+  std::vector<SecureWires> result(K);
+  for (int k = 0; k < K; ++k) {
+    int off = off_per_owner[k];
+    int n = (int)bits_per_owner[k].size();
+    result[k] = sw.slice((size_t)off, (size_t)(off + n));
+  }
+  return result;
 }
 
 // WireGraph marshals directly: gate list as-is, outputs taken by explicit id.

@@ -153,7 +153,8 @@ class AG2PCBackend : public Backend {
   uint64_t num_and() override { return ands_; }
   void finalize() override {}
 
-  // For tests: how many process_input calls this run made (per owner).
+  // For tests: how many process_inputs calls this run made (one per chunk
+  // that has any input, regardless of owner count, since the call is batched).
   int process_input_calls = 0;
 
   // For tests / instrumentation: how many slot ids are currently pinned by
@@ -378,13 +379,18 @@ class AG2PCBackend : public Backend {
 
     // 4b. New inputs grouped per owner. Include any input still alive (its Bit
     //     handle is in scope) OR referenced by a needed gate — an alive-but-
-    //     unreferenced input still needs process_input fired so its state lives
+    //     unreferenced input still needs process_inputs fired so its state lives
     //     in carried_ for the NEXT chunk. Only dead-and-unreferenced inputs prune.
+    //     The per-owner bit arrays go into a single batched mpc->process_inputs
+    //     call so the whole input phase is one protocol invocation (~1 RTT on
+    //     the wire), not one per owner.
     std::vector<int> owners;
     for (auto &r : chunk_inputs_)
       if (std::find(owners.begin(), owners.end(), r.owner) == owners.end())
         owners.push_back(r.owner);
     std::sort(owners.begin(), owners.end());
+    std::vector<int> kept_owners;
+    std::vector<std::vector<bool>> kept_bits;
     for (int owner : owners) {
       int base = cid;
       std::vector<bool> bits;
@@ -401,9 +407,12 @@ class AG2PCBackend : public Backend {
       int cnt = cid - base;
       if (cnt == 0) continue;
       g.inputs.push_back({owner, base, cnt});
-      std::unique_ptr<bool[]> buf(new bool[cnt]);
-      for (int i = 0; i < cnt; ++i) buf[i] = bits[i];
-      bundles.push_back(mpc->process_input(buf.get(), cnt, owner));
+      kept_owners.push_back(owner);
+      kept_bits.push_back(std::move(bits));
+    }
+    if (!kept_owners.empty()) {
+      auto sub = mpc->process_inputs(kept_owners, kept_bits);
+      for (auto &s : sub) bundles.push_back(std::move(s));
       ++process_input_calls;
     }
 

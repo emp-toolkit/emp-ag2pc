@@ -20,10 +20,13 @@ int main(int argc, char **argv) {
 
   // Inputs: a from ALICE (party 1) at wire 0, b from BOB (party 2) at wire 1.
   // Each party supplies its own real bit; non-owners pass a dummy (ignored).
-  bool a = (party == 1);   // ALICE's input = 1
-  bool b = (party == 2);   // BOB's input   = 1
-  SecureWires ba = mpc.process_input(&a, 1, /*owner=*/1);
-  SecureWires bb = mpc.process_input(&b, 1, /*owner=*/2);
+  // Batched into a single process_inputs call so both owners' inputs share one
+  // protocol round.
+  std::vector<std::vector<bool>> ibits = {{(party == 1)},     // ALICE's bit
+                                          {(party == 2)}};    // BOB's bit
+  auto in = mpc.process_inputs(/*owners=*/{1, 2}, ibits);
+  SecureWires &ba = in[0];
+  SecureWires &bb = in[1];
 
   // Hand-built circuit over wires [0,7):
   //   w2 = XOR(w0,w0) = 0          (constant-0 synthesized as a gate)
