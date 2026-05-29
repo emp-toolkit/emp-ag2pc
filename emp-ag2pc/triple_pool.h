@@ -92,9 +92,18 @@ public:
   // abit2 (send_io) close on different channels and cross to the peer's opposite
   // role, so run them concurrently to avoid a cross-party end/end deadlock.
   ~TriplePool() {
+    parallel_abit_([](OTExt *abit, NetIO *io) { abit->end(); io->flush(); });
+  }
+
+  // Run the same per-abit operation on abit1 (paired with io_abit1) and abit2
+  // (paired with io_abit2) concurrently. begin / end / flush all need both
+  // abits to fire in parallel — they cross to the peer's opposite role on
+  // different sockets, so serializing the pair deadlocks.
+  template <typename F>
+  void parallel_abit_(F per_abit) {
     vector<future<void>> res;
-    res.push_back(pool->enqueue([this]() { abit1->end(); io_abit1->flush(); }));
-    res.push_back(pool->enqueue([this]() { abit2->end(); io_abit2->flush(); }));
+    res.push_back(pool->enqueue([this, per_abit]() { per_abit(abit1.get(), io_abit1); }));
+    res.push_back(pool->enqueue([this, per_abit]() { per_abit(abit2.get(), io_abit2); }));
     joinNclean(res);
   }
 
@@ -125,10 +134,7 @@ public:
     // begin() must run after set_delta (it consumes Δ) and concurrently on
     // abit1/abit2 (they bootstrap on different channels, crossing to the peer's
     // opposite role).
-    vector<future<void>> res;
-    res.push_back(pool->enqueue([this]() { abit1->begin(); io_abit1->flush(); }));
-    res.push_back(pool->enqueue([this]() { abit2->begin(); io_abit2->flush(); }));
-    joinNclean(res);
+    parallel_abit_([](OTExt *abit, NetIO *io) { abit->begin(); io->flush(); });
   }
 
   // Share generator: mint `count` random authenticated shares into the mac/key
@@ -169,14 +175,9 @@ public:
   // base-OT bootstrap already ran), so it is local and adds no round.
   void flush_cot_check() {
     cots_minted_since_check_ = false;
-    vector<future<void>> res;
-    res.push_back(pool->enqueue([this]() {
-      abit1->end(); io_abit1->flush(); abit1->begin();
-    }));
-    res.push_back(pool->enqueue([this]() {
-      abit2->end(); io_abit2->flush(); abit2->begin();
-    }));
-    joinNclean(res);
+    parallel_abit_([](OTExt *abit, NetIO *io) {
+      abit->end(); io->flush(); abit->begin();
+    });
   }
 
   // Run the COT check only if new COTs have been minted since the last check.

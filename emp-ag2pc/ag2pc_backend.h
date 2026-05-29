@@ -237,24 +237,36 @@ class AG2PCBackend : public Backend {
     return id;
   }
 
+  // Per-wire copy between SecureWires position i and CarriedState. The is_eval
+  // branch picks the role-specific label slot (evaluator P2 holds eval_label,
+  // garbler P1 holds label0); the other fields are role-independent.
+  static void carry_load_(CarriedState &c, const SecureWires &s, size_t i, bool is_eval) {
+    c.Lambda = s.Lambda[i];
+    c.bundle = s.wire_bundle[i];
+    if (is_eval) c.evlbl  = s.eval_label[i];
+    else         c.label0 = s.label0[i];
+  }
+  static void carry_store_(const CarriedState &c, SecureWires &s, size_t i, bool is_eval) {
+    s.Lambda[i] = c.Lambda;
+    s.wire_bundle[i] = c.bundle;
+    if (is_eval) s.eval_label[i] = c.evlbl;
+    else         s.label0[i] = c.label0;
+  }
+
   // Build the input SecureWires bundle from carried_ entries for the given
   // recorder ids (in caller order).
   SecureWires gather_carried_(const std::vector<int> &ids) const {
     SecureWires s;
+    const bool is_eval = (party != 1);
     s.Lambda.resize(ids.size());
     s.wire_bundle.resize(ids.size());
-    const bool is_eval = (party != 1);    // evaluator is P2 under this codebase's convention
     if (is_eval) s.eval_label.resize(ids.size());
     else         s.label0.resize(ids.size());
     for (size_t i = 0; i < ids.size(); ++i) {
       auto it = carried_.find(ids[i]);
       if (it == carried_.end())
         error("AG2PCBackend: gather_carried_ id has no carried state");
-      const CarriedState &c = it->second;
-      s.Lambda[i] = c.Lambda;
-      s.wire_bundle[i] = c.bundle;
-      if (is_eval) s.eval_label[i] = c.evlbl;
-      else         s.label0[i] = c.label0;
+      carry_store_(it->second, s, i, is_eval);
     }
     return s;
   }
@@ -263,13 +275,8 @@ class AG2PCBackend : public Backend {
   // recorder id (in caller order).
   void stash_carried_(const std::vector<int> &ids, const SecureWires &s) {
     const bool is_eval = (party != 1);
-    for (size_t i = 0; i < ids.size(); ++i) {
-      CarriedState &c = carried_[ids[i]];
-      c.Lambda = s.Lambda[i];
-      c.bundle = s.wire_bundle[i];
-      if (is_eval) c.evlbl  = s.eval_label[i];
-      else         c.label0 = s.label0[i];
-    }
+    for (size_t i = 0; i < ids.size(); ++i)
+      carry_load_(carried_[ids[i]], s, i, is_eval);
   }
 
   // Reclaim every id whose refcount hit 0 and that no longer needs to live

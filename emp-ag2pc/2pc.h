@@ -131,6 +131,13 @@ private:
   // AND-gate chunks; evaluate recvs each chunk on demand during evaluation,
   // so neither side ever holds the full-circuit G buffer.
   static constexpr int kGarbleChunk = 1 << 16;
+  // One per-chunk staging buffer (2 ciphertexts/AND + 1 b-bit/AND); both
+  // sides use it as the in-flight payload of their chunk_pipe.
+  struct StreamChunk {
+    BlockVec G;
+    std::vector<unsigned char> b;
+    int n = 0;       // count of ANDs filled in this chunk
+  };
   void garble_and_ship(ComputeCtx &ctx);        // steps 6-7, garbler P1
   void evaluate(ComputeCtx &ctx);               // steps 6-7 recv + step 10, evaluator P2
   void check_cgamma(ComputeCtx &ctx);           // KRRW Fig.3 steps 6-8 (c_γ check)
@@ -144,6 +151,20 @@ private:
                         const AShareBundle &b) {
     out.mac = a.mac ^ b.mac;
     out.key = a.key ^ b.key;
+  }
+
+  // Recompute a non-AND gate's output share bundle from its inputs (NOT = copy,
+  // XOR = componentwise XOR via xor_share). Every gate-walk that reaches an
+  // AND with fabric-recycled XOR/NOT inputs needs this on the fly.
+  static void recompute_share(const Gate &g, ComputeCtx &ctx) {
+    if (g.is_not()) ctx.WIRE(g.out) = ctx.WIRE(g.in0);
+    else            xor_share(ctx.WIRE(g.out), ctx.WIRE(g.in0), ctx.WIRE(g.in1));
+  }
+  // Mask-propagation for non-AND gates: NOT flips, XOR XORs. (AND outputs'
+  // Λ come from the c_γ-check broadcast, not from this walk.)
+  static void propagate_mask(const Gate &g, std::vector<unsigned char> &Λ) {
+    if (g.is_not()) Λ[g.out] = Λ[g.in0] ^ 1;
+    else            Λ[g.out] = Λ[g.in0] ^ Λ[g.in1];
   }
 
   // Orchestrator: builds ComputeCtx, then runs the step methods in order.
@@ -397,7 +418,6 @@ void C2PC::load_inputs(ComputeCtx &ctx, const SecureWires *const *inputs,
 void C2PC::collect_masks(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
   ctx.rep_a.resize(num_ands);
   ctx.rep_b.resize(num_ands);
   AG2PC_TP_BEGIN();
@@ -405,13 +425,11 @@ void C2PC::collect_masks(ComputeCtx &ctx) {
     const Gate &g = cf->gates[gi];
     if (g.is_and()) {
       int ai = g.and_index();
-      ctx.rep_a[ai] = WIRE(g.in0);            // λ_α (value copy survives slot recycle)
-      ctx.rep_b[ai] = WIRE(g.in1);            // λ_β
-      WIRE(g.out) = ctx.lambda_gamma[ai];     // seed fresh AND-output mask λ_γ
-    } else if (g.is_not()) {
-      WIRE(g.out) = WIRE(g.in0);
-    } else {  // XOR
-      xor_share(WIRE(g.out), WIRE(g.in0), WIRE(g.in1));
+      ctx.rep_a[ai] = ctx.WIRE(g.in0);            // λ_α (value copy survives slot recycle)
+      ctx.rep_b[ai] = ctx.WIRE(g.in1);            // λ_β
+      ctx.WIRE(g.out) = ctx.lambda_gamma[ai];     // seed fresh AND-output mask λ_γ
+    } else {
+      recompute_share(g, ctx);
     }
   }
   AG2PC_TP("share-prop + collect rep masks");
@@ -430,8 +448,6 @@ void C2PC::collect_masks(ComputeCtx &ctx) {
 void C2PC::garble_and_ship(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
   const int num_ands = ctx.num_ands;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
   // Ship G in chunks of kGarbleChunk AND gates (in and_index order) so the
@@ -440,45 +456,37 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
   // (this thread) fills chunks into the pipe; a pool thread drains them with
   // blocking send + flush, so the next chunk's hashes overlap the previous
   // chunk's send.
-  struct GarbleChunk {
-    BlockVec G;
-    std::vector<unsigned char> b;
-    int nfilled = 0;
-  };
   const int C = kGarbleChunk;
   const int cap = std::min(C, num_ands);
-  chunk_pipe<GarbleChunk> pipe(2, [&](GarbleChunk &c) {
+  chunk_pipe<StreamChunk> pipe(2, [&](StreamChunk &c) {
     c.G.resize(2 * cap);
-    c.b.resize(cap);    // garbler always ships b (this function only runs at P1)
+    c.b.resize(cap);
   });
   auto sender_fut = pool->enqueue([&] {
     while (auto *slot = pipe.consumer_slot()) {
-      send_io->send_data(slot->G.data(), (size_t)2 * slot->nfilled * sizeof(block));
-      send_io->send_data(slot->b.data(), slot->nfilled);
+      send_io->send_data(slot->G.data(), (size_t)2 * slot->n * sizeof(block));
+      send_io->send_data(slot->b.data(), slot->n);
       send_io->flush();
       pipe.consumer_release();
     }
   });
 
-  GarbleChunk *cur = &pipe.producer_slot();
-  cur->nfilled = 0;
+  StreamChunk *cur = &pipe.producer_slot();
+  cur->n = 0;
   for (int gi = 0; gi < cf->num_gate; ++gi) {
     const Gate &g = cf->gates[gi];
     int in0 = g.in0, in1 = g.in1, out = g.out;
     if (!g.is_and()) {
-      if (g.is_not()) {
-        LABEL(out) = LABEL(in0) ^ Delta;
-        WIRE(out) = WIRE(in0);
-      } else {  // XOR
-        LABEL(out) = LABEL(in0) ^ LABEL(in1);
-        // Recompute fabric share into its (recycled) slot for downstream ANDs.
-        xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-      }
+      // Label propagation differs from XOR-share (NOT XORs Delta; XOR just
+      // XORs both labels) — keep it inline. Fabric share update is shared.
+      if (g.is_not()) ctx.LABEL(out) = ctx.LABEL(in0) ^ Delta;
+      else            ctx.LABEL(out) = ctx.LABEL(in0) ^ ctx.LABEL(in1);
+      recompute_share(g, ctx);
       continue;
     }
     int ai = g.and_index();
-    block ml_a0 = LABEL(in0), ml_a1 = ml_a0 ^ Delta;
-    block ml_b0 = LABEL(in1), ml_b1 = ml_b0 ^ Delta;
+    block ml_a0 = ctx.LABEL(in0), ml_a1 = ml_a0 ^ Delta;
+    block ml_b0 = ctx.LABEL(in1), ml_b1 = ml_b0 ^ Delta;
 
     // Single garbler's (s=1,d=1) self hashes. gid auto-increment mode: one
     // hash_cir per AND (K=1), so the key counter stays in lockstep with the
@@ -487,9 +495,9 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
     block buf[4] = {ml_a0, ml_a1, ml_b0, ml_b1};
     mitc.template hash_cir<1, 4>(buf);
 
-    const AShareBundle &wb_in0 = WIRE(in0);
-    const AShareBundle &wb_in1 = WIRE(in1);
-    const AShareBundle &wb_out = WIRE(out);
+    const AShareBundle &wb_in0 = ctx.WIRE(in0);
+    const AShareBundle &wb_in1 = ctx.WIRE(in1);
+    const AShareBundle &wb_out = ctx.WIRE(out);
     const AShareBundle &sb     = sigma[ai];
 
     // Single garbler (d == party == 1): only the self tweak fires, so the
@@ -512,17 +520,17 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
     block G1 = H_b0_self ^ H_b1_self ^ ml_a0 ^ sumK_a ^ la_dot;
     block ml_g0 = H_a0_self ^ H_b0_self ^ sumK_ab ^ lab_dot ^ sumK_g ^ lg_dot;
 
-    LABEL(out) = ml_g0;
-    cur->G[2 * cur->nfilled]     = G0;
-    cur->G[2 * cur->nfilled + 1] = G1;
-    cur->b[cur->nfilled] = (unsigned char)(LSB1(ml_g0));
-    if (++cur->nfilled == C) {
+    ctx.LABEL(out) = ml_g0;
+    cur->G[2 * cur->n]     = G0;
+    cur->G[2 * cur->n + 1] = G1;
+    cur->b[cur->n] = (unsigned char)(LSB1(ml_g0));
+    if (++cur->n == C) {
       pipe.producer_publish();
       cur = &pipe.producer_slot();
-      cur->nfilled = 0;
+      cur->n = 0;
     }
   }
-  if (cur->nfilled > 0) pipe.producer_publish();
+  if (cur->n > 0) pipe.producer_publish();
   pipe.producer_close();
   sender_fut.get();
 }
@@ -533,8 +541,6 @@ void C2PC::garble_and_ship(ComputeCtx &ctx) {
 // evaluator (P2).
 void C2PC::evaluate(ComputeCtx &ctx) {
   const CircuitView *cf = ctx.cf;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto EVAL = [&](int w) -> block & { return ctx.EVAL(w); };
   auto &mask_input = ctx.mask_input;
   auto &sigma = ctx.sigma;
   auto &mitc = ctx.mitc;
@@ -544,57 +550,48 @@ void C2PC::evaluate(ComputeCtx &ctx) {
   // the pipe; the compute loop drains chunks in and_index order. The depth-2
   // pipe lets the next chunk arrive while the current one is being evaluated,
   // so the recv stall overlaps the per-AND hash work.
-  struct EvalChunk {
-    BlockVec G;
-    std::vector<unsigned char> b;
-    int len = 0;
-  };
   const int C = kGarbleChunk;
   const int cap = std::min(C, num_ands);
-  chunk_pipe<EvalChunk> pipe(2, [&](EvalChunk &c) {
+  chunk_pipe<StreamChunk> pipe(2, [&](StreamChunk &c) {
     c.G.resize(2 * cap);
     c.b.resize(cap);
   });
   auto recv_fut = pool->enqueue([&] {
     int recv_base = 0;
     while (recv_base < num_ands) {
-      EvalChunk &slot = pipe.producer_slot();
-      slot.len = std::min(C, num_ands - recv_base);
-      recv_io->recv_data(slot.G.data(), (size_t)2 * slot.len * sizeof(block));
-      recv_io->recv_data(slot.b.data(), slot.len);
+      StreamChunk &slot = pipe.producer_slot();
+      slot.n = std::min(C, num_ands - recv_base);
+      recv_io->recv_data(slot.G.data(), (size_t)2 * slot.n * sizeof(block));
+      recv_io->recv_data(slot.b.data(), slot.n);
       pipe.producer_publish();
-      recv_base += slot.len;
+      recv_base += slot.n;
     }
     pipe.producer_close();
   });
 
-  EvalChunk *cur = nullptr;
-  int loc = 0;  // ai within cur (0 .. cur->len)
+  StreamChunk *cur = nullptr;
+  int loc = 0;  // ai within cur (0 .. cur->n)
   for (int gi = 0; gi < cf->num_gate; ++gi) {
     const Gate &g = cf->gates[gi];
     int in0 = g.in0, in1 = g.in1, out = g.out;
     if (!g.is_and()) {
-      if (g.is_not()) {
-        mask_input[out] = mask_input[in0] ^ 1;
-        EVAL(out) = EVAL(in0);
-        WIRE(out) = WIRE(in0);
-      } else {  // XOR
-        EVAL(out) = EVAL(in0) ^ EVAL(in1);
-        mask_input[out] = mask_input[in0] ^ mask_input[in1];
-        // Recompute fabric share for the per-AND Mr term below.
-        xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-      }
+      // Eval-label propagation: NOT keeps the same label (label encodes value
+      // via Λ_w, not via the label bits themselves); XOR XORs both labels.
+      if (g.is_not()) ctx.EVAL(out) = ctx.EVAL(in0);
+      else            ctx.EVAL(out) = ctx.EVAL(in0) ^ ctx.EVAL(in1);
+      propagate_mask(g, mask_input);
+      recompute_share(g, ctx);
       continue;
     }
-    if (cur == nullptr || loc == cur->len) {     // drain the next chunk
+    if (cur == nullptr || loc == cur->n) {       // drain the next chunk
       if (cur != nullptr) pipe.consumer_release();
       cur = pipe.consumer_slot();                // recv side has more by induction
       loc = 0;
     }
     bool La = mask_input[in0], Lb = mask_input[in1];
-    const AShareBundle &wb_in0 = WIRE(in0);
-    const AShareBundle &wb_in1 = WIRE(in1);
-    const AShareBundle &wb_out = WIRE(out);
+    const AShareBundle &wb_in0 = ctx.WIRE(in0);
+    const AShareBundle &wb_in1 = ctx.WIRE(in1);
+    const AShareBundle &wb_out = ctx.WIRE(out);
     const AShareBundle &sb     = sigma[g.and_index()];
     block Mr;  // M_1[r^2]: the single (sender=2, receiver=1) cross term
     { block t = sb.mac ^ wb_out.mac;
@@ -605,7 +602,7 @@ void C2PC::evaluate(ComputeCtx &ctx) {
     // Pass 1: the single garbler's (s=1, d=1) self hashes — one hash_cir
     // (gid auto-increment, lockstep with the garbler); cache for pass 2.
     block self_Ha, self_Hb;
-    { block buf[2] = {EVAL(in0), EVAL(in1)};
+    { block buf[2] = {ctx.EVAL(in0), ctx.EVAL(in1)};
       mitc.template hash_cir<1, 2>(buf);
       self_Ha = buf[0];
       self_Hb = buf[1];
@@ -614,12 +611,12 @@ void C2PC::evaluate(ComputeCtx &ctx) {
     // produce the eval-label at out.
     { block t = self_Ha ^ self_Hb;
       t = t ^ (select_mask[La] & cur->G[2 * loc]);
-      t = t ^ (select_mask[Lb] & (cur->G[2 * loc + 1] ^ EVAL(in0)));
+      t = t ^ (select_mask[Lb] & (cur->G[2 * loc + 1] ^ ctx.EVAL(in0)));
       t = t ^ Mr;  // the single cross term (sender s = 2, receiver = 1)
-      EVAL(out) = t;
+      ctx.EVAL(out) = t;
     }
     mask_input[out] =
-        (unsigned char)(cur->b[loc] ^ LSB1(EVAL(out)));
+        (unsigned char)(cur->b[loc] ^ LSB1(ctx.EVAL(out)));
     ++loc;
   }
   if (cur != nullptr) pipe.consumer_release();
@@ -649,7 +646,6 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
   // Skip the digest exchange entirely; lets empty chunks (back-to-back
   // reveal-then-reveal with no gates between) cost zero network rounds here.
   if (num_ands == 0) return;
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
   auto &mask_input = ctx.mask_input;
   auto &sigma = ctx.sigma;
   std::vector<unsigned char> Lambda_AND(num_ands);
@@ -662,23 +658,22 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
       const Gate &g = cf->gates[gi];
       int in0 = g.in0, in1 = g.in1, out = g.out;
       if (!g.is_and()) {  // recompute fabric share for downstream ANDs
-        if (g.is_not()) { WIRE(out) = WIRE(in0); }
-        else { xor_share(WIRE(out), WIRE(in0), WIRE(in1)); }
+        recompute_share(g, ctx);
         continue;
       }
       int ai = g.and_index();
       bool La = mask_input[in0], Lb = mask_input[in1], Lg = mask_input[out];
       Lambda_AND[ai] = (unsigned char)Lg;  // step 6: ẑ of this AND output
-      bool v_in0 = (bool)LSB(WIRE(in0).mac);
-      bool v_in1 = (bool)LSB(WIRE(in1).mac);
-      bool v_out = (bool)LSB(WIRE(out).mac);
-      bool v_sig = (bool)LSB(sigma[ai].mac);
+      const AShareBundle &wb_in0 = ctx.WIRE(in0);
+      const AShareBundle &wb_in1 = ctx.WIRE(in1);
+      const AShareBundle &wb_out = ctx.WIRE(out);
+      const AShareBundle &sb     = sigma[ai];
+      bool v_in0 = (bool)LSB(wb_in0.mac);
+      bool v_in1 = (bool)LSB(wb_in1.mac);
+      bool v_out = (bool)LSB(wb_out.mac);
+      bool v_sig = (bool)LSB(sb.mac);
       bool t1 = (La & Lb) ^ Lg ^ (La & v_in1) ^ (Lb & v_in0) ^ v_sig ^ v_out;
       block m = select_mask[t1] & Delta;
-      const AShareBundle &wb_in0 = WIRE(in0);
-      const AShareBundle &wb_in1 = WIRE(in1);
-      const AShareBundle &wb_out = WIRE(out);
-      const AShareBundle &sb     = sigma[ai];
       m = m ^ (select_mask[La] & wb_in1.key);
       m = m ^ (select_mask[Lb] & wb_in0.key);
       m = m ^ sb.key ^ wb_out.key;
@@ -701,21 +696,16 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
       const Gate &g = cf->gates[gi];
       int in0 = g.in0, in1 = g.in1, out = g.out;
       if (!g.is_and()) {
-        if (g.is_not()) {
-          mask_input[out] = mask_input[in0] ^ 1;
-          WIRE(out) = WIRE(in0);
-        } else {  // XOR
-          mask_input[out] = mask_input[in0] ^ mask_input[in1];
-          xor_share(WIRE(out), WIRE(in0), WIRE(in1));
-        }
+        propagate_mask(g, mask_input);
+        recompute_share(g, ctx);
         continue;
       }
       int ai = g.and_index();
       mask_input[out] = Lambda_AND[ai];  // AND output ẑ from the evaluator's broadcast
       bool La = mask_input[in0], Lb = mask_input[in1];
-      block m = sigma[ai].mac ^ WIRE(out).mac;
-      m = m ^ (select_mask[La] & WIRE(in1).mac);
-      m = m ^ (select_mask[Lb] & WIRE(in0).mac);
+      block m = sigma[ai].mac ^ ctx.WIRE(out).mac;
+      m = m ^ (select_mask[La] & ctx.WIRE(in1).mac);
+      m = m ^ (select_mask[Lb] & ctx.WIRE(in0).mac);
       M1_t[ai] = m;
     }
     // Step 8: send the garbler's c_γ MAC digest for the evaluator to compare.
@@ -730,9 +720,6 @@ void C2PC::check_cgamma(ComputeCtx &ctx) {
 // slots and need not be contiguous or at the tail.
 SecureWires C2PC::gather_outputs(ComputeCtx &ctx,
                                          const std::vector<int> &output_ids) {
-  auto WIRE = [&](int w) -> AShareBundle & { return ctx.WIRE(w); };
-  auto LABEL = [&](int w) -> block & { return ctx.LABEL(w); };
-  auto EVAL = [&](int w) -> block & { return ctx.EVAL(w); };
   auto &mask_input = ctx.mask_input;
   SecureWires out;
   int n3 = (int)output_ids.size();
@@ -740,14 +727,14 @@ SecureWires C2PC::gather_outputs(ComputeCtx &ctx,
   out.wire_bundle.resize(n3);
   for (int i = 0; i < n3; ++i) {
     out.Lambda[i] = mask_input[output_ids[i]];
-    out.wire_bundle[i] = WIRE(output_ids[i]);
+    out.wire_bundle[i] = ctx.WIRE(output_ids[i]);
   }
   if (party == 1) {              // garbler holds label0 (m_{w,0})
     out.label0.resize(n3);
-    for (int i = 0; i < n3; ++i) out.label0[i] = LABEL(output_ids[i]);
+    for (int i = 0; i < n3; ++i) out.label0[i] = ctx.LABEL(output_ids[i]);
   } else {                         // evaluator holds eval_label (m_{w,Λ_w})
     out.eval_label.resize(n3);
-    for (int i = 0; i < n3; ++i) out.eval_label[i] = EVAL(output_ids[i]);
+    for (int i = 0; i < n3; ++i) out.eval_label[i] = ctx.EVAL(output_ids[i]);
   }
   return out;
 }
