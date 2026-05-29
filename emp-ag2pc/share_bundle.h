@@ -39,14 +39,14 @@ using TripleBundleVec =
 //   λ_w^i            = LSB(wire_bundle[w].mac) — implicit (bit0(M)=x, bit0(K)=0).
 //   Lambda[w]        = Λ_w           (publicly opened mask; set at every party
 //                                     after process_input or compute)
-//   label0[w]        = m_{w,0}^2     only at the garbler P2; empty at P1
-//   eval_label[w]    = m_{w,Λ_w}^2   only at P1; empty at P2
+//   label0[w]        = m_{w,0}^1     only at the garbler P1; empty at the evaluator P2
+//   eval_label[w]    = m_{w,Λ_w}^1   only at the evaluator P2; empty at the garbler P1
 // MAC relation: M_j[λ_w^i] = K_j[λ_w^i] ⊕ λ_w^i · Δ_j.
 struct SecureWires {
   std::vector<unsigned char> Lambda;
   AShareBundleVec wire_bundle;
   BlockVec label0;
-  BlockVec eval_label;   // m_{w,Λ_w}^2 at P1; empty at the garbler P2
+  BlockVec eval_label;   // m_{w,Λ_w}^1 at the evaluator P2; empty at the garbler P1
 
   size_t size() const { return Lambda.size(); }
 

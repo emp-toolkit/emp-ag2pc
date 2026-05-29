@@ -157,6 +157,42 @@ finalize_ag2pc();
 `Integer`, `Float`, and the rest of emp-tool's frontend work the same way.
 For host branching, `reveal<bool>(PUBLIC)` opens to both parties.
 
+### Reveal patterns
+
+A `reveal` call closes the chunk (running the c_γ + COT checks at chunk-end)
+and then ships the opened bits to the recipient. The chunk-end checks fire
+only when there's new work since the last reveal — back-to-back reveals with
+no gates in between share a single check, so per-reveal you pay just the
+one-way share send to the recipient.
+
+This shape collapses across **same-recipient** reveals: ten sequential
+`reveal<bool>(/*to=*/1)` calls cost roughly the same as one (one chunk-check,
+then ten pipelined one-way sends). Same for `/*to=*/2`.
+
+It does **not** collapse across `PUBLIC` reveals: a `PUBLIC` reveal routes
+through the evaluator and waits on a broadcast back, so it inherently has a
+round-trip per call. If you have many bits to open to both parties, do them
+as two single-recipient reveals instead:
+
+```cpp
+// Slow: N PUBLIC reveals = N round-trips
+for (auto& bit : bits) bit.reveal<bool>(PUBLIC);
+
+// Fast: two pipelined batches, ~constant latency in N
+for (auto& bit : bits) bit.reveal<bool>(/*to=*/1);  // P2 ships shares, P1 sees
+for (auto& bit : bits) bit.reveal<bool>(/*to=*/2);  // P1 ships shares, P2 sees
+```
+
+Or batch at the API level by passing the wires together:
+
+```cpp
+std::vector<AG2PCWire> wires = ...;
+std::vector<bool> out(wires.size());
+backend->reveal(out.data(), /*to=*/1, wires.data(), wires.size());
+```
+
+— that collapses the N share sends into one wire message as well.
+
 ### Checkpointing for bounded memory
 
 The backend records the whole circuit before the (single, terminal) reveal, so a

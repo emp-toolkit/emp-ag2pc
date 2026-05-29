@@ -196,8 +196,8 @@ class AG2PCBackend : public Backend {
   struct CarriedState {
     AShareBundle bundle;        // {mac, key} — Lambda is bit0(mac) for the share-bit
     unsigned char Lambda = 0;   // publicly-opened mask
-    block label0 = zero_block;  // garbler-side m_{w,0}
-    block evlbl  = zero_block;  // P1-side m_{w,Lambda}
+    block label0 = zero_block;  // garbler-side m_{w,0}      (P1)
+    block evlbl  = zero_block;  // evaluator-side m_{w,Lambda} (P2)
   };
 
   struct InputRec {
@@ -248,9 +248,9 @@ class AG2PCBackend : public Backend {
     SecureWires s;
     s.Lambda.resize(ids.size());
     s.wire_bundle.resize(ids.size());
-    const bool is_p1 = (party == 1);
-    if (is_p1) s.eval_label.resize(ids.size());
-    else        s.label0.resize(ids.size());
+    const bool is_eval = (party != 1);    // evaluator is P2 under this codebase's convention
+    if (is_eval) s.eval_label.resize(ids.size());
+    else         s.label0.resize(ids.size());
     for (size_t i = 0; i < ids.size(); ++i) {
       auto it = carried_.find(ids[i]);
       if (it == carried_.end())
@@ -258,8 +258,8 @@ class AG2PCBackend : public Backend {
       const CarriedState &c = it->second;
       s.Lambda[i] = c.Lambda;
       s.wire_bundle[i] = c.bundle;
-      if (is_p1) s.eval_label[i] = c.evlbl;
-      else        s.label0[i] = c.label0;
+      if (is_eval) s.eval_label[i] = c.evlbl;
+      else         s.label0[i] = c.label0;
     }
     return s;
   }
@@ -267,13 +267,13 @@ class AG2PCBackend : public Backend {
   // Stash a freshly-computed SecureWires bundle into carried_, keyed by
   // recorder id (in caller order).
   void stash_carried_(const std::vector<int> &ids, const SecureWires &s) {
-    const bool is_p1 = (party == 1);
+    const bool is_eval = (party != 1);
     for (size_t i = 0; i < ids.size(); ++i) {
       CarriedState &c = carried_[ids[i]];
       c.Lambda = s.Lambda[i];
       c.bundle = s.wire_bundle[i];
-      if (is_p1) c.evlbl  = s.eval_label[i];
-      else        c.label0 = s.label0[i];
+      if (is_eval) c.evlbl  = s.eval_label[i];
+      else         c.label0 = s.label0[i];
     }
   }
 

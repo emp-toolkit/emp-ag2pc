@@ -73,6 +73,11 @@ public:
   std::unique_ptr<OTExt> abit1, abit2;
   NetIO *io_abit1, *io_abit2;
   block Delta;
+  // True iff at least one gen_cot_shares has fired since the last
+  // flush_cot_check. The chunk-end check (maybe_flush_cot_check) reads this so
+  // empty chunks — and reveals that immediately follow another reveal with no
+  // gates in between — skip the subspace-VOLE round trip entirely.
+  bool cots_minted_since_check_ = false;
 
   // Borrowing ctor: the caller owns the sibling channel and threads it in.
   TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party, int ssp = 40)
@@ -115,7 +120,7 @@ public:
     bool tmp[128];
     prg.random_bool(tmp, 128);
     tmp[0] = true;
-    tmp[1] = (party != 1);
+    tmp[1] = (party == 1);    // garbler pins bit1(Δ) = 1; evaluator pins 0
     io_abit1 = OTExt::kSenderSendsOnExtend ? send_io : recv_io;  // ALICE (KEY)
     io_abit2 = OTExt::kSenderSendsOnExtend ? recv_io : send_io;  // BOB   (MAC)
     abit1 = std::make_unique<OTExt>(ALICE, io_abit1);
@@ -147,6 +152,7 @@ public:
     int64_t _cot0 = io_count(send_io, recv_io);
     uint64_t _ct0 = tp_now_ns();
 #endif
+    cots_minted_since_check_ = true;
     vector<future<void>> res;
     res.push_back(pool->enqueue([this, key, count]() {
       abit1->next_n(key, count);
@@ -172,6 +178,7 @@ public:
   // the ctor; the immediate begin() just resets the per-session counters (the
   // base-OT bootstrap already ran), so it is local and adds no round.
   void flush_cot_check() {
+    cots_minted_since_check_ = false;
     vector<future<void>> res;
     res.push_back(pool->enqueue([this]() {
       abit1->end(); io_abit1->flush(); abit1->begin();
@@ -180,6 +187,13 @@ public:
       abit2->end(); io_abit2->flush(); abit2->begin();
     }));
     joinNclean(res);
+  }
+
+  // Run the COT check only if new COTs have been minted since the last check.
+  // Lets consecutive reveals with no gates in between share a single check
+  // (instead of paying one per reveal).
+  void maybe_flush_cot_check() {
+    if (cots_minted_since_check_) flush_cot_check();
   }
 
   // AoS draw: n aShares as AShareBundle{mac,key} (the layout 2pc consumes for

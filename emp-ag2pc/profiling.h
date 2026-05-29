@@ -76,7 +76,7 @@ inline void ag2pc_mem_row(const char *label, double bytes, double div) {
     _ag2pc_c = _c;                                                               \
   } while (0)
 
-// Leaky-AND sub-phase timer: elapsed since the last marker, printed at P1.
+// Leaky-AND sub-phase timer: elapsed since the last marker, printed at party 1.
 #define AG2PC_TP_BEGIN() auto _tp_t = std::chrono::steady_clock::now()
 #define AG2PC_TP(name)                                                           \
   do {                                                                           \
