@@ -30,3 +30,6 @@ add_test_case_with_run(test_chain)
 add_test_case_with_run(test_reactive)
 add_test_case_with_run(test_sha256)
 add_test_case_with_run(test_keep_all)
+
+# Protocol-neutral frontend (emp-tool/frontend record -> Circuit) via AG2PC adapter
+add_test_case_with_run(test_frontend)
