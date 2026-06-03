@@ -3,7 +3,7 @@
 
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/frontend/executor.h"   // frontend::run — the pure-circuit calling contract
-#include "emp-ag2pc/ag2pc_backend.h"   // AG2PCWire (for the cross-type cast ctors)
+#include "emp-ag2pc/2pc.h"               // C2PC
 #include "emp-ag2pc/share_bundle.h"
 
 #include <array>
@@ -25,30 +25,21 @@ namespace emp {
 // keeps the type non-trivially-copyable — without any runtime cost (empty body
 // inlines to nothing) — so the build's -Werror=class-memaccess flag still
 // catches any memcpy of Bit_T<LambdaWire>.
-//
-// Bridge ctors are provided in both directions so helpers templated on the
-// wire carrier can interop between modes (explicit only — never an accident).
 struct LambdaWire {
   int id = -1;
   LambdaWire() = default;
   explicit LambdaWire(int i) noexcept : id(i) {}
-  explicit LambdaWire(const AG2PCWire &a) noexcept : id(a.id) {}
   // Empty user dtor — non-trivially-copyable, but zero runtime cost.
   ~LambdaWire() {}
 };
-
-// AG2PCWire's cross-type ctor was forward-declared in ag2pc_backend.h; it
-// needs LambdaWire's full definition (and pin_'s definition) — both visible
-// here — to complete.
-inline AG2PCWire::AG2PCWire(const LambdaWire &l) noexcept : id(l.id) { pin_(); }
 
 // Per-run shared state. Storage is linear in #AND gates + the circuit's live
 // width, NOT #wires: a liveness pre-pass (LivenessBackend) computes last_use +
 // persist, the fused pass assigns each wire a physical SLOT (phys[]) — inputs,
 // AND-outputs and circuit-outputs get permanent slots, XOR/NOT "fabric" wires
 // share a recycled pool freed at last read — and the heavy per-wire arrays size
-// to num_slots. The phys[] indirection mirrors compiled mode's compute_wire_layout
-// (circuit_layout.h); the per-wire accessors below hide it from the crypto.
+// to num_slots. The per-wire accessors below hide the phys[] indirection from
+// the crypto.
 struct LambdaState {
   int party = 0;
   block Delta = zero_block;
@@ -114,9 +105,9 @@ class PhaseBackend : public Backend {
 // Phase 0 — liveness pre-pass. A single value-free walk that records, per
 // logical wire, the last gate index that reads it (last_use) and whether it
 // must hold a permanent slot (persist = inputs / AND-outputs / circuit-outputs).
-// This is the streaming analogue of compute_wire_layout's scan (circuit_layout.h)
-// — no gate list is materialized; the body is just replayed. It runs before the
-// fused pass so the fused pass can recycle XOR/NOT fabric slots inline.
+// It is a streaming slot-assignment scan — no gate list is materialized; the
+// body is just replayed. It runs before the fused pass so the fused pass can
+// recycle XOR/NOT fabric slots inline.
 //
 // Wire ids match the other phases exactly (wid starts at num_inputs, ++ per
 // public_label / and / xor / not), and the gate index gi advances only on
@@ -126,7 +117,7 @@ class LivenessBackend : public PhaseBackend {
  public:
   LambdaState &s;
   int wid;
-  int gi = 0;   // gate index over and/xor/not only (matches compute_wire_layout)
+  int gi = 0;   // gate index over and/xor/not only (matches the other phases)
   std::vector<int> last_use;
   std::vector<char> persist;
 
@@ -641,20 +632,25 @@ class PostRecvCheckBackend : public PhaseBackend {
 // LambdaRunner: the streaming AG2PC engine. One phase choreography (liveness ->
 // size/collect -> garble/evaluate -> c_γ correction -> output), one LambdaState
 // + phase Backends, driven by a CIRCUIT SOURCE — a replay callback that emits
-// the circuit under the installed phase backend. Three sources share the engine:
+// the circuit under the installed phase backend. Every source replays through
+// this one engine; there is no second garbling/evaluation path anywhere in
+// AG2PC. The sources:
 //
 //   frontend body      run<Ins...>(inputs, body)
-//                      -> frontend::run(body, LambdaWire args)        [streaming]
+//                      -> frontend::run(body, LambdaWire args)
 //   compiled circuit   run_compiled<Ins...>(tc, inputs)
-//                      -> frontend::run(tc, LambdaWire args)          [streaming]
-//   legacy flat lambda run_circuit(in_wires, n_out, lambda)          [streaming]
+//                      -> frontend::run(tc, LambdaWire args)
+//   raw program        run_program(prog, inputs, output_ids)
+//                      -> replay a frontend::BooleanProgram directly
+//   legacy flat lambda run_circuit(in_wires, n_out, lambda)
 //
 // The frontend body and compiled circuit are both emp-tool/frontend front-doors:
 // a body is the source code; a compiled circuit (frontend::compile -> TypedCircuit)
 // is its recorded BooleanProgram. frontend::run walks either against the phase
 // backend, issuing identical backend calls — so a compiled circuit needs no
-// WireGraph / lowering. (The legacy/direct AG2PCBackend recorder is a SEPARATE,
-// non-streaming path that still uses an internal WireGraph plan; not here.)
+// lowering. The direct AG2PCBackend recorder (ag2pc_backend.h) is an imperative
+// adapter that buffers a chunk into a frontend::BooleanProgram and runs it here
+// via run_program — same engine, not a separate path.
 //
 // CONSTANT subtlety: compile() dedupes CONST0/CONST1, so a compiled circuit's
 // gate stream — and thus its transcript — can differ from the equivalent body
@@ -692,7 +688,7 @@ class LambdaRunner {
   // TypedCircuit) through the SAME streaming engine, replaying the recorded
   // BooleanProgram per phase via frontend::run(tc, args) (see
   // make_compiled_frontend_replay_) instead of re-invoking a body. The compiled
-  // source is the canonical frontend circuit — no WireGraph / lowering. Ins...
+  // source is the canonical frontend circuit — no lowering step. Ins...
   // name the input shapes (as in compile<Ins...>); RetRec is deduced from tc.
   //
   // NOTE: compile() dedupes CONST0/CONST1, so a compiled circuit's gate stream
@@ -716,6 +712,69 @@ class LambdaRunner {
     auto replay =
         make_flat_lambda_replay_((int)in_wires.size(), n_out, std::move(lambda));
     return run_engine_(in_wires, replay);
+  }
+
+  // Raw compiled-program source: replay a frontend::BooleanProgram through the
+  // shared engine. Lower-level than run_compiled<Ins...> (no typed args) — for
+  // dynamically-shaped programs such as the direct recorder's per-chunk circuits.
+  // `inputs` are bound to wire ids [0, inputs.size()) (it must equal the program's
+  // input-wire count); `output_ids` names the program wires to return, in order.
+  // Reuses run_engine_ — no garble/evaluate logic here.
+  //
+  // This is a raw entry point: it validates the program's shape up front (input
+  // width, in-range gate operands / outputs) so a malformed BooleanProgram aborts
+  // via error() instead of indexing out of bounds during replay.
+  SecureWires run_program(const frontend::BooleanProgram &prog,
+                          const SecureWires &inputs,
+                          const std::vector<int> &output_ids) {
+    const int num_inputs = (int)inputs.size();
+    const int NW = prog.num_wire;
+    if (num_inputs != prog.total_input_bits())
+      error("run_program: input bundle width != program input-wire count");
+    // Inputs are bound POSITIONALLY to wire ids [0, num_inputs): the replay
+    // writes buf[0..num_inputs) (which must fit in buf, sized NW) and ignores
+    // InputPort::base, so the ports must in fact tile [0, num_inputs) in order.
+    if (num_inputs > NW)
+      error("run_program: input count exceeds program wire count");
+    int expect = 0;
+    for (const frontend::InputPort &p : prog.inputs) {
+      if (p.n < 0 || p.base != expect)
+        error("run_program: input ports must be contiguous from wire 0");
+      expect += p.n;
+    }
+    auto chk = [&](int w) {
+      if (w < 0 || w >= NW) error("run_program: wire id out of range");
+    };
+    for (const frontend::Gate &g : prog.gates) {
+      chk(g.out);
+      if (!g.is_const())               chk(g.in0);
+      if (g.is_and() || g.is_xor())    chk(g.in1);
+    }
+    for (int o : output_ids) chk(o);
+
+    // Replay the program's gates against the installed phase backend, binding
+    // input wires [0,num_inputs) to LambdaWire ids [0,num_inputs). CONST gates
+    // dispatch to public_label; AND/XOR/NOT to the matching op. Identical each
+    // phase (program is fixed) → deterministic wire ids. (Inlined rather than a
+    // helper because run_program is non-template and the helper's deduced return
+    // type couldn't be used before its definition.)
+    auto replay = [&prog, num_inputs, &output_ids]() -> std::vector<int> {
+      std::vector<LambdaWire> buf(prog.num_wire);
+      for (int i = 0; i < num_inputs; ++i) buf[i] = LambdaWire(i);
+      for (const frontend::Gate &g : prog.gates) {
+        switch (g.op) {
+          case frontend::Op::CONST0: backend->public_label(&buf[g.out], false); break;
+          case frontend::Op::CONST1: backend->public_label(&buf[g.out], true);  break;
+          case frontend::Op::AND: backend->and_gate(&buf[g.out], &buf[g.in0], &buf[g.in1]); break;
+          case frontend::Op::XOR: backend->xor_gate(&buf[g.out], &buf[g.in0], &buf[g.in1]); break;
+          case frontend::Op::NOT: backend->not_gate(&buf[g.out], &buf[g.in0]); break;
+        }
+      }
+      std::vector<int> ids(output_ids.size());
+      for (size_t i = 0; i < output_ids.size(); ++i) ids[i] = buf[output_ids[i]].id;
+      return ids;
+    };
+    return run_engine_(inputs, replay);
   }
 
  private:
@@ -917,7 +976,9 @@ class LambdaRunner {
     // ---------- compute_inplace (no replay; pure protocol over arrays) ----------
     mpc->fpre->compute_inplace(st.rep_a, st.rep_b, st.num_ands, st.sigma);
 
-    // MITC start point — same derivation as C2PC::compute_impl.
+    // MITC start point — drawn fresh from the FS transcript (identical on both
+    // parties via get_digest's canonical d_AB‖d_BA; advances every reactive
+    // round so the gid-derived gate tweaks never repeat).
     st.mitc.setS(RO("AG2PC half-gate", zero_block)
                      .absorb(mpc->io->get_digest())
                      .absorb(mpc->sib->get_digest())

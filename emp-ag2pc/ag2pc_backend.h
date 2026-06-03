@@ -2,7 +2,8 @@
 #define EMP_AG2PC_BACKEND_H__
 #include "emp-tool/execution/backend.h"
 #include "emp-ag2pc/2pc.h"
-#include "emp-ag2pc/wire_graph.h"
+#include "emp-ag2pc/lambda_runner.h"   // LambdaRunner::run_program (the shared engine)
+#include "emp-tool/frontend/boolean_program.h"
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -33,16 +34,10 @@ namespace emp {
 // boundaries (never mid-chunk — chunk_gates_ may still reference them).
 
 class AG2PCBackend;
-struct LambdaWire;   // fwd decl for the cross-type cast ctor
 
 // 4-byte wire carrier with refcount semantics. Pin on construct/copy, unpin on
 // destruct/overwrite — all routed to AG2PCBackend::singleton_'s pin/unpin. A
 // null/moved-from carrier has id == -1 and does no bookkeeping.
-//
-// Counterpart in lambda mode is LambdaWire (defined in lambda_runner.h) — a
-// bare int with no hook. Explicit cast ctors in both directions let helpers
-// templated on the wire type interop across modes without accidental implicit
-// conversion.
 struct AG2PCWire {
   int id;
 
@@ -59,10 +54,6 @@ struct AG2PCWire {
     return *this;
   }
   ~AG2PCWire() noexcept { unpin_(); }
-
-  // Cross-type bridge from LambdaWire (defined inline in lambda_runner.h once
-  // LambdaWire is complete).
-  explicit AG2PCWire(const LambdaWire &l) noexcept;
 
  private:
   // Defined out-of-line below so they can reference AG2PCBackend::singleton_.
@@ -88,12 +79,20 @@ class AG2PCBackend : public Backend {
 
   size_t wire_bytes() const override { return sizeof(AG2PCWire); }
 
-  // Public constants get sentinel ids (consume no slot, stay out of the
-  // input/gate id space). They are resolved to real wires inside run_chunk —
-  // c0 = XOR(w0,w0), c1 = NOT c0 — so a constant may legally appear before any
-  // input is fed.
+  // Public constants are first-class CONST0/CONST1 gates, allocated a real
+  // recorder id and canonicalized per chunk (repeats alias the same wire). A
+  // constant is therefore an ordinary wire — it can be revealed or carried like
+  // any other, and a constant-only chunk is legal. The CONST gate has no
+  // operands; run_chunk_ assigns it a compact id after the inputs.
   void public_label(void *out, bool b) override {
-    *static_cast<AG2PCWire *>(out) = AG2PCWire(b ? kConst1 : kConst0);
+    int idx = b ? 1 : 0;
+    if (const_wire_[idx] < 0) {
+      int o = alloc_id_();
+      chunk_gates_.push_back({-1, -1, o,
+                              b ? frontend::Op::CONST1 : frontend::Op::CONST0});
+      const_wire_[idx] = o;
+    }
+    *static_cast<AG2PCWire *>(out) = AG2PCWire(const_wire_[idx]);
   }
 
   void feed(void *out, int from_party, const bool *in, size_t n) override {
@@ -102,11 +101,12 @@ class AG2PCBackend : public Backend {
         public_label(static_cast<AG2PCWire *>(out) + i, in[i]);
       return;
     }
-    // A secret input arriving after gates would break the "inputs first" wire
-    // layout of the current chunk — transparently flush the chunk (carrying
-    // every alive wire forward) so this input starts a fresh chunk. Costs one
-    // protocol round.
-    if (!chunk_gates_.empty()) checkpoint_keep_all();
+    // A secret input arriving after real compute gates would break the "inputs
+    // first" wire layout of the current chunk — transparently flush the chunk
+    // (carrying every alive wire forward) so this input starts a fresh chunk.
+    // Costs one protocol round. (Recorded CONST gates don't count: they read no
+    // inputs, so they impose no ordering on a later secret feed.)
+    if (chunk_real_gates_ > 0) checkpoint_keep_all();
     InputRec rec;
     rec.owner = from_party;
     rec.bits.assign(in, in + n);
@@ -122,21 +122,24 @@ class AG2PCBackend : public Backend {
   void and_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, b, o, Gate::AND_PENDING});
+    chunk_gates_.push_back({a, b, o, frontend::Op::AND});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
     ++ands_;
+    ++chunk_real_gates_;
   }
   void xor_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, b, o, Gate::XOR_TAG});
+    chunk_gates_.push_back({a, b, o, frontend::Op::XOR});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
+    ++chunk_real_gates_;
   }
   void not_gate(void *out, const void *in) override {
     int a = id_of_(in);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, 0, o, Gate::NOT_TAG});
+    chunk_gates_.push_back({a, -1, o, frontend::Op::NOT});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
+    ++chunk_real_gates_;
   }
 
   // Reveal: flush the current chunk (everyone alive carries forward; the
@@ -170,7 +173,7 @@ class AG2PCBackend : public Backend {
   // some user-side Bit handle. The new test_keep_all checks this to confirm
   // {Bit b;}-style dead wires actually drop from the carry.
   size_t live_wire_count() const {
-    return (size_t)next_id_ - free_ids_.size() - free_buffered_dead_;
+    return (size_t)next_id_ - free_ids_.size() - pending_dead_ids_.size();
   }
 
   // Singleton install/uninstall lets the 4-byte AG2PCWire reach the backend
@@ -179,15 +182,16 @@ class AG2PCBackend : public Backend {
   static AG2PCBackend *singleton_;
 
   // Refcount hooks called from AG2PCWire's ctor/copy/dtor. Bounds-checked
-  // because constant sentinels (kConst0/kConst1) flow through the same
-  // carrier and have negative ids that must be skipped.
+  // because default-constructed (null, id = -1) and out-of-range carriers flow
+  // through the same path and must be skipped.
   void pin(int id) {
-    if (id < 0 || (size_t)id >= meta_.size()) return;   // sentinel / null
+    if (id < 0 || (size_t)id >= meta_.size()) return;   // null / out of range
     ++meta_[id].refcount;
   }
   void unpin(int id) {
     if (id < 0 || (size_t)id >= meta_.size()) return;
-    if (--meta_[id].refcount == 0) ++free_buffered_dead_;   // reclaimable at next chunk
+    if (--meta_[id].refcount == 0)
+      pending_dead_ids_.push_back(id);   // reclaimable at next chunk
   }
 
  private:
@@ -218,14 +222,21 @@ class AG2PCBackend : public Backend {
   std::vector<WireMeta> meta_;                  // indexed by slot id
   std::unordered_map<int, CarriedState> carried_;  // recorder id -> cross-chunk state
   std::vector<int> free_ids_;                   // stack: returned at chunk boundary
-  std::vector<Gate> chunk_gates_;               // current-chunk gate log
+  std::vector<frontend::Gate> chunk_gates_;     // current-chunk gate log (frontend IR)
   std::vector<InputRec> chunk_inputs_;          // current-chunk input registrations
   int next_id_ = 0;                             // gid for never-allocated slots
   uint64_t ands_ = 0;
-  // Count of slots whose refcount hit 0 mid-chunk; their ids stay reserved
-  // until the next checkpoint, then are pushed to free_ids_ in bulk.
-  size_t free_buffered_dead_ = 0;
-  static constexpr int kConst0 = -2, kConst1 = -3;  // public-constant sentinels
+  // Canonical CONST0/CONST1 wire ids for the current chunk (-1 = not yet
+  // emitted). public_label aliases repeats to these so each chunk holds at most
+  // one c0 and one c1 wire; reset at every chunk boundary.
+  int const_wire_[2] = {-1, -1};
+  // Count of real compute gates (AND/XOR/NOT — excluding CONST0/CONST1) recorded
+  // this chunk. A secret feed after a real gate must start a fresh chunk; CONST
+  // gates impose no such ordering (they read no inputs), so they don't count.
+  size_t chunk_real_gates_ = 0;
+  // Slots whose refcount hit 0 mid-chunk; their ids stay reserved until the
+  // next checkpoint, then are pushed to free_ids_ in bulk.
+  std::vector<int> pending_dead_ids_;
 
   static int id_of_(const void *p) {
     return static_cast<const AG2PCWire *>(p)->id;
@@ -242,6 +253,10 @@ class AG2PCBackend : public Backend {
     } else {
       id = next_id_++;
       meta_.emplace_back();
+      // AG2PCWire destructors call unpin_() noexcept; keep enough spare room
+      // that pending_dead_ids_.push_back(id) never allocates on that path.
+      if (pending_dead_ids_.capacity() < meta_.capacity())
+        pending_dead_ids_.reserve(meta_.capacity());
     }
     meta_[id].alive = true;
     return id;
@@ -293,8 +308,8 @@ class AG2PCBackend : public Backend {
   // (chunk_gates_ has been consumed): push onto free_ids_, drop any carried
   // state. Called at every chunk boundary.
   void reclaim_dead_slots_() {
-    if (free_buffered_dead_ == 0) return;
-    for (int id = 0; id < (int)meta_.size(); ++id) {
+    if (pending_dead_ids_.empty()) return;
+    for (int id : pending_dead_ids_) {
       WireMeta &m = meta_[id];
       if (m.refcount == 0 && m.alive) {
         free_ids_.push_back(id);
@@ -302,22 +317,31 @@ class AG2PCBackend : public Backend {
         m = WireMeta{};
       }
     }
-    free_buffered_dead_ = 0;
+    pending_dead_ids_.clear();
   }
 
   // Run the current chunk through the protocol: pick out the reachable subgraph
-  // (DCE from the alive-pinned ids), assemble a WireGraph with compact ids,
-  // execute, and stash every alive id's fresh state into carried_ so it
-  // survives to the next chunk. reveal() gathers its decode targets from
-  // carried_ separately (no decode-output slicing needed here).
+  // (DCE from the alive-pinned ids), assemble a frontend::BooleanProgram with
+  // compact ids, execute it on the shared engine (LambdaRunner::run_program),
+  // and stash every alive id's fresh state into carried_ so it survives to the
+  // next chunk. reveal() gathers its decode targets from carried_ separately
+  // (no decode-output slicing needed here).
+  //
+  // The recorder is just a buffering/chunking adapter: it emits a per-chunk
+  // BooleanProgram and hands it to the one protocol executor (run_engine_).
+  // There is no private garbling/evaluation path here.
   //
   // Memory: the per-chunk scratch is held as flat vectors sized to meta_.size()
   // / chunk_gates_.size() — index-by-id is O(1) and dense; we never pay the
   // 2–3× hash-table footprint that an unordered_map<int,int> would cost at
   // 10 M chunk-local wires. The chunk's gate list is moved (not copied) into
-  // g.gates and compacted in place, so we never hold two 57 M-entry gate
-  // vectors at once.
+  // prog.gates and compacted in place, so we never hold two gate vectors at once.
   void run_chunk_() {
+    if (chunk_gates_.empty() && chunk_inputs_.empty()) {
+      reclaim_dead_slots_();
+      return;
+    }
+
     const int N = (int)meta_.size();
     const int G = (int)chunk_gates_.size();
 
@@ -346,37 +370,38 @@ class AG2PCBackend : public Backend {
       int gi = wire_to_gate[w];
       if (gi < 0 || needed[gi]) continue;
       needed[gi] = 1;
-      const Gate &gg = chunk_gates_[gi];
+      const frontend::Gate &gg = chunk_gates_[gi];
       stack.push_back(gg.in0);
-      if (gg.op != Gate::NOT_TAG) stack.push_back(gg.in1);
+      if (!gg.is_not()) stack.push_back(gg.in1);
     }
 
     // Mark which non-chunk-local ids the needed gates actually read — those
-    // become WireGraph inputs (either carried-from-prior or new chunk_input).
-    // Public constants flow through kConst0/kConst1 sentinels.
+    // become program inputs (either carried-from-prior or new chunk_input).
+    // CONST gate operands are -1 and fall through the v<0 guard; the constants
+    // themselves are chunk-local gates (handled by the reachability walk above).
     std::vector<char> input_needed(N, 0);
-    bool need_c0 = false, need_c1 = false;
     auto note = [&](int v) {
-      if (v == kConst0) { need_c0 = true; return; }
-      if (v == kConst1) { need_c0 = need_c1 = true; return; }
       if (v < 0 || v >= N) return;
       if (wire_to_gate[v] >= 0) return;       // chunk-local (its producer is also needed)
       input_needed[v] = 1;
     };
     for (int gi = 0; gi < G; ++gi) {
       if (!needed[gi]) continue;
-      const Gate &gg = chunk_gates_[gi];
+      const frontend::Gate &gg = chunk_gates_[gi];
       note(gg.in0);
-      if (gg.op != Gate::NOT_TAG) note(gg.in1);
+      if (!gg.is_not()) note(gg.in1);
     }
 
     // Compact-id remap (flat, indexed by recorder id; -1 = unmapped).
     std::vector<int> remap(N, -1);
-    int remap_c0 = -1, remap_c1 = -1;
     int cid = 0;
 
-    WireGraph g;
-    std::vector<SecureWires> bundles;
+    frontend::BooleanProgram prog;
+    // One flat input bundle: positions [0, num_in) align with compact ids
+    // [0, num_in) — exactly the order run_program binds inputs to wire ids.
+    // prog.inputs mirrors that layout (carried group, then per-owner groups) so
+    // the IR's declared input width matches input_bundle.size() exactly.
+    SecureWires input_bundle;
 
     // 4a. Carried-from-prior-chunk inputs the needed gates reference. carried_in
     //     is built in id order so it's already sorted.
@@ -384,7 +409,8 @@ class AG2PCBackend : public Backend {
     for (int id = 0; id < N; ++id)
       if (input_needed[id] && !is_chunk_input[id]) carried_in.push_back(id);
     if (!carried_in.empty()) {
-      bundles.push_back(gather_carried_(carried_in));
+      append_bundle_(input_bundle, gather_carried_(carried_in));
+      prog.inputs.push_back({cid, (int)carried_in.size()});
       for (int id : carried_in) remap[id] = cid++;
     }
 
@@ -417,92 +443,85 @@ class AG2PCBackend : public Backend {
       }
       int cnt = cid - base;
       if (cnt == 0) continue;
-      g.inputs.push_back({owner, base, cnt});
+      prog.inputs.push_back({base, cnt});
       kept_owners.push_back(owner);
       kept_bits.push_back(std::move(bits));
     }
     if (!kept_owners.empty()) {
       auto sub = mpc->process_inputs(kept_owners, kept_bits);
-      for (auto &s : sub) bundles.push_back(std::move(s));
+      for (auto &s : sub) append_bundle_(input_bundle, s);
       ++process_input_calls;
     }
 
-    // 4c. Public constants: synthesize c0 = XOR(w0,w0), c1 = NOT(c0) as gates
-    //     at the head of the WireGraph (so they're produced before any chunk
-    //     gate reads them). The chunk-gate emit loop below will run after.
-    std::vector<Gate> pre_gates;
-    if (need_c0 || need_c1) {
-      if (cid == 0) error("AG2PCBackend: public constant requires >=1 input");
-      remap_c0 = cid++;
-      pre_gates.push_back({0, 0, remap_c0, Gate::XOR_TAG});
-      if (need_c1) {
-        remap_c1 = cid++;
-        pre_gates.push_back({remap_c0, 0, remap_c1, Gate::NOT_TAG});
-      }
-    }
+    // At this point cid == the number of true input wires (carried + freshly
+    // fed), and input_bundle has exactly that many positions. CONST gates below
+    // get compact ids >= cid (produced by replay, not bound from input_bundle).
 
-    // 4d. Move chunk_gates_ INTO g.gates (O(1)) and compact in place: each
-    //     needed gate gets rewritten with remapped operands + a fresh compact
-    //     output id, written into the next write slot; pruned gates are
-    //     skipped. This avoids the 2× peak of a fresh g.gates vector growing
-    //     while chunk_gates_ is still alive (~900 MB at SHA × 50).
-    auto rm = [&](int v) -> int {
-      if (v == kConst0) return remap_c0;
-      if (v == kConst1) return remap_c1;
-      return remap[v];                              // v in [0, N); flat lookup
-    };
-    g.gates = std::move(chunk_gates_);              // chunk_gates_ left empty
+    // 4c. Move chunk_gates_ INTO prog.gates (O(1)) and compact in place: each
+    //     needed gate (AND/XOR/NOT and CONST0/CONST1) gets rewritten with
+    //     remapped operands + a fresh compact output id, written into the next
+    //     write slot; pruned gates are skipped. Emission order is preserved, so
+    //     a CONST gate is compacted (and thus produced on replay) before any
+    //     gate that reads it. This avoids the 2× peak of a fresh prog.gates
+    //     vector growing while chunk_gates_ is still alive.
+    auto rm = [&](int v) -> int { return remap[v]; };   // v in [0, N); flat lookup
+    prog.gates = std::move(chunk_gates_);           // chunk_gates_ left empty
     int write_idx = 0;
-    for (int gi = 0; gi < (int)g.gates.size(); ++gi) {
+    for (int gi = 0; gi < (int)prog.gates.size(); ++gi) {
       if (!needed[gi]) continue;
-      Gate gg = g.gates[gi];                        // value copy (16 B)
+      frontend::Gate gg = prog.gates[gi];           // value copy (16 B)
       int compact_out = cid++;
       remap[gg.out] = compact_out;
-      g.gates[write_idx++] = Gate{rm(gg.in0),
-                                  (gg.op == Gate::NOT_TAG ? 0 : rm(gg.in1)),
-                                  compact_out, gg.op};
+      int ni0 = gg.is_const() ? -1 : rm(gg.in0);
+      int ni1 = (gg.is_const() || gg.is_not()) ? -1 : rm(gg.in1);
+      prog.gates[write_idx++] = frontend::Gate{ni0, ni1, compact_out, gg.op};
     }
-    g.gates.resize(write_idx);
+    prog.gates.resize(write_idx);
 
-    // Prepend the (rare, tiny) constant gates. shrink-shift is one-time and
-    // small in absolute terms even at 57 M gates.
-    if (!pre_gates.empty())
-      g.gates.insert(g.gates.begin(), pre_gates.begin(), pre_gates.end());
-
-    // 5. WireGraph output ids = every alive id that ended up in the graph
-    //    (had its remap entry set in 4a/4b/4d). Alive ids carried over from a
-    //    prior chunk but unused this chunk stay in carried_ unchanged.
+    // 5. Program outputs = every alive id that ended up in the program (had its
+    //    remap entry set in 4a/4b/4d). Alive ids carried over from a prior chunk
+    //    but unused this chunk stay in carried_ unchanged.
     std::vector<int> all_out_recorder;
     for (int id = 0; id < N; ++id)
       if (meta_[id].refcount > 0 && remap[id] >= 0)
         all_out_recorder.push_back(id);
 
-    g.num_wire = cid;
-    g.output_ids.reserve(all_out_recorder.size());
-    for (int id : all_out_recorder) g.output_ids.push_back(remap[id]);
+    prog.num_wire = cid;
+    prog.outputs.reserve(all_out_recorder.size());
+    for (int id : all_out_recorder) prog.outputs.push_back(remap[id]);
 
-    // 6. Liveness + AND-index numbering. Same shape as the old run_chunk;
-    //    operates on the compact WireGraph.
-    g.last_use.assign(g.num_wire, -1);
-    int ng = g.num_gate(), ai = 0;
-    for (int gi = 0; gi < ng; ++gi) {
-      Gate &gg = g.gates[gi];
-      g.last_use[gg.in0] = gi;
-      g.last_use[gg.in1] = gi;
-      if (gg.op == Gate::AND_PENDING) gg.op = ai++;
-    }
-    g.num_ands = ai;
+    // 6. Run the protocol on the shared engine. run_program binds input_bundle
+    //    positions to wire ids [0, input_bundle.size()), replays the gates
+    //    through run_engine_, and gathers prog.outputs.
+    LambdaRunner runner(mpc);
+    SecureWires result = runner.run_program(prog, input_bundle, prog.outputs);
 
-    // 7. Run the protocol.
-    SecureWires result = mpc->compute(g, bundles);
-
-    // 8. Stash every alive id's fresh state into carried_ so the next chunk
+    // 7. Stash every alive id's fresh state into carried_ so the next chunk
     //    can find it (and reveal() can gather it).
     stash_carried_(all_out_recorder, result);
 
-    // 9. Consume per-chunk state; reclaim dead slots onto the free list.
+    // 8. Consume per-chunk state; reclaim dead slots onto the free list. The
+    //    constant cache and real-gate counter reset so the next chunk re-emits
+    //    its own CONST gates (a carried constant lives on as an ordinary wire).
     chunk_inputs_.clear();
+    const_wire_[0] = const_wire_[1] = -1;
+    chunk_real_gates_ = 0;
     reclaim_dead_slots_();
+  }
+
+  // Concatenate one per-owner / carried SecureWires bundle onto the flat input
+  // bundle, preserving wire order. Only the role-relevant label vector is
+  // present (label0 for the garbler P1, eval_label for the evaluator P2); the
+  // role-independent fields (Lambda, wire_bundle) always carry.
+  void append_bundle_(SecureWires &dst, const SecureWires &src) const {
+    dst.Lambda.insert(dst.Lambda.end(), src.Lambda.begin(), src.Lambda.end());
+    dst.wire_bundle.insert(dst.wire_bundle.end(),
+                           src.wire_bundle.begin(), src.wire_bundle.end());
+    if (party == 1)
+      dst.label0.insert(dst.label0.end(), src.label0.begin(), src.label0.end());
+    else
+      dst.eval_label.insert(dst.eval_label.end(),
+                            src.eval_label.begin(), src.eval_label.end());
   }
 };
 

@@ -21,14 +21,15 @@
 //     the compiled path to produce the SAME ciphertext (oracle equality), NOT a
 //     byte-identical transcript.
 //
-// (The legacy/direct recorder is a separate engine and is covered by test_aes /
-// test_recording; it is not compared here.)
+// (The direct recorder runs on this SAME engine — it emits BooleanProgram chunks
+// into run_program — and is covered by test_direct_recorder / test_direct_crypto.
+// Its transcript is not compared here: its gate stream depends on chunk
+// boundaries, not just the circuit, so byte-equivalence is not expected.)
 //
 // Each run gets its own connection (so a channel's cumulative digest covers
 // exactly one run) and resets the deterministic seed counter first.
 #include "emp-tool/emp-tool.h"
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-ag2pc/ag2pc_backend.h"
 #include "emp-ag2pc/lambda_runner.h"
 #include "emp-ag2pc/lambda_circuit_types.h"   // Bit / BitVec = *_T<LambdaWire>
 #include "emp-tool/frontend/frontend.h"

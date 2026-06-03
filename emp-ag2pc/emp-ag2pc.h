@@ -11,13 +11,15 @@
 #include "emp-ag2pc/triple_pool.h"
 #include "emp-ag2pc/helper.h"
 #include "emp-ag2pc/share_bundle.h"
-#include "emp-ag2pc/circuit_layout.h"
 #include "emp-ag2pc/2pc.h"
 
 // Frontend execution surface: LambdaRunner drives a circuit SOURCE (a pure
-// frontend body via run<Ins...>, or a compiled frontend::TypedCircuit via
-// run_compiled<Ins...>) through the streaming engine. Pulls in ag2pc_backend.h
-// (AG2PCWire / the direct recorder) and emp-tool's frontend executor.
+// frontend body via run<Ins...>, a compiled frontend::TypedCircuit via
+// run_compiled<Ins...>, or a raw frontend::BooleanProgram via run_program)
+// through the one streaming engine (run_engine_). The direct recorder
+// (ag2pc_backend.h) is a separate buffering/chunking adapter that emits
+// BooleanProgram chunks and runs them on this same engine; tests that want it
+// include ag2pc_backend.h (or ag2pc_circuit_types.h) directly.
 //
 // Intentionally NOT included: lambda_circuit_types.h. Its
 // EMP_USE_CIRCUIT_TYPES_ALL(LambdaWire) aliases (Bit/UInt32/...) collide with

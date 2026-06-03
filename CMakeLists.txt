@@ -16,7 +16,8 @@ endif()
 # ---------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------
-option(EMP_AG2PC_BUILD_TESTS "Build emp-ag2pc tests"      ${PROJECT_IS_TOP_LEVEL})
+option(EMP_AG2PC_BUILD_TESTS   "Build emp-ag2pc tests"                        ${PROJECT_IS_TOP_LEVEL})
+option(EMP_AG2PC_BUILD_BENCHES "Build emp-ag2pc benchmarks (opt-in; not run by ctest)" OFF)
 
 # ---------------------------------------------------------------------
 # Dependencies

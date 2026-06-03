@@ -23,9 +23,17 @@
 
 Maliciously-secure **two-party computation via authenticated garbling**, on
 top of [emp-tool](https://github.com/emp-toolkit/emp-tool) and
-[emp-ot](https://github.com/emp-toolkit/emp-ot). Circuits are authored in
-emp-tool's native `Bit` / `Integer` frontend and run through a recording
-backend — no BristolFormat files to hand-write or ship.
+[emp-ot](https://github.com/emp-toolkit/emp-ot). Circuits are written as pure
+emp-tool frontend functions (`Bit` / `Integer` / … in, a value out) and executed
+through a shared streaming engine — no BristolFormat files to hand-write or ship.
+
+The frontend execution path is **`LambdaRunner`**: a circuit *source* — a pure
+wire-generic body (`run<Ins...>`) or a `frontend::compile`d circuit
+(`run_compiled<Ins...>`) — replayed per protocol phase. Inputs and outputs stay
+outside the circuit (`C2PC::process_inputs` / `decode`). (A legacy direct
+recorder, `AG2PCBackend`, still exists for `Bit a = …; a.reveal()`-style code
+with mid-stream reveals; it is not the recommended path and is being re-evaluated
+— see *Legacy direct recorder* below.)
 
 The protocol is authenticated garbling [WRK17] with the
 [KRRW18](https://eprint.iacr.org/2018/578) optimizations: a **function-dependent**
@@ -111,52 +119,94 @@ ctest --test-dir build --output-on-failure
 ```
 
 Each test launches the two parties on localhost via the top-level `run`
-helper and checks the secure output against a cleartext oracle:
+helper and checks the secure output against a cleartext oracle. There is ONE
+protocol executor (`LambdaRunner::run_engine_`); the tests are grouped by the
+architectural surface that feeds it, not by source × circuit:
 
 | Test | What it exercises |
 |---|---|
-| `test_aes`        | AES-128 in the native Bit frontend vs plaintext AES |
-| `test_sha256`     | SHA-256 compression (`SHA_BLOCKS=N` for N back-to-back blocks) |
-| `test_chain`      | AES ×2 with a mid-circuit `checkpoint_ag2pc_keep_all()` (bounded memory) |
-| `test_keep_all`   | `{ Bit b; }`-scoped wires really do drop at the next checkpoint |
-| `test_reactive`   | reveal-to-`PUBLIC` host branching |
-| `test_recording`  | the record → `WireGraph` → `C2PC` path on a tiny circuit |
-| `test_rounds`     | input batching (one `process_input` per owner) |
-| `wire_graph_test` | the `WireGraph` IR end to end |
+| `test_frontend_api`     | small/fast frontend API: `run<Ins...>` (live), `run_compiled<Ins...>`, chaining, a C++20 template-lambda body, a public-constant compiled circuit, and raw `run_program` on a `BooleanProgram` |
+| `test_frontend_crypto`  | crypto-sized frontend circuits vs oracle: AES-128 live + compiled, SHA-256 via the flat-lambda `run_circuit` source |
+| `test_direct_recorder`  | direct-recorder semantics: record→reveal (incl. constant-only reveal), per-owner input batching, mid-stream checkpoint carry, reactive reveal/branch/new-input, RAII liveness |
+| `test_direct_crypto`    | the direct recorder at scale vs oracle: AES-128 and SHA-256 (`SHA_BLOCKS`, `SHA_CHECKPOINT`) |
+| `test_wire_equiv`       | byte-equivalence of the two streaming front-doors; semantic equivalence of the compiled path (transcript-sensitive, kept standalone) |
+
+The direct recorder (`AG2PCBackend`) is **not** a separate path: it is an
+imperative adapter that emits `BooleanProgram` chunks and runs them on the same
+engine via `run_program`.
+
+Benchmarks (`test/bench_modes.cpp`) are opt-in: they build only with
+`-DEMP_AG2PC_BUILD_BENCHES=ON` (OFF by default) and are **not** registered with
+`ctest`. Build and run manually, e.g.:
+
+```sh
+cmake -S . -B build -DEMP_AG2PC_BUILD_BENCHES=ON
+cmake --build build --target bench_modes
+BENCH_MODE=direct-chunked SHA_BLOCKS=50 SHA_CHECKPOINT=10 ./run ./build/bin/bench_modes
+```
+
+Modes are `direct-chunked`, `frontend-compiled`, `frontend-live` — all on the
+one shared engine; `direct-chunked` is the direct recorder, not a separate
+crypto backend.
 
 ## Usage
 
-Author the circuit once, in ordinary emp-tool frontend code; the backend
-records it and runs the protocol at the (single, terminal) reveal. Every
-party runs the same program, passing its own input and a dummy for inputs it
-does not own.
+Write the circuit as a **pure emp-tool frontend function** — circuit-value
+arguments in, a circuit value out, no I/O inside — and run it through
+`LambdaRunner`. Inputs and outputs stay *outside* the circuit: each party
+`process_inputs` its own bits (a dummy for inputs it does not own), and the
+caller `decode`s the result. Every party runs the same program.
 
 ```cpp
-#include <emp-ag2pc/emp-ag2pc.h>
-#include <emp-ag2pc/ag2pc_backend.h>
-#include <emp-ag2pc/ag2pc_circuit_types.h>   // Bit / Integer / ... = *_T<AG2PCWire>
+#include <emp-ag2pc/emp-ag2pc.h>            // exposes C2PC + LambdaRunner
+EMP_USE_CIRCUIT_TYPES_ALL(block)            // UInt32, ... for the Ins template args
 using namespace emp;
 
-// One NetIO to the peer (party 1 server, party 2 client); the protocol spawns
-// its own sibling channel internally (NetIO::make_sibling).
 NetIO *io = (party == 1) ? new NetIO(nullptr, port)        // server
                          : new NetIO("127.0.0.1", port);   // client
-
 ThreadPool pool(4);
+C2PC mpc(io, &pool, party);
+LambdaRunner runner(&mpc);
+
+// A pure, wire-generic body: args in, value out. No feed/reveal inside.
+auto add = [](auto a, auto b) { return a + b; };
+
+// Inputs processed OUTSIDE the circuit (x owned by P1, y by P2).
+auto in = mpc.process_inputs({1, 2}, { x_bits /*P1*/, y_bits /*P2*/ });
+
+// LIVE — replay the body per phase:
+SecureWires out = runner.run<UInt32, UInt32>({in[0], in[1]}, add);
+// COMPILED — record once, replay many:
+//   auto c = frontend::compile<UInt32, UInt32>(add);
+//   SecureWires out = runner.run_compiled<UInt32, UInt32>(c, {in[0], in[1]});
+
+std::vector<bool> z = mpc.decode(out, /*to=*/1);   // result at party 1
+```
+
+`Bit`, `Integer`, `Float`, `BitVec`, and the rest of emp-tool's frontend work as
+argument/return types; the body must be wire-generic (a generic / template lambda
+or templated functor).
+
+### Legacy direct recorder
+
+An older path, `AG2PCBackend`, lets you write straight-line `Bit a(...); a & b;
+a.reveal()` code with **mid-stream reveals / checkpoints** (which the streaming
+engine does not provide). It is **not the recommended frontend path** and is
+being re-evaluated; it records gates and runs the protocol at each reveal.
+
+```cpp
+#include <emp-ag2pc/ag2pc_backend.h>
+#include <emp-ag2pc/ag2pc_circuit_types.h>   // Bit / Integer / ... = *_T<AG2PCWire>
 setup_ag2pc(io, &pool, party);
-
-Bit a(in_a, /*owner=*/1);           // party 1's secret input
-Bit b(in_b, /*owner=*/2);           // party 2's secret input
-Bit c = a & b;
-bool out = c.reveal<bool>(/*to=*/1);
-
+Bit a(in_a, /*owner=*/1), b(in_b, /*owner=*/2);
+bool out = (a & b).reveal<bool>(/*to=*/1);
 finalize_ag2pc();
 ```
 
-`Integer`, `Float`, and the rest of emp-tool's frontend work the same way.
-For host branching, `reveal<bool>(PUBLIC)` opens to both parties.
+### Reveal patterns (legacy direct recorder)
 
-### Reveal patterns
+The reveal semantics below are specific to the legacy `AG2PCBackend` recorder
+(the streaming `LambdaRunner` path decodes once, at the end, outside the circuit).
 
 A `reveal` call closes the chunk (running the c_γ + COT checks at chunk-end)
 and then ships the opened bits to the recipient. The chunk-end checks fire
@@ -233,10 +283,11 @@ backend->reveal(out, /*to=*/1, c2, 128);
 Feed each chunk's fresh inputs at its start (before recording its gates). The
 common idiom is to wrap each stage's transient state (round keys, intermediate
 arrays) in its own brace block so the wires die before the next
-`checkpoint_ag2pc_keep_all()` — see `test_chain` (AES ×2) and `test_sha256`
-(`SHA_CHECKPOINT=K` checkpoints every K compressions, so a 100M-gate circuit
-fits a small box). `test_keep_all` is the smoke test that verifies the
-`{ Bit b; }`-style drop actually happens.
+`checkpoint_ag2pc_keep_all()` — see the checkpoint-carry case in
+`test_direct_recorder` (AES ×2) and `test_direct_crypto` (`SHA_CHECKPOINT=K`
+checkpoints every K compressions, so a 100M-gate circuit fits a small box). The
+RAII-liveness case in `test_direct_recorder` verifies the `{ Bit b; }`-style
+drop actually happens.
 
 Per-chunk peak memory scales as `≈ 400 · A + 40 · X` bytes (ignoring inputs)
 where `A` and `X` are the per-chunk AND and XOR gate counts. The AND term
@@ -248,16 +299,15 @@ whole run — a circuit's AND/XOR mix tells you which term dominates.
 
 ## How it works
 
-The stack is three header layers, each consuming the one below:
+The stack:
 
-- **`AG2PCBackend`** (`ag2pc_backend.h`) — a recording `Backend` over a 4-byte
-  wire carrier (`AG2PCWire`) that reference-counts each frontend `Bit`.
-  Authenticated garbling is multi-pass, so it records the frontend into
-  per-wire metadata arrays plus a per-chunk gate log, then runs the protocol
-  per chunk. Wire slots released by dead `Bit`s are reused at the next chunk
-  boundary. `checkpoint_ag2pc_keep_all()` flushes a long composition (e.g.
-  AES ×k) — carries every wire still held by a live `Bit`, drops the rest —
-  so per-chunk peak memory is bounded.
+- **`LambdaRunner`** (`lambda_runner.h`) — the frontend execution engine. A
+  circuit *source* (a pure body via `run<Ins...>`, a `frontend::compile`d circuit
+  via `run_compiled<Ins...>`, or the legacy flat lambda) is replayed against
+  per-phase backends: a liveness pass, a fused size/collect-masks pass, then
+  garble/evaluate and the `c_γ` correction. Per-wire state uses a slot-reuse map
+  so memory is linear in #AND gates + live width, not #wires. Inputs/outputs stay
+  outside the circuit (`C2PC::process_inputs` / `decode`).
 - **`C2PC`** (`2pc.h`) — the protocol: `process_input` shares inputs, `compute`
   garbles/evaluates the circuit with the half-gate construction and runs the
   malicious checks (the leaky-AND `F_eq` and the KRRW Fig. 3 `c_γ` check),
@@ -270,6 +320,15 @@ The stack is three header layers, each consuming the one below:
   own input masks, a batched `F_eq` check, and cyclic-shift bucketing. The COT
   session is opened once and held for the object's lifetime, its consistency
   check run before each reveal so it gates output release.
+
+The **direct recorder** `AG2PCBackend` (`ag2pc_backend.h`) is a `Backend` over a
+refcounted 4-byte `AG2PCWire`: it records imperative `Bit`/`Integer` code into a
+per-chunk gate log + per-wire metadata. At every reveal/checkpoint it dead-code-
+eliminates the chunk, emits it as a `frontend::BooleanProgram`, and runs it on
+the **same engine** as the frontend path via `LambdaRunner::run_program` — it is
+a buffering/chunking adapter, not a second garbler/evaluator. This is the path
+that supports mid-stream reveals, `checkpoint_ag2pc_keep_all()`, and reactive
+host branching (capabilities a pure frontend body cannot express).
 
 The two parties hold a **duplex pair** of `NetIO` channels (`send_io` /
 `recv_io`): the two COT instances run one per socket, and parallel send/recv

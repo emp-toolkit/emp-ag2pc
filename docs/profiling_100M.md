@@ -41,7 +41,7 @@ Run date: 2026-05-27.
 | process_input | 1.6 | |
 | load_inputs / gather / decode | 1.3 | |
 | **secure-compute total** | **≈ 377** | **= 2.65 M AND/s** |
-| recording (Bit→WireGraph) | ~193 | benchmark artifact, outside the protocol |
+| recording (Bit→BooleanProgram) | ~193 | benchmark artifact, outside the protocol |
 | **wall total** | **≈ 570** | = 1.75 M AND/s incl. recording |
 
 Cross-machine the half-gate (76.8) slightly edges out COT (71.6) as the #1 cost,

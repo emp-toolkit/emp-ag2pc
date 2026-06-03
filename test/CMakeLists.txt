@@ -48,36 +48,32 @@ function(add_test_case_with_run_cxx20 _name)
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 endfunction()
 
-# Native Bit frontend (AG2PCBackend -> WireGraph -> C2PC) + IR
-add_test_case_with_run(wire_graph_test)
-add_test_case_with_run(test_recording)
-add_test_case_with_run(test_aes)
-add_test_case_with_run(test_rounds)
-add_test_case_with_run(test_chain)
-add_test_case_with_run(test_reactive)
-add_test_case_with_run(test_sha256)
-add_test_case_with_run(test_keep_all)
+# AG2PC has ONE protocol executor — LambdaRunner::run_engine_ — fed by several
+# circuit sources (a live frontend body run<Ins...>, a compiled TypedCircuit
+# run_compiled<Ins...>, a raw BooleanProgram run_program, the flat lambda
+# run_circuit, and the direct recorder, which emits BooleanProgram chunks into
+# run_program). The tests are grouped by architectural surface, not by source x
+# circuit. Shared helpers live in test_common.h.
 
-# Frontend compile/run driven through the live AG2PCBackend (direct recorder):
-# frontend::compile -> frontend::run(circuit) replays gates onto the recorder.
-add_test_case_with_run(test_frontend)
-add_test_case_with_run(test_frontend_chain)
-add_test_case_with_run_cxx20(test_frontend_typed)   # C++20 template-lambda body
+# ---- Frontend front-doors ---------------------------------------------------
+# Small/fast API behavior (add, chaining, typed lambda, public const, raw
+# BooleanProgram) and crypto-sized circuits (AES / SHA-256 with oracle checks).
+add_test_case_with_run_cxx20(test_frontend_api)    # run / run_compiled / run_program / chain / typed / const
+add_test_case_with_run(test_frontend_crypto)       # AES (live + compiled), SHA-256 (run_circuit), vs oracle
 
-# Compiled circuit (frontend::compile) replayed through the streaming engine
-# (LambdaRunner::run_compiled); includes a public-constant case.
-add_test_case_with_run(test_frontend_materialized)
+# ---- Direct recorder (imperative adapter over BooleanProgram + run_program) --
+# Recorder-distinguishing semantics, then the same recorder on real circuits.
+add_test_case_with_run(test_direct_recorder)       # record/reveal, batching, checkpoint, reactive, liveness
+add_test_case_with_run(test_direct_crypto)         # AES + SHA-256 via the recorder, vs oracle
 
-# Lambda-mode runner (no recording; lambda re-replayed per phase)
-add_test_case_with_run(test_lambda_aes)
-add_test_case_with_run(test_lambda_sha256)
+# ---- Cross-source equivalence (transcript-sensitive; kept standalone) -------
+add_test_case_with_run(test_wire_equiv)            # BYTE (body == flat lambda) + SEMANTIC (compiled) equiv
 
-# Streaming executor driven by a frontend body (LambdaRunner::run<Ins...>)
-add_test_case_with_run(test_lambda_frontend)
-
-# Compiled circuit replayed through the streaming engine (run_compiled<Ins...>)
-add_test_case_with_run(test_lambda_compiled)
-
-# Wire-byte equivalence: legacy run_circuit vs frontend run<Ins...> (transcript
-# digest equality under EMP_TEST_MODE). Guards crypto-neutral refactors.
-add_test_case_with_run(test_wire_equiv)
+# ---- Manual benchmarks -------------------------------------------------------
+# Built with -DEMP_AG2PC_BUILD_BENCHES=ON. Intentionally not registered with
+# add_test(), so ctest never runs it.
+if(EMP_AG2PC_BUILD_BENCHES)
+    add_executable(bench_modes bench_modes.cpp)
+    target_link_libraries(bench_modes PRIVATE emp-ag2pc::emp-ag2pc)
+    _apply_strict_memaccess(bench_modes)
+endif()
