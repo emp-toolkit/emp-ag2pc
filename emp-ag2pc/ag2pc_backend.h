@@ -33,10 +33,16 @@ namespace emp {
 // boundaries (never mid-chunk — chunk_gates_ may still reference them).
 
 class AG2PCBackend;
+struct LambdaWire;   // fwd decl for the cross-type cast ctor
 
 // 4-byte wire carrier with refcount semantics. Pin on construct/copy, unpin on
 // destruct/overwrite — all routed to AG2PCBackend::singleton_'s pin/unpin. A
 // null/moved-from carrier has id == -1 and does no bookkeeping.
+//
+// Counterpart in lambda mode is LambdaWire (defined in lambda_runner.h) — a
+// bare int with no hook. Explicit cast ctors in both directions let helpers
+// templated on the wire type interop across modes without accidental implicit
+// conversion.
 struct AG2PCWire {
   int id;
 
@@ -53,6 +59,10 @@ struct AG2PCWire {
     return *this;
   }
   ~AG2PCWire() noexcept { unpin_(); }
+
+  // Cross-type bridge from LambdaWire (defined inline in lambda_runner.h once
+  // LambdaWire is complete).
+  explicit AG2PCWire(const LambdaWire &l) noexcept;
 
  private:
   // Defined out-of-line below so they can reference AG2PCBackend::singleton_.
