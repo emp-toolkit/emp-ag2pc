@@ -1,16 +1,13 @@
-// Direct recorder (AG2PCBackend) on real, crypto-sized circuits: native AES-128
-// and SHA-256 authored in the imperative Bit/Integer frontend, recorded into
-// frontend::BooleanProgram chunks and run on the shared engine
-// (LambdaRunner::run_program -> run_engine_). Each is verified against the SAME
-// circuit run in the clear (setup_clear_backend), so the bit-convention cancels
-// and we directly check ag2pc == plaintext. Recorder semantics (reveal,
-// checkpoint, reactive, liveness) are in test_direct_recorder; this file is the
-// at-scale correctness + bucket-regime check. Each circuit runs in its own
-// setup/finalize cycle on its own connection (port + k).
-#include "emp-tool/emp-tool.h"
+// Direct-mode AES-128 and SHA-256 at scale — ordinary SH2PC-style EMP code
+// (`setup_ag2pc` + Bit/Integer + reveal), verified against the SAME circuit run
+// in the clear (`setup_clear_backend`), so the bit-convention cancels and we
+// directly check ag2pc == plaintext. The direct backend records the gates and
+// runs them on the one shared engine behind the scenes. Recorder semantics
+// (reveal/checkpoint/reactive/liveness) are in test_direct_semantics; this file
+// is the at-scale correctness + bucket-regime check. Each circuit runs in its
+// own setup/finalize cycle on its own connection (port + k).
+#include "emp-ag2pc/direct.h"
 #include "emp-tool/circuits/sha256_circuit.h"
-#include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-ag2pc/ag2pc_backend.h"
 #include "test_common.h"
 using namespace std;
 using namespace emp;

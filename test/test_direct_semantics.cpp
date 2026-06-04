@@ -1,23 +1,21 @@
-// Direct recorder (AG2PCBackend): an imperative EMP-style adapter that records
-// native Bit/Integer code, then at each reveal/checkpoint dead-code-eliminates
-// the chunk, emits it as a frontend::BooleanProgram, and runs it on the SAME
-// shared engine as the frontend path (LambdaRunner::run_program -> run_engine_).
-// It is NOT a separate garbler/evaluator — it is a recording/chunking front-door
-// over the one executor.
+// Direct-mode semantics — still ordinary SH2PC-style EMP code (`setup_ag2pc` +
+// Bit/Integer + reveal + finalize_ag2pc), exercising the capabilities the direct
+// backend has beyond a straight-line circuit. It records native Bit/Integer code
+// and, at each reveal/checkpoint, dead-code-eliminates the chunk, emits it as a
+// BooleanProgram, and runs it on the one shared engine behind the scenes (users
+// never see that).
 //
-// This file covers the recorder's distinguishing semantics — the things a pure
-// frontend body cannot express — each in its own setup/finalize cycle on its own
-// connection (port + k):
+// Cases (each in its own setup/finalize cycle on its own connection, port + k):
 //   * basic record -> reveal, including a constant-only reveal
-//   * per-owner input batching (one process_inputs for many same-owner inputs)
+//   * per-owner input batching (one input round for many same-owner inputs)
 //   * mid-stream checkpoint with carried authenticated state
 //   * reactive mid-circuit reveal + host branch + new input + auto-flush
 //   * RAII-driven checkpoint liveness (dead wires drop, kept wire survives)
-// Crypto-sized recorder circuits (AES / SHA-256) live in test_direct_crypto.
-#include "emp-tool/emp-tool.h"
-#include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-ag2pc/ag2pc_backend.h"
-#include "emp-ag2pc/ag2pc_circuit_types.h"  // Bit / Integer / ... = *_T<AG2PCWire>
+// Crypto-sized direct circuits (AES / SHA-256) live in test_direct_crypto.
+//
+// Uses only the direct-mode header; `setup_ag2pc` returns the AG2PCBackend* so the
+// liveness/batching cases can read its instrumentation counters.
+#include "emp-ag2pc/direct.h"
 #include "test_common.h"
 using namespace std;
 using namespace emp;

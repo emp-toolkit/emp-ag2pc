@@ -28,10 +28,9 @@
 //
 // Each run gets its own connection (so a channel's cumulative digest covers
 // exactly one run) and resets the deterministic seed counter first.
-#include "emp-tool/emp-tool.h"
-#include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-ag2pc/lambda_runner.h"
-#include "emp-ag2pc/lambda_circuit_types.h"   // Bit / BitVec = *_T<LambdaWire>
+// INTERNAL test: drives function mode directly (AG2PCSession + AG2PCEngine +
+// SecureWires), so it uses the function-mode header and NOT <emp-ag2pc/direct.h>.
+#include "emp-ag2pc/function.h"
 #include "emp-tool/frontend/frontend.h"
 #include "net_setup.h"
 #include <cstdio>

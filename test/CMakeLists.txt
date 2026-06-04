@@ -48,26 +48,20 @@ function(add_test_case_with_run_cxx20 _name)
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 endfunction()
 
-# AG2PC has ONE protocol executor — LambdaRunner::run_engine_ — fed by several
-# circuit sources (a live frontend body run<Ins...>, a compiled TypedCircuit
-# run_compiled<Ins...>, a raw BooleanProgram run_program, the flat lambda
-# run_circuit, and the direct recorder, which emits BooleanProgram chunks into
-# run_program). The tests are grouped by architectural surface, not by source x
-# circuit. Shared helpers live in test_common.h.
+# Tests are grouped by SURFACE: the public SH2PC-style direct API first, then the
+# function-mode/internal engine tests. Shared, alias-neutral helpers live in
+# test_common.h (which is mode-header-free, so both groups can use it).
 
-# ---- Frontend front-doors ---------------------------------------------------
-# Small/fast API behavior (add, chaining, typed lambda, public const, raw
-# BooleanProgram) and crypto-sized circuits (AES / SHA-256 with oracle checks).
-add_test_case_with_run_cxx20(test_frontend_api)    # run / run_compiled / run_program / chain / typed / const
-add_test_case_with_run(test_frontend_crypto)       # AES (live + compiled), SHA-256 (run_circuit), vs oracle
+# ---- PUBLIC API (SH2PC-style: setup_ag2pc + EMP objects + reveal) ----------
+# These read like ordinary EMP circuit code and use only the public surface.
+add_test_case_with_run(test_public_api)        # add / public const / comparison; direct.h self-sufficiency proof
+add_test_case_with_run(test_direct_semantics)  # direct-mode capabilities: record/reveal, batching, checkpoint, reactive, liveness
+add_test_case_with_run(test_direct_crypto)     # direct-mode AES + SHA-256 vs clear oracle
 
-# ---- Direct recorder (imperative adapter over BooleanProgram + run_program) --
-# Recorder-distinguishing semantics, then the same recorder on real circuits.
-add_test_case_with_run(test_direct_recorder)       # record/reveal, batching, checkpoint, reactive, liveness
-add_test_case_with_run(test_direct_crypto)         # AES + SHA-256 via the recorder, vs oracle
-
-# ---- Cross-source equivalence (transcript-sensitive; kept standalone) -------
-add_test_case_with_run(test_wire_equiv)            # BYTE (body == flat lambda) + SEMANTIC (compiled) equiv
+# ---- INTERNAL / EXPERT (engine: AG2PCSession / AG2PCEngine / SecureWires) ---
+# Drive the executor directly; these include function.h, NOT direct.h.
+add_test_case_with_run_cxx20(test_engine_internal)  # run / run_compiled / run_program / run_circuit / chain / typed / AES / SHA
+add_test_case_with_run(test_wire_equiv)             # BYTE (body == flat lambda) + SEMANTIC (compiled) equiv; transcript-sensitive
 
 # ---- Manual benchmarks -------------------------------------------------------
 # Built with -DEMP_AG2PC_BUILD_BENCHES=ON. Intentionally not registered with

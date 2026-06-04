@@ -28,12 +28,14 @@
 // 2-party: party 1 server; party 2 dials AG2PC_PEER (or 127.0.0.1). Same plaintext
 // inputs + oracle as test_sha256. Env: SHA_BLOCKS (N, default 50), SHA_CHECKPOINT
 // (K, default 0), BENCH_MODE.
+// This benchmark spans the direct backend AND the function engine, so it uses
+// internal headers + its own `block` circuit-type binding — NOT direct.h or
+// function.h (whose mode aliases would collide with block here).
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/circuits/sha256_circuit.h"
-#include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-ag2pc/ag2pc_backend.h"
+#include "emp-ag2pc/frontend/ag2pc.h"        // setup_ag2pc + direct AG2PCBackend (pulls session + engine)
 #include "emp-tool/frontend/frontend.h"
-EMP_USE_CIRCUIT_TYPES_ALL(block)
+EMP_USE_CIRCUIT_TYPES_ALL(block)              // bench's own binding (expert; not the public set)
 #include "net_setup.h"
 #include <chrono>
 #include <string>

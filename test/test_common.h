@@ -1,12 +1,17 @@
 #ifndef AG2PC_TEST_COMMON_H__
 #define AG2PC_TEST_COMMON_H__
-// Small, binding-neutral helpers shared by the AG2PC tests. Deliberately does
-// NOT install any circuit-type aliases (no EMP_USE_CIRCUIT_TYPES_ALL / *_circuit
-// _types.h) so each test TU can pick its own wire binding (block / LambdaWire /
-// AG2PCWire); the helpers here are either plain value conversions or wire-generic
-// templates (Bit_T<Wire>), so they work under any binding.
+// Small, alias-neutral helpers shared by the AG2PC tests.
+//
+// IMPORTANT: this header is **mode-header-free** — it includes only emp-tool +
+// net_setup, defines NO circuit-type alias set (`Bit`/`Integer`/...), and pulls
+// in NO `emp-ag2pc/*` header. That lets it be shared by BOTH the public/direct
+// tests (which include <emp-ag2pc/direct.h> for the AG2PCWire aliases) and the
+// internal/expert tests (which include <emp-ag2pc/function.h> for the LambdaWire
+// aliases) without an alias collision and without dragging either mode header
+// into a file that uses engine internals. The helpers below are either plain value
+// conversions or wire-generic templates (`Bit_T<Wire>`), so they work under any
+// binding. (SecureWires-shaped helpers live with the internal tests that need them.)
 #include "emp-tool/emp-tool.h"
-#include "emp-ag2pc/emp-ag2pc.h"   // SecureWires, C2PC, LambdaRunner
 #include "net_setup.h"
 #include <cstdint>
 #include <vector>
@@ -25,23 +30,8 @@ inline uint32_t u32_of(const std::vector<bool> &b) {
   return v;
 }
 
-// Concatenate per-owner SecureWires bundles into one flat bundle, preserving
-// order. Role-correct: garbler P1 carries label0, evaluator P2 carries
-// eval_label; Lambda + wire_bundle always carry. Used to feed a multi-argument
-// circuit whose engine binds inputs to wire ids [0, total) positionally.
-inline emp::SecureWires concat(const std::vector<emp::SecureWires> &in, int party) {
-  emp::SecureWires w;
-  for (const auto &s : in) {
-    w.Lambda.insert(w.Lambda.end(), s.Lambda.begin(), s.Lambda.end());
-    w.wire_bundle.insert(w.wire_bundle.end(), s.wire_bundle.begin(), s.wire_bundle.end());
-    if (party == 1) w.label0.insert(w.label0.end(), s.label0.begin(), s.label0.end());
-    else            w.eval_label.insert(w.eval_label.end(), s.eval_label.begin(), s.eval_label.end());
-  }
-  return w;
-}
-
 // Fixed (arbitrary, deterministic) 128-bit AES key + plaintext, shared by every
-// AES test so the same plaintext oracle ciphertext applies everywhere.
+// AES test so the same plaintext-oracle ciphertext applies everywhere.
 inline void aes_test_bits(bool key_bits[128], bool pt_bits[128]) {
   for (int i = 0; i < 128; ++i) {
     key_bits[i] = ((i * 7 + 3) % 5) == 0;
@@ -50,8 +40,8 @@ inline void aes_test_bits(bool key_bits[128], bool pt_bits[128]) {
 }
 
 // Plaintext AES-128 oracle: run emp-tool's AES_Calculator on the clear backend.
-// Wire-generic (call with Wire=block); the caller wraps it in
-// setup_clear_backend("") / finalize_clear_backend().
+// Wire-generic (call with Wire=block); caller wraps it in setup_clear_backend("")
+// / finalize_clear_backend().
 template <typename Wire>
 inline void aes_clear(const bool key_bits[128], const bool pt_bits[128], bool *ct_out) {
   using BW = emp::Bit_T<Wire>;
