@@ -29,7 +29,7 @@ normal operators, `.reveal<T>()`, `finalize_ag2pc` — exactly like emp-sh2pc. N
 BristolFormat files to hand-write or ship.
 
 ```cpp
-#include <emp-ag2pc/direct.h>
+#include <emp-ag2pc/emp-ag2pc.h>
 using namespace emp;
 
 NetIO *io; make_io2pc(party, port, io);
@@ -44,9 +44,8 @@ uint32_t out = c.reveal<uint32_t>(PUBLIC);  // open to both
 finalize_ag2pc();
 ```
 
-That is the whole public surface. You never touch the session object, the
-execution engine, or share/wire internals — the direct backend records your gates
-and runs them on the one shared engine behind the scenes.
+That is the object-mode surface: setup/finalize, EMP objects, ordinary
+operators, optional checkpoints, and reveal.
 
 The protocol is authenticated garbling [WRK17] with the
 [KRRW18](https://eprint.iacr.org/2018/578) optimizations: a **function-dependent**
@@ -61,27 +60,28 @@ emp-ot, whose consistency check is run before every reveal so it gates output.
 
 ## Choosing a mode
 
-There are two ways to *author* a circuit. Both compile to the **same one protocol
-executor** (`run_engine_`) — they differ only in how you write inputs, compute,
-and outputs. Most code wants **direct mode**; reach for **function mode** when
-you specifically need a pure reusable body, a compiled circuit, or the streaming
-memory profile.
+There are two user-facing modes. They share the same protocol engine and both
+can use EMP-style input constructors. Pick between them based on where the
+computation lives: directly in the program, or inside a pure body passed to the
+engine.
 
-| | **Direct mode** | **Function mode** |
+| | **Object mode** | **Stream mode** |
 |---|---|---|
-| Include | `<emp-ag2pc/direct.h>` | `<emp-ag2pc/function.h>` |
-| Wire binding | `AG2PCWire` aliases | `LambdaWire` aliases |
-| Inputs | `UInt32 a(x, party)` constructor | `process_inputs` / `AG2PCInputs` → `SecureWires` |
-| Compute | imperative straight-line code | a *pure* wire-generic body (no I/O inside) |
-| Outputs | object `c.reveal<T>(party)` | `AG2PCInputs` run returns a handle with `c.reveal<T>(party)`; other entries open `SecureWires` via `mpc.reveal`/`decode` |
-| Extra powers | mid-stream reveal, reactive branch on a revealed value, RAII checkpoint | streaming (no gate-log materialized), compile-once/replay-many |
-| Use it when | you want ordinary SH2PC-style code, reveal-and-branch, or huge compositions with checkpoints | you have a fixed circuit to compile and reuse, or want memory linear in live width |
+| Include | `<emp-ag2pc/emp-ag2pc.h>` | `<emp-ag2pc/stream.h>` |
+| Inputs | EMP constructors in the program | EMP constructors before `runner.run(...)`, or lower-level preprocessed input bundles |
+| Compute | ordinary EMP-object code as statements execute | pure body passed to `runner.run(...)` or `runner.run_compiled(...)` |
+| Outputs | `c.reveal<T>(party)` on EMP objects | `c.reveal<T>(party)` on the returned handle, or lower-level explicit decode |
+| Control flow | reveal, branch, feed more inputs, and checkpoint mid-program | reveal/branch between runs; no feed/reveal inside the pure body |
+| Best for | SH2PC-style code, reactive programs, large chunked computations | fixed pure circuits, compile-once/replay-many, benchmarks |
 
-The two binding alias sets (`AG2PCWire` vs `LambdaWire`) both define `Bit`/`UInt32`/…,
-so they collide — **pick one mode header per translation unit**. The compatibility
-header `<emp-ag2pc/emp-ag2pc.h>` is equivalent to `<emp-ag2pc/direct.h>`. Shared
-circuit logic should live in wire-generic functions/templates in a neutral header;
-then direct mode and function mode can both call it.
+The two mode headers both define friendly names such as `Bit` and `UInt32`, so
+**pick one mode header per translation unit**. Shared circuit logic should live
+in wire-generic functions/templates in a neutral header; then object mode and
+stream mode can both call it.
+
+The lower-level stream APIs expose protocol bundles and wire types for tests and
+benchmarks, but ordinary users can mostly stay with EMP objects plus
+`runner.run(inputs, body)`.
 
 ## Requirements
 
@@ -136,7 +136,7 @@ cmake -S emp-ag2pc -B emp-ag2pc/build \
 | Option | Default | Effect |
 |---|---|---|
 | `EMP_AG2PC_BUILD_TESTS` | `ON` when top-level | Build the test suite under `test/`. |
-| `EMP_AG2PC_BUILD_BENCHES` | `OFF` | Build `test/bench_modes.cpp` (manual; not run by ctest). |
+| `EMP_AG2PC_BUILD_BENCHES` | `OFF` | Build manual benchmarks under `test/` (`bench_example`, `bench_100m`; not run by ctest). |
 
 ## Consuming from another CMake project
 
@@ -158,33 +158,39 @@ ctest --test-dir build --output-on-failure
 
 Each test launches the two parties on localhost via the top-level `run` helper
 and checks the secure output against a cleartext oracle. Tests are grouped by
-SURFACE — the public API first, then the internal/expert engine:
+SURFACE — object mode first, then stream mode:
 
 | Test | Surface | What it exercises |
 |---|---|---|
-| `test_public_api`       | public | SH2PC-style `setup_ag2pc` + `UInt32`/`Bit` + operators + `reveal` + `finalize_ag2pc`. Includes ONLY `<emp-ag2pc/direct.h>` — the direct-mode self-sufficiency proof. |
-| `test_direct_semantics` | public | direct-mode capabilities in plain EMP code: record→reveal (incl. constant-only), per-owner input batching, mid-stream checkpoint carry, reactive reveal/branch/new-input, RAII liveness |
-| `test_direct_crypto`    | public | direct-mode AES-128 + SHA-256 vs clear oracle (`SHA_BLOCKS`, `SHA_CHECKPOINT`) |
-| `test_engine_internal`  | internal | function mode directly: `run`/`run_compiled`/`run_program`/`run_circuit`, chaining, C++20 typed body, AES/SHA — uses `<emp-ag2pc/function.h>` |
-| `test_wire_equiv`       | internal | transcript byte-equivalence of the streaming front-doors + semantic equivalence of the compiled path |
+| `test_object_api`     | object | SH2PC-style `setup_ag2pc` + `UInt32`/`Bit` + operators + `reveal` + `finalize_ag2pc`; includes only `<emp-ag2pc/emp-ag2pc.h>` |
+| `test_object_control` | object | object-mode controls in plain EMP code: per-owner input batching, mid-stream checkpoint carry, reactive reveal/branch/new-input, RAII liveness |
+| `test_object_crypto`  | object | object-mode AES-128 + SHA-256 vs clear oracle (`SHA_BLOCKS`, `SHA_CHECKPOINT`) |
+| `test_stream_api`     | stream | `run`/`run_compiled`/`run_program`/`run_circuit`, chaining, C++20 typed body, AES/SHA, `AG2PCInputs`; includes `<emp-ag2pc/stream.h>` |
+| `test_stream_equiv`   | stream | transcript byte-equivalence of stream sources + semantic equivalence of the compiled path |
 
-The direct backend (`AG2PCBackend`) is **not** a separate protocol path: it is an
-imperative adapter that records your EMP objects, emits `BooleanProgram` chunks,
-and runs them on the one shared engine via `run_program`.
+The object adapter (`AG2PCBackend`) records EMP-object code into
+`BooleanProgram` chunks and runs those chunks on `AG2PCEngine::run_program`.
 
-Benchmarks (`test/bench_modes.cpp`) are opt-in: they build only with
+Benchmarks are opt-in: they build only with
 `-DEMP_AG2PC_BUILD_BENCHES=ON` (OFF by default) and are **not** registered with
-`ctest`. Build and run manually, e.g.:
+`ctest`.
 
 ```sh
 cmake -S . -B build -DEMP_AG2PC_BUILD_BENCHES=ON
-cmake --build build --target bench_modes
-BENCH_MODE=direct-chunked SHA_BLOCKS=50 SHA_CHECKPOINT=10 ./run ./build/bin/bench_modes
+cmake --build build --target bench_example bench_100m
+
+# small local comparison; BENCH_MODE may also be one of the modes below
+BENCH_MODE=all SHA_BLOCKS=50 SHA_CHECKPOINT=10 ./run ./build/bin/bench_example
+
+# strict large benchmark: one mode per process for clean RSS
+BENCH_MODE=stream-live ./run ./build/bin/bench_100m
 ```
 
-Modes are `direct-chunked`, `frontend-compiled`, `frontend-live` — all on the
-one shared engine; `direct-chunked` is the direct recorder, not a separate
-crypto backend.
+Benchmark modes are `object`, `stream-live`, `stream-compiled`, and
+`stream-compiled-reuse` — all on the one shared engine. `stream-compiled`
+compiles the current chunk as one circuit; `stream-compiled-reuse` compiles one
+SHA compression and replays it inside each chunk. `bench_example` can run
+`BENCH_MODE=all`; `bench_100m` requires exactly one mode.
 
 ## Usage
 
@@ -194,7 +200,7 @@ same program; each constructs its own inputs (a dummy for the inputs it does not
 own) and the owner tag (`ALICE` / `BOB`) selects whose value is real.
 
 ```cpp
-#include <emp-ag2pc/direct.h>
+#include <emp-ag2pc/emp-ag2pc.h>
 using namespace emp;
 
 NetIO *io; make_io2pc(party, port, io);     // or new NetIO(...) yourself
@@ -211,63 +217,46 @@ finalize_ag2pc();
 ```
 
 `Bit`, `UInt8…UInt64` / `Int8…Int64`, `UnsignedInt`/`SignedInt`, `BitVec`,
-`Float`, and the AES / SHA calculators are all bound to AG2PC by `direct.h` —
+`Float`, and the AES / SHA calculators are all bound to AG2PC by `emp-ag2pc.h` —
 the same objects you'd use in emp-sh2pc. Mid-stream reveals, reveal-to-a-party,
 host branching on a revealed value, and `checkpoint_ag2pc_keep_all()` (to cap
-memory on very large compositions) all work; see `test_direct_semantics.cpp`.
+memory on very large compositions) all work; see `test_object_control.cpp`.
 
-### Function Mode
+### Stream Mode
 
-Most users never need this. The one executor — `AG2PCEngine`
-(`emp-ag2pc/backend/engine.h`) over the session-crypto object `AG2PCSession` — can
-replay a circuit *source* directly: a pure wire-generic body (`run<Ins...>`), a
-`frontend::compile`d circuit (`run_compiled<Ins...>`), or a raw
-`frontend::BooleanProgram` (`run_program`), with inputs/outputs handled explicitly
-via `AG2PCSession::process_inputs` / `decode` and `SecureWires`. These live behind
-`emp-ag2pc/function.h`, which is **mutually exclusive with `direct.h`**
-(its `LambdaWire` aliases collide with the direct `AG2PCWire` ones) — include ONE
-mode header per translation unit. See `test_engine_internal.cpp`.
+Stream mode is the pure-body API. The ergonomic form still uses EMP
+constructors for inputs; the difference is that construction happens before
+`runner.run(...)`, and the computation happens inside the body passed to `run`.
+The body must be deterministic and pure: no new secret inputs, no reveal, and no
+host branching on secret data inside the body.
 
 ```cpp
-#include <emp-ag2pc/function.h>             // AG2PCEngine + LambdaWire aliases
+#include <emp-ag2pc/stream.h>
 using namespace emp;
+
 AG2PCSession mpc(io, &pool, party);
 AG2PCEngine  runner(&mpc);
-auto in  = mpc.process_inputs({1, 2}, { x_bits /*P1*/, y_bits /*P2*/ });
-SecureWires out = runner.run<UInt32, UInt32>({in[0], in[1]},
-                                             [](auto a, auto b){ return a + b; });
-std::vector<bool> z = mpc.reveal(out, /*to=*/1);   // reveal() == decode()
-```
 
-Engine circuit sources: `run<Ins...>` (live body), `run_compiled<Ins...>` (a
-`frontend::compile`d circuit, replayed), `run_program` (a raw `BooleanProgram`),
-and `run_circuit` (the legacy flat `(in_bits,out_bits)` lambda). Inputs can also be
-built with **EMP-object constructors** via `AG2PCInputs`, which keeps the engine's
-pure-body model but lets you write `UInt32 a(x, party)` outside the lambda instead
-of hand-rolling `process_inputs` (all constructed inputs go into one batched
-`process_inputs` call, grouped by owner):
-
-```cpp
 AG2PCInputs inputs(&mpc);
-UInt32 a(party == ALICE ? x : 0, ALICE);     // deferred; batched at run
+UInt32 a(party == ALICE ? x : 0, ALICE);
 UInt32 b(party == BOB   ? y : 0, BOB);
-auto c = runner.run(inputs, [&]{ return a + b; });   // pure body captures a, b
-uint32_t z = c.reveal<uint32_t>(/*to=*/1);           // object-style reveal on the result handle
+
+auto c = runner.run(inputs, [&] {
+  return a + b;
+});
+uint32_t z = c.reveal<uint32_t>(/*to=*/1);
 ```
 
-So the `AG2PCInputs` flow is constructor-in / object-reveal-out on the engine. The
-handle's `reveal<T>()` is a decode-and-fold convenience (scalar / `vector<bool>`
-outputs; for composite returns use `reveal_bits()` and slice), and it still
-converts to `SecureWires` for `mpc.reveal`/`decode`. The other engine entries
-(`run<Ins...>` / `run_compiled` / `run_program` / `run_circuit`) return `SecureWires`
-directly, opened with `mpc.reveal`/`decode`.
+Stream mode also has lower-level entries for tests, benchmarks, and reuse:
+`run<Ins...>` over preprocessed input bundles, `run_compiled<Ins...>` for a
+`frontend::compile`d circuit, `run_program` for a raw `BooleanProgram`, and
+`run_circuit` for flat bit-vector callbacks. Those APIs expose `SecureWires` and
+explicit decode. Include only one mode header per translation unit:
+`emp-ag2pc/stream.h` or `emp-ag2pc/emp-ag2pc.h`.
 
-(`C2PC` and `LambdaRunner` remain as compatibility aliases for `AG2PCSession` and
-`AG2PCEngine`.)
+### Reveal patterns (object mode)
 
-### Reveal patterns (direct mode)
-
-The reveal semantics below are specific to the direct backend (the expert engine
+The reveal semantics below are specific to object mode (the stream-mode engine
 path decodes once, at the end, outside the circuit).
 
 A `reveal` call closes the chunk (running the c_γ + COT checks at chunk-end)
@@ -306,13 +295,12 @@ backend->reveal(out.data(), /*to=*/1, wires.data(), wires.size());
 
 ### Checkpointing for bounded memory
 
-The backend records the whole circuit before the (single, terminal) reveal, so a
-long or repeated composition — AES ×k, SHA-256 ×N, … — would otherwise hold the
-entire gate list in memory. `checkpoint_ag2pc_keep_all()` cuts it into chunks:
-it evaluates everything recorded so far, carries every wire still held by a
-live `Bit` forward as authenticated state, and frees the rest. Wires whose
-`Bit` has gone out of scope are dropped automatically, so brace-scoping a
-stage's transient state is enough to bound memory.
+Object mode records the current chunk until a reveal or checkpoint. A long or
+repeated composition — AES ×k, SHA-256 ×N, … — can call
+`checkpoint_ag2pc_keep_all()` to evaluate everything recorded so far, carry every
+wire still held by a live `Bit`, and free the rest. Wires whose `Bit` has gone
+out of scope are dropped automatically, so brace-scoping a stage's transient
+state is enough to bound memory.
 
 ```cpp
 // C2 = AES(K2, AES(K1, P)), with a checkpoint between the two AES calls.
@@ -346,9 +334,9 @@ Feed each chunk's fresh inputs at its start (before recording its gates). The
 common idiom is to wrap each stage's transient state (round keys, intermediate
 arrays) in its own brace block so the wires die before the next
 `checkpoint_ag2pc_keep_all()` — see the checkpoint-carry case in
-`test_direct_recorder` (AES ×2) and `test_direct_crypto` (`SHA_CHECKPOINT=K`
+`test_object_control` (AES ×2) and `test_object_crypto` (`SHA_CHECKPOINT=K`
 checkpoints every K compressions, so a 100M-gate circuit fits a small box). The
-RAII-liveness case in `test_direct_recorder` verifies the `{ Bit b; }`-style
+RAII-liveness case in `test_object_control` verifies the `{ Bit b; }`-style
 drop actually happens.
 
 Per-chunk peak memory scales as `≈ 400 · A + 40 · X` bytes (ignoring inputs)
@@ -363,8 +351,8 @@ whole run — a circuit's AND/XOR mix tells you which term dominates.
 
 The two user-facing mode headers are:
 
-- **`direct.h`** — ordinary EMP object code over `AG2PCWire`.
-- **`function.h`** — pure function / compiled-circuit code over `LambdaWire`.
+- **`emp-ag2pc.h`** — ordinary EMP object code.
+- **`stream.h`** — pure body / compiled-circuit code.
 
 The implementation is organized as **`frontend/`** (mode adapters) over
 **`backend/`** (one engine + session crypto). Most users only need one of the two
@@ -372,24 +360,21 @@ mode headers; the rest is internal.
 
 Frontend (`emp-ag2pc/frontend/`):
 
-- **`ag2pc.h` + `direct_backend.h`** — the public API. `AG2PCBackend` is a
-  `Backend` over a refcounted 4-byte `AG2PCWire`: it records imperative
-  `Bit`/`Integer` code into a per-chunk gate log + per-wire metadata. At every
-  reveal/checkpoint it dead-code-eliminates the chunk, emits it as a
-  `frontend::BooleanProgram`, and runs it on the one shared engine via
-  `run_program`. It is a buffering/chunking adapter, **not** a second
-  garbler/evaluator — and it's the path that supports mid-stream reveals,
-  `checkpoint_ag2pc_keep_all()`, and reactive host branching.
+- **`ag2pc.h` + `direct_backend.h`** — object-mode setup, reveal, checkpoint,
+  and recording. `AG2PCBackend` is a `Backend` over refcounted `AG2PCWire`
+  handles: it records EMP-object code into a per-chunk gate log, compacts the
+  live subgraph into a `frontend::BooleanProgram`, and executes it via
+  `AG2PCEngine::run_program`.
 - **`circuit_types.h`** — binds emp-tool's objects (`Bit`/`UInt32`/`BitVec`/…) to
-  AG2PC. **`run.h`** — the implementation header behind `function.h`
-  (`run`/`run_compiled`/`run_program` + `LambdaWire` aliases); not pulled by
-  `direct.h`.
+  AG2PC. **`run.h`** — the implementation header behind `stream.h`
+  (`run`/`run_compiled`/`run_program`/`run_circuit`, `AG2PCInputs`, and
+  `LambdaWire` aliases); not pulled by `emp-ag2pc.h`.
 
 Backend (`emp-ag2pc/backend/`, internal):
 
-- **`AG2PCEngine`** (`engine.h`) — the one protocol executor. A circuit *source*
-  (a pure body, a `frontend::compile`d circuit, a raw `BooleanProgram`, or the
-  flat lambda) is replayed against per-phase backends: a liveness pass, a fused
+- **`AG2PCEngine`** (`engine.h`) — the protocol executor. A circuit source
+  (live body, compiled circuit, raw `BooleanProgram`, or flat bit-vector source)
+  is replayed against per-phase backends: a liveness pass, a fused
   size/collect-masks pass, then garble/evaluate and the `c_γ` correction.
   Per-wire state uses a slot-reuse map, so memory is linear in #AND gates + live
   width, not #wires.
@@ -404,12 +389,6 @@ Backend (`emp-ag2pc/backend/`, internal):
   own input masks, a batched `F_eq` check, and cyclic-shift bucketing. The COT
   session is opened once and held for the object's lifetime, its consistency
   check run before each reveal so it gates output release.
-
-`AG2PCSession` and `AG2PCEngine` were formerly `C2PC` and `LambdaRunner`; those
-names remain as compatibility aliases, `<emp-ag2pc/emp-ag2pc.h>` remains a
-compatibility alias for `direct.h`, and the old top-level header paths (`2pc.h`,
-`lambda_runner.h`, `ag2pc_backend.h`, `share_bundle.h`, …) remain as thin
-forwarders.
 
 The two parties hold a **duplex pair** of `NetIO` channels (`send_io` /
 `recv_io`): the two COT instances run one per socket, and parallel send/recv

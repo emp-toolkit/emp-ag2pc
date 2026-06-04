@@ -5,10 +5,7 @@
 
 namespace emp {
 
-// Per-wire authenticated-share state for one wire: with a single peer it is
-// just (mac, key) = 32B, half a cache line. Kept as a struct (rather than
-// parallel mac[]/key[] arrays) so the frontend can carry per-wire state as an
-// AShareBundleVec and memcpy whole wires around.
+// Per-wire authenticated-share state.
 //   mac = M_peer[x] = K_peer[x] ⊕ x·Δ_peer   (bit0 carries the share bit x)
 //   key = K_me[x_peer]                        (local key for the peer's bit)
 struct AShareBundle {
@@ -16,8 +13,7 @@ struct AShareBundle {
   block key;
 };
 
-// Skip zero/value-init for trivial bundles in resize / vector(N), matching
-// the BlockVec convention.
+// Skip zero/value-init for trivial bundles.
 using AShareBundleVec =
     std::vector<AShareBundle, default_init_allocator<AShareBundle>>;
 

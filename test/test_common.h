@@ -1,16 +1,6 @@
 #ifndef AG2PC_TEST_COMMON_H__
 #define AG2PC_TEST_COMMON_H__
-// Small, alias-neutral helpers shared by the AG2PC tests.
-//
-// IMPORTANT: this header is **mode-header-free** — it includes only emp-tool +
-// net_setup, defines NO circuit-type alias set (`Bit`/`Integer`/...), and pulls
-// in NO `emp-ag2pc/*` header. That lets it be shared by BOTH the public/direct
-// tests (which include <emp-ag2pc/direct.h> for the AG2PCWire aliases) and the
-// internal/expert tests (which include <emp-ag2pc/function.h> for the LambdaWire
-// aliases) without an alias collision and without dragging either mode header
-// into a file that uses engine internals. The helpers below are either plain value
-// conversions or wire-generic templates (`Bit_T<Wire>`), so they work under any
-// binding. (SecureWires-shaped helpers live with the internal tests that need them.)
+// Alias-neutral helpers shared by object-mode and stream-mode tests.
 #include "emp-tool/emp-tool.h"
 #include "net_setup.h"
 #include <cstdint>
@@ -30,8 +20,7 @@ inline uint32_t u32_of(const std::vector<bool> &b) {
   return v;
 }
 
-// Fixed (arbitrary, deterministic) 128-bit AES key + plaintext, shared by every
-// AES test so the same plaintext-oracle ciphertext applies everywhere.
+// Deterministic AES-128 key and plaintext.
 inline void aes_test_bits(bool key_bits[128], bool pt_bits[128]) {
   for (int i = 0; i < 128; ++i) {
     key_bits[i] = ((i * 7 + 3) % 5) == 0;
@@ -39,9 +28,7 @@ inline void aes_test_bits(bool key_bits[128], bool pt_bits[128]) {
   }
 }
 
-// Plaintext AES-128 oracle: run emp-tool's AES_Calculator on the clear backend.
-// Wire-generic (call with Wire=block); caller wraps it in setup_clear_backend("")
-// / finalize_clear_backend().
+// Plaintext AES-128 oracle on the clear backend.
 template <typename Wire>
 inline void aes_clear(const bool key_bits[128], const bool pt_bits[128], bool *ct_out) {
   using BW = emp::Bit_T<Wire>;

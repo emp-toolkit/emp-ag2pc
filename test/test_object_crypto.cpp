@@ -1,20 +1,12 @@
-// Direct-mode AES-128 and SHA-256 at scale — ordinary SH2PC-style EMP code
-// (`setup_ag2pc` + Bit/Integer + reveal), verified against the SAME circuit run
-// in the clear (`setup_clear_backend`), so the bit-convention cancels and we
-// directly check ag2pc == plaintext. The direct backend records the gates and
-// runs them on the one shared engine behind the scenes. Recorder semantics
-// (reveal/checkpoint/reactive/liveness) are in test_direct_semantics; this file
-// is the at-scale correctness + bucket-regime check. Each circuit runs in its
-// own setup/finalize cycle on its own connection (port + k).
-#include "emp-ag2pc/direct.h"
+// Object-mode AES and SHA-256 against cleartext oracles.
+#include "emp-ag2pc/emp-ag2pc.h"
 #include "emp-tool/circuits/sha256_circuit.h"
 #include "test_common.h"
 using namespace std;
 using namespace emp;
 using namespace ag2pc_test;
 
-// AES-128 with per-owner inputs (recorder side: key_owner=1, pt_owner=2; oracle:
-// PUBLIC, PUBLIC). Bulk-reveal all 128 ciphertext wires to P1 in one call.
+// AES-128 with key_owner and pt_owner inputs.
 template <typename Wire>
 static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
                    int key_owner, int pt_owner, bool *ct_out) {
@@ -30,8 +22,8 @@ static void aes_ct(const bool key_bits[128], const bool pt_bits[128],
   backend->reveal(ct_out, 1, buf, 128);
 }
 
-// ---- AES-128 through the direct recorder vs plaintext -----------------------
-static bool aes_direct(int party, int port) {
+// AES-128.
+static bool aes_object(int party, int port) {
   bool key_bits[128], pt_bits[128];
   aes_test_bits(key_bits, pt_bits);
 
@@ -40,7 +32,6 @@ static bool aes_direct(int party, int port) {
   setup_ag2pc(io, &pool, party);
   io->flush();
 
-  // key owned by P1, plaintext by P2; each party feeds its own real bits.
   bool ka[128], pb[128];
   for (int i = 0; i < 128; ++i) {
     ka[i] = (party == 1) ? key_bits[i] : false;
@@ -57,18 +48,16 @@ static bool aes_direct(int party, int port) {
   finalize_clear_backend();
   bool ok = true;
   for (int i = 0; i < 128; ++i) if (ct_ag2pc[i] != ct_ref[i]) ok = false;
-  printf("  AES-128 via direct recorder vs plaintext  %s\n", ok ? "GOOD!" : "BAD!");
+  printf("  AES-128 via object mode vs plaintext  %s\n", ok ? "GOOD!" : "BAD!");
   return ok;
 }
 
-// Compress one pre-fed message into 256 output wire-carriers. The public IV is
-// created here (public constants record CONST gates and never flush). Templated
-// for both the ag2pc backend (Wire=AG2PCWire) and the clear backend (Wire=block).
+// Compress one pre-fed message into 256 output wires.
 template <typename Wire>
 static void sha_compress(const UnsignedInt_T<Wire, 32> msg[16], Wire buf[256]) {
   using U = UnsignedInt_T<Wire, 32>;
   U state[8], m[16];
-  for (int i = 0; i < 8; ++i) state[i] = U(sha256_detail::H0[i], PUBLIC);  // IV
+  for (int i = 0; i < 8; ++i) state[i] = U(sha256_detail::H0[i], PUBLIC);
   for (int j = 0; j < 16; ++j) m[j] = msg[j];
   sha256_compress<Wire>(state, m);
   for (int i = 0; i < 8; ++i)
@@ -76,13 +65,8 @@ static void sha_compress(const UnsignedInt_T<Wire, 32> msg[16], Wire buf[256]) {
       buf[i * 32 + b] = state[i].bits[b].bit;
 }
 
-// ---- SHA-256 through the direct recorder vs plaintext -----------------------
-// SHA_BLOCKS (env, default 50) independent compressions form ONE circuit; the
-// default puts the COT count above 2^20 so the bucket sizer picks B=3 at ssp=40
-// (the AND-dominated regime). SHA_CHECKPOINT=K>0 checkpoints every K compressions
-// so peak gate-list memory stays at one chunk's worth (`msg` is scoped to die
-// before each checkpoint, so keep_all drops it and only `buf` survives).
-static bool sha_direct(int party, int port) {
+// SHA_BLOCKS independent compressions; SHA_CHECKPOINT chunks computation.
+static bool sha_object(int party, int port) {
   const char *env = getenv("SHA_BLOCKS");
   const int N = env ? atoi(env) : 50;
   const char *cenv = getenv("SHA_CHECKPOINT");
@@ -101,7 +85,6 @@ static bool sha_direct(int party, int port) {
   using AU = UnsignedInt_T<AG2PCWire, 32>;
   vector<AG2PCWire> buf(256 * N);
   if (K <= 0) {
-    // Feed ALL secret inputs first, then record all N compressions (single chunk).
     vector<array<AU, 16>> msg(N);
     for (int n = 0; n < N; ++n)
       for (int j = 0; j < 16; ++j)
@@ -118,7 +101,7 @@ static bool sha_direct(int party, int port) {
             msg[n - c][j] = AU((party == 2) ? blk[n][j] : 0, /*owner=*/2);
         for (int n = c; n < hi; ++n)
           sha_compress<AG2PCWire>(msg[n - c].data(), buf.data() + n * 256);
-      }  // msg out of scope -> its wires drop at the next checkpoint.
+      }
       checkpoint_ag2pc_keep_all();
     }
   }
@@ -147,7 +130,7 @@ static bool sha_direct(int party, int port) {
       ok = ok && (out_ag2pc[n * 256 + b] == out_ref[b]);
   }
   finalize_clear_backend();
-  printf("  SHA-256 x %d via direct recorder (K=%d) vs plaintext  %s\n", N, K,
+  printf("  SHA-256 x %d via object mode (K=%d) vs plaintext  %s\n", N, K,
          ok ? "GOOD!" : "BAD!");
   return ok;
 }
@@ -158,10 +141,10 @@ int main(int argc, char **argv) {
   if (party > 2) return 0;
 
   bool ok = true;
-  ok &= aes_direct(party, port + 0);
-  ok &= sha_direct(party, port + 1);
+  ok &= aes_object(party, port + 0);
+  ok &= sha_object(party, port + 1);
 
   if (party == 1)
-    printf("test_direct_crypto: %s\n", ok ? "GOOD!" : "BAD!");
+    printf("test_object_crypto: %s\n", ok ? "GOOD!" : "BAD!");
   return (party == 1 && !ok) ? 1 : 0;
 }

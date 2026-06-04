@@ -48,26 +48,30 @@ function(add_test_case_with_run_cxx20 _name)
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 endfunction()
 
-# Tests are grouped by SURFACE: the public SH2PC-style direct API first, then the
-# function-mode/internal engine tests. Shared, alias-neutral helpers live in
+# Tests are grouped by SURFACE: the public SH2PC-style object API first, then the
+# stream-mode/internal engine tests. Shared, alias-neutral helpers live in
 # test_common.h (which is mode-header-free, so both groups can use it).
 
-# ---- PUBLIC API (SH2PC-style: setup_ag2pc + EMP objects + reveal) ----------
+# ---- OBJECT API (SH2PC-style: setup_ag2pc + EMP objects + reveal) ----------
 # These read like ordinary EMP circuit code and use only the public surface.
-add_test_case_with_run(test_public_api)        # add / public const / comparison; direct.h self-sufficiency proof
-add_test_case_with_run(test_direct_semantics)  # direct-mode capabilities: record/reveal, batching, checkpoint, reactive, liveness
-add_test_case_with_run(test_direct_crypto)     # direct-mode AES + SHA-256 vs clear oracle
+add_test_case_with_run(test_object_api)      # add / public const / comparison; emp-ag2pc.h self-sufficiency proof
+add_test_case_with_run(test_object_control)  # object-mode capabilities: batching, checkpoint, reactive, liveness
+add_test_case_with_run(test_object_crypto)   # object-mode AES + SHA-256 vs clear oracle
 
-# ---- INTERNAL / EXPERT (engine: AG2PCSession / AG2PCEngine / SecureWires) ---
-# Drive the executor directly; these include function.h, NOT direct.h.
-add_test_case_with_run_cxx20(test_engine_internal)  # run / run_compiled / run_program / run_circuit / chain / typed / AES / SHA
-add_test_case_with_run(test_wire_equiv)             # BYTE (body == flat lambda) + SEMANTIC (compiled) equiv; transcript-sensitive
+# ---- STREAM API (AG2PCSession / AG2PCEngine / SecureWires) ------------------
+# Drive the executor directly; these include stream.h, NOT emp-ag2pc.h.
+add_test_case_with_run_cxx20(test_stream_api)  # run / run_compiled / run_program / run_circuit / chain / typed / AES / SHA
+add_test_case_with_run(test_stream_equiv)      # BYTE (body == flat lambda) + SEMANTIC (compiled) equiv; transcript-sensitive
 
 # ---- Manual benchmarks -------------------------------------------------------
 # Built with -DEMP_AG2PC_BUILD_BENCHES=ON. Intentionally not registered with
 # add_test(), so ctest never runs it.
 if(EMP_AG2PC_BUILD_BENCHES)
-    add_executable(bench_modes bench_modes.cpp)
-    target_link_libraries(bench_modes PRIVATE emp-ag2pc::emp-ag2pc)
-    _apply_strict_memaccess(bench_modes)
+    add_executable(bench_example bench_example.cpp)
+    target_link_libraries(bench_example PRIVATE emp-ag2pc::emp-ag2pc)
+    _apply_strict_memaccess(bench_example)
+
+    add_executable(bench_100m bench_100m.cpp)
+    target_link_libraries(bench_100m PRIVATE emp-ag2pc::emp-ag2pc)
+    _apply_strict_memaccess(bench_100m)
 endif()

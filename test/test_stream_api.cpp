@@ -1,44 +1,26 @@
-// INTERNAL / EXPERT test — the low-level engine surface, NOT the public API.
-//
-// Normal users write SH2PC-style code (see test_public_api / test_direct_*).
-// This file drives function mode directly: AG2PCSession (session crypto) +
-// AG2PCEngine (the one executor) replaying every circuit SOURCE, with inputs and
-// outputs handled explicitly via process_inputs / decode / SecureWires. Because
-// it uses those internals and the expert LambdaWire circuit-type aliases, it
-// includes <emp-ag2pc/function.h> and MUST NOT include <emp-ag2pc/direct.h>
-// (whose AG2PCWire aliases would collide).
-//
-// Sources covered (all on one AG2PCSession connection):
-//   * run<Ins...>            — pure wire-generic body, live per phase
-//   * run_compiled<Ins...>   — the same body frontend::compile'd once
-//   * run_program            — a raw frontend::BooleanProgram
-//   * run_circuit            — the legacy flat (in_bits,out_bits) lambda
-//   plus chaining, a C++20 template-lambda body, a public-constant compiled
-//   circuit, and crypto-sized AES / SHA-256 vs a plaintext oracle.
-// Built as C++20 (for the template-lambda body).
+// Stream-mode API coverage: live body, compiled circuit, raw program,
+// flat bit-vector source, chaining, AG2PCInputs, AES, and SHA-256.
 #include "emp-tool/circuits/sha256_circuit.h"
-#include "emp-ag2pc/function.h"          // AG2PCSession + AG2PCEngine + LambdaWire aliases
-#include "emp-tool/frontend/frontend.h"  // frontend::compile
+#include "emp-ag2pc/stream.h"
+#include "emp-tool/frontend/frontend.h"
 #include "test_common.h"
 #include <cstdio>
 using namespace std;
 using namespace emp;
 using namespace ag2pc_test;
 
-// SecureWires concat — an engine-input helper (backend type), so it lives here
-// with the internal test rather than in the mode-header-free test_common.h.
-static SecureWires concat(const std::vector<SecureWires> &in, int party) {
-  SecureWires w;
-  for (const auto &s : in) {
-    w.Lambda.insert(w.Lambda.end(), s.Lambda.begin(), s.Lambda.end());
-    w.wire_bundle.insert(w.wire_bundle.end(), s.wire_bundle.begin(), s.wire_bundle.end());
-    if (party == 1) w.label0.insert(w.label0.end(), s.label0.begin(), s.label0.end());
-    else            w.eval_label.insert(w.eval_label.end(), s.eval_label.begin(), s.eval_label.end());
-  }
-  return w;
+static UInt32 input_u32(int party, int owner, uint32_t value) {
+  return UInt32(party == owner ? value : 0u, owner);
 }
 
-// One AES-128 body, wire-generic — shared by the live and compiled paths.
+static BitVec input_bits(int party, int owner, const bool *bits, int n) {
+  BitVec v(n);
+  for (int i = 0; i < n; ++i)
+    v[i] = Bit(party == owner ? bits[i] : false, owner);
+  return v;
+}
+
+// Wire-generic AES-128 body.
 struct AesFn {
   template <class W>
   BitVec_T<W> operator()(BitVec_T<W> key, BitVec_T<W> pt) const {
@@ -68,105 +50,132 @@ int main(int argc, char **argv) {
   bool ok = true;
   auto add = [](auto a, auto b) { return a + b; };
 
-  // ---- add32: run<> (live) vs run_compiled<>; x owned by P1, y by P2 ----
+  // Constructor-style stream I/O.
   {
     const uint32_t xa = 1234567u, yb = 7654321u, ref = xa + yb;
-    auto in = mpc.process_inputs({1, 2}, {bits_of(party == 1 ? xa : 0u),
-                                          bits_of(party == 2 ? yb : 0u)});
-    SecureWires outL = runner.run<UInt32, UInt32>({in[0], in[1]}, add);
     auto c = frontend::compile<UInt32, UInt32>(add);
-    SecureWires outC = runner.run_compiled<UInt32, UInt32>(c, {in[0], in[1]});
-    uint32_t gl = u32_of(mpc.decode(outL, 1)), gc = u32_of(mpc.decode(outC, 1));
+    uint32_t gl, gc_body, gc_engine;
+    {
+      AG2PCInputs inputs(&mpc);
+      UInt32 a = input_u32(party, ALICE, xa);
+      UInt32 b = input_u32(party, BOB, yb);
+      gl = runner.run(inputs, [&] { return add(a, b); }).reveal<uint32_t>(1);
+      gc_body = runner.run(inputs, [&] { return frontend::run(c, a, b); })
+                    .reveal<uint32_t>(1);
+      const SecureWires &in = inputs.process();
+      SecureWires out = runner.run_compiled<UInt32, UInt32>(
+          c, {in.slice(0, 32), in.slice(32, 64)});
+      gc_engine = u32_of(mpc.decode(out, 1));
+    }
     if (party == 1) {
-      printf("engine add32: live=%u compiled=%u (exp %u)  %s\n", gl, gc, ref,
-             (gl == ref && gc == ref) ? "GOOD!" : "BAD!");
-      ok &= (gl == ref && gc == ref);
+      printf("stream ctor add32: live=%u compiled-body=%u run_compiled=%u "
+             "(exp %u)  %s\n", gl, gc_body, gc_engine, ref,
+             (gl == ref && gc_body == ref && gc_engine == ref) ? "GOOD!" : "BAD!");
+      ok &= (gl == ref && gc_body == ref && gc_engine == ref);
     }
   }
 
-  // ---- chaining w = 2*(x+y): live run->run and compiled->compiled ----
+  // Chained stream runs.
   {
     const uint32_t xa = 3333333u, yb = 12345u, ref = 2u * (xa + yb);
     auto dbl = [](auto v) { return v + v; };
-    auto in = mpc.process_inputs({1, 2}, {bits_of(party == 1 ? xa : 0u),
-                                          bits_of(party == 2 ? yb : 0u)});
-    SecureWires z = runner.run<UInt32, UInt32>({in[0], in[1]}, add);
-    SecureWires w = runner.run<UInt32>({z}, dbl);
     auto c_add = frontend::compile<UInt32, UInt32>(add);
     auto c_dbl = frontend::compile<UInt32>(dbl);
-    SecureWires z2 = runner.run_compiled<UInt32, UInt32>(c_add, {in[0], in[1]});
-    SecureWires w2 = runner.run_compiled<UInt32>(c_dbl, {z2});
-    uint32_t gl = u32_of(mpc.decode(w, 1)), gc = u32_of(mpc.decode(w2, 1));
+    uint32_t gl, gc;
+    {
+      AG2PCInputs inputs(&mpc);
+      UInt32 a = input_u32(party, ALICE, xa);
+      UInt32 b = input_u32(party, BOB, yb);
+      SecureWires z = runner.run(inputs, [&] { return add(a, b); });
+      SecureWires w = runner.run<UInt32>({z}, dbl);
+      SecureWires z2 = runner.run(inputs, [&] { return frontend::run(c_add, a, b); });
+      SecureWires w2 = runner.run_compiled<UInt32>(c_dbl, {z2});
+      gl = u32_of(mpc.decode(w, 1));
+      gc = u32_of(mpc.decode(w2, 1));
+    }
     if (party == 1) {
-      printf("engine chain 2*(x+y): live=%u compiled=%u (exp %u)  %s\n", gl, gc,
+      printf("stream ctor chain 2*(x+y): live=%u compiled=%u (exp %u)  %s\n", gl, gc,
              ref, (gl == ref && gc == ref) ? "GOOD!" : "BAD!");
       ok &= (gl == ref && gc == ref);
     }
   }
 
-  // ---- C++20 template-lambda body (explicit UInt32_T<W>, W deduced) ----
+  // C++20 template-lambda body with constructor-style stream I/O.
   {
     const uint32_t xa = 111111u, yb = 222222u, ref = xa + yb;
     auto add_tl = []<class W>(UInt32_T<W> a, UInt32_T<W> b) { return a + b; };
-    auto in = mpc.process_inputs({1, 2}, {bits_of(party == 1 ? xa : 0u),
-                                          bits_of(party == 2 ? yb : 0u)});
-    SecureWires outL = runner.run<UInt32, UInt32>({in[0], in[1]}, add_tl);
     auto c = frontend::compile<UInt32, UInt32>(add_tl);
-    SecureWires outC = runner.run_compiled<UInt32, UInt32>(c, {in[0], in[1]});
-    uint32_t gl = u32_of(mpc.decode(outL, 1)), gc = u32_of(mpc.decode(outC, 1));
+    uint32_t gl, gc;
+    {
+      AG2PCInputs inputs(&mpc);
+      UInt32 a = input_u32(party, ALICE, xa);
+      UInt32 b = input_u32(party, BOB, yb);
+      gl = runner.run(inputs, [&] { return add_tl(a, b); }).reveal<uint32_t>(1);
+      gc = runner.run(inputs, [&] { return frontend::run(c, a, b); })
+               .reveal<uint32_t>(1);
+    }
     if (party == 1) {
-      printf("engine typed add32: live=%u compiled=%u (exp %u)  %s\n", gl, gc, ref,
+      printf("stream ctor typed add32: live=%u compiled=%u (exp %u)  %s\n", gl, gc, ref,
              (gl == ref && gc == ref) ? "GOOD!" : "BAD!");
       ok &= (gl == ref && gc == ref);
     }
   }
 
-  // ---- public constant: compiled inc32 (x + 1) ----
+  // Public constant in a compiled body with constructor-style stream I/O.
   {
     const uint32_t xa = 4242u, ref = xa + 1u;
     auto inc = [](auto a) { return a + decltype(a)(32, 1, PUBLIC); };
     auto c_inc = frontend::compile<UInt32>(inc);
-    auto in = mpc.process_inputs({1}, {bits_of(party == 1 ? xa : 0u)});
-    SecureWires outw = runner.run_compiled<UInt32>(c_inc, {in[0]});
-    uint32_t got = u32_of(mpc.decode(outw, 1));
+    uint32_t got;
+    {
+      AG2PCInputs inputs(&mpc);
+      UInt32 a = input_u32(party, ALICE, xa);
+      got = runner.run(inputs, [&] { return frontend::run(c_inc, a); })
+                .reveal<uint32_t>(1);
+    }
     if (party == 1) {
-      printf("engine compiled inc32 (const) = %u (exp %u)  %s\n", got, ref,
+      printf("stream ctor compiled inc32 (const) = %u (exp %u)  %s\n", got, ref,
              got == ref ? "GOOD!" : "BAD!");
       ok &= (got == ref);
     }
   }
 
-  // ---- raw BooleanProgram via run_program: (x + y + 1) ----
+  // Raw BooleanProgram via run_program.
   {
     const uint32_t xa = 1234567u, yb = 7654321u, ref = xa + yb + 1u;
     auto body = [](auto a, auto b) { return a + b + decltype(a)(32, 1, PUBLIC); };
     auto c = frontend::compile<UInt32, UInt32>(body);
     const auto &prog = c.circuit.prog;
-    auto in = mpc.process_inputs({1, 2}, {bits_of(party == 1 ? xa : 0u),
-                                          bits_of(party == 2 ? yb : 0u)});
-    SecureWires inputs = concat(in, party);
-    SecureWires ow = runner.run_program(prog, inputs, prog.outputs);
-    uint32_t got = u32_of(mpc.decode(ow, 1));
+    uint32_t got;
+    {
+      AG2PCInputs inputs(&mpc);
+      UInt32 a = input_u32(party, ALICE, xa);
+      UInt32 b = input_u32(party, BOB, yb);
+      const SecureWires &in = inputs.process();
+      SecureWires ow = runner.run_program(prog, in, prog.outputs);
+      got = u32_of(mpc.decode(ow, 1));
+    }
     if (party == 1) {
-      printf("engine run_program (x+y+1) = %u (exp %u)  %s\n", got, ref,
+      printf("stream ctor run_program (x+y+1) = %u (exp %u)  %s\n", got, ref,
              got == ref ? "GOOD!" : "BAD!");
       ok &= (got == ref);
     }
   }
 
-  // ---- AES-128: run<> (live) + run_compiled<>, vs plaintext oracle ----
+  // AES-128 with constructor-style stream I/O.
   {
     bool key_bits[128], pt_bits[128];
     aes_test_bits(key_bits, pt_bits);
-    std::vector<std::vector<bool>> bpo(2, std::vector<bool>(128, false));
-    if (party == 1) for (int i = 0; i < 128; ++i) bpo[0][i] = key_bits[i];
-    if (party == 2) for (int i = 0; i < 128; ++i) bpo[1][i] = pt_bits[i];
-    auto in = mpc.process_inputs({1, 2}, bpo);
-    SecureWires outL = runner.run<BitVec, BitVec>({in[0], in[1]}, AesFn{});
-    std::vector<bool> resL = mpc.decode(outL, 1);
     auto c_aes = frontend::compile(AesFn{}, BitVec(128), BitVec(128));
-    SecureWires outC = runner.run_compiled<BitVec, BitVec>(c_aes, {in[0], in[1]});
-    std::vector<bool> resC = mpc.decode(outC, 1);
+    std::vector<bool> resL, resC;
+    {
+      AG2PCInputs inputs(&mpc);
+      BitVec key = input_bits(party, ALICE, key_bits, 128);
+      BitVec pt = input_bits(party, BOB, pt_bits, 128);
+      resL = runner.run(inputs, [&] { return AesFn{}(key, pt); }).reveal_bits(1);
+      resC = runner.run(inputs, [&] { return frontend::run(c_aes, key, pt); })
+                 .reveal_bits(1);
+    }
     if (party == 1) {
       setup_clear_backend("");
       bool ct_ref[128];
@@ -178,7 +187,7 @@ int main(int argc, char **argv) {
         return true;
       };
       bool aes_ok = match(resL) && match(resC);
-      printf("engine AES-128: live + compiled vs plaintext  %s\n",
+      printf("stream ctor AES-128: live + compiled vs plaintext  %s\n",
              aes_ok ? "GOOD!" : "BAD!");
       ok &= aes_ok;
     }
@@ -240,8 +249,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ---- AG2PCInputs: inputs built with EMP-object constructors OUTSIDE the body,
-  //      batched into one process_inputs; all compute inside run(inputs, body). --
+  // Reuse constructor-style stream inputs across multiple runs.
   {
     const uint32_t X = 1234567u, Y = 7654321u;
     const bool F = true;
@@ -259,7 +267,7 @@ int main(int argc, char **argv) {
     if (party == 1) {
       uint32_t ref = (F ? Y : X) + 1u, ref2 = X + Y;
       bool aok = (got == ref) && (got2 == ref2);
-      printf("engine AG2PCInputs (ctor inputs, batched; reused) = %u, %u "
+      printf("stream AG2PCInputs (ctor inputs, batched; reused) = %u, %u "
              "(exp %u, %u)  %s\n", got, got2, ref, ref2, aok ? "GOOD!" : "BAD!");
       ok &= aok;
     }

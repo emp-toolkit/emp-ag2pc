@@ -25,15 +25,8 @@ using namespace emp;
 //   process_inputs(owners, bits_per_owner) → SecureWires[]  // KRRW Fig.3 inputs
 //   decode(wires, recipient)               → vector<bool>   // step 14
 //
-// AG2PCSession is pure crypto: input authentication (process_inputs) and output decode
-// (decode), plus the long-lived COT/Δ session (TriplePool) and the half-gate
-// primitives the engine reuses. The circuit execution itself — steps 4-13 of
-// agc.tex — lives in the one protocol executor, AG2PCEngine::run_engine_
-// (backend/engine.h), which replays a circuit SOURCE (a pure frontend body, a
-// compiled frontend::TypedCircuit, or a raw frontend::BooleanProgram) through
-// its phase backends, drawing aShares from this TriplePool and building each
-// AND gate's σ = λ_α∧λ_β in place via TriplePool::compute_inplace. There is no
-// WireGraph and no second garbling/evaluation path here.
+// AG2PCSession owns input authentication, output decode, the long-lived COT/Delta
+// session, and the half-gate primitives used by AG2PCEngine.
 
 class AG2PCSession {
 public:
@@ -64,8 +57,6 @@ public:
     Delta = fpre->Delta;
   }
   ~AG2PCSession() { delete fpre; }
-
-  // ====== New API ======
 
   // KRRW Fig.3 input phase, batched across both owners' input wires in a
   // single protocol call. owners[k] is the owner for bits_per_owner[k]
@@ -299,7 +290,6 @@ std::vector<bool> AG2PCSession::decode(const SecureWires &wires,
   return result;
 }
 
-// Compatibility alias: C2PC was the old name for the session-crypto object.
 using C2PC = AG2PCSession;
 
 #endif // AG2PC_SESSION_H__
