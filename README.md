@@ -83,6 +83,10 @@ The lower-level stream APIs expose protocol bundles and wire types for tests and
 benchmarks, but ordinary users can mostly stay with EMP objects plus
 `runner.run(inputs, body)`.
 
+For the full treatment of both modes — APIs, examples, input/output options
+(`AG2PCInputs` / `Opened`), and the one-header-per-TU rule — see
+[docs/programming_modes.md](docs/programming_modes.md).
+
 ## Requirements
 
 - CMake ≥ 3.21

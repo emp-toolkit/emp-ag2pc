@@ -15,6 +15,13 @@ EMP_USE_CIRCUIT_TYPES_ALL(block)
 using namespace std;
 using namespace emp;
 
+// Worker-thread count for the protocol's ThreadPool. Override with BENCH_THREADS
+// (default 4) to study thread scaling.
+static int bench_threads() {
+  const char *e = getenv("BENCH_THREADS");
+  return e ? atoi(e) : 4;
+}
+
 static long peak_rss_kib() {
   rusage r;
   if (getrusage(RUSAGE_SELF, &r) != 0) return 0;
@@ -87,7 +94,7 @@ struct Row { double wall_ms = 0, mb = 0, compile_ms = 0; long rss = 0; std::vect
 static Row run_object(int party, int port, const vector<array<uint32_t, 16>> &blk, int N, int K) {
   Row r;
   NetIO *io; make_io2pc(party, port, io);
-  ThreadPool pool(4);
+  ThreadPool pool(bench_threads());
   setup_ag2pc(io, &pool, party);
   io->flush();
   using U = UnsignedInt_T<AG2PCWire, 32>;
@@ -124,7 +131,7 @@ template <BenchStreamMode MODE>
 static Row run_stream(int party, int port, const vector<array<uint32_t, 16>> &blk, int N, int K) {
   Row r;
   NetIO *io; make_io2pc(party, port, io);
-  ThreadPool pool(4);
+  ThreadPool pool(bench_threads());
   AG2PCSession mpc(io, &pool, party);
   io->flush();
   AG2PCEngine runner(&mpc);
