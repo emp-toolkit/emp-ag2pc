@@ -10,12 +10,12 @@
 > - **Existing projects pinned to a published release: stay on `0.3.0`** —
 >   tag [`0.3.0`](https://github.com/emp-toolkit/emp-ag2pc/releases/tag/0.3.0)
 >   or branch [`v0.3.x`](https://github.com/emp-toolkit/emp-ag2pc/tree/v0.3.x).
->   That is the long-standing BristolFormat-driven AG-2PC. Bug fixes are
+>   That is the long-standing legacy AG-2PC release line. Bug fixes are
 >   backported to `v0.3.x`.
 > - **New projects, or willing to migrate: track the development branch**
 >   (this branch). It will become `1.0.0-alpha` after a polish pass and then
 >   `1.0.0`. It is a ground-up rewrite: a native emp-tool Bit/Integer
->   frontend (no hand-written Bristol files), a slot-reused wire layout, and the
+>   frontend, a slot-reused wire layout, and the
 >   KRRW (eprint 2018/578) function-dependent leaky-AND (computed in place on
 >   each AND gate's own input masks).
 >   The API is not yet frozen and headers may move between alphas. Requires
@@ -25,8 +25,7 @@ Maliciously-secure **two-party computation via authenticated garbling**, on
 top of [emp-tool](https://github.com/emp-toolkit/emp-tool) and
 [emp-ot](https://github.com/emp-toolkit/emp-ot). You write circuits as ordinary
 EMP code — `setup_ag2pc`, native objects (`Bit` / `UInt32` / `BitVec` / …),
-normal operators, `.reveal<T>()`, `finalize_ag2pc` — exactly like emp-sh2pc. No
-BristolFormat files to hand-write or ship.
+normal operators, `.reveal<T>()`, `finalize_ag2pc` — exactly like emp-sh2pc.
 
 ```cpp
 #include <emp-ag2pc/emp-ag2pc.h>
@@ -367,7 +366,7 @@ Frontend (`emp-ag2pc/frontend/`):
 - **`ag2pc.h` + `direct_backend.h`** — object-mode setup, reveal, checkpoint,
   and recording. `AG2PCBackend` is a `Backend` over refcounted `AG2PCWire`
   handles: it records EMP-object code into a per-chunk gate log, compacts the
-  live subgraph into a `frontend::BooleanProgram`, and executes it via
+  live subgraph into an `emp::circuit::BooleanProgram`, and executes it via
   `AG2PCEngine::run_program`.
 - **`circuit_types.h`** — binds emp-tool's objects (`Bit`/`UInt32`/`BitVec`/…) to
   AG2PC. **`run.h`** — the implementation header behind `stream.h`

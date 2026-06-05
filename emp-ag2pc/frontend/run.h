@@ -6,6 +6,6 @@
 #include "emp-tool/circuits/circuit.h"
 #include "emp-ag2pc/backend/engine.h"
 
-EMP_USE_CIRCUIT_TYPES_ALL(LambdaWire)
+EMP_CIRCUIT_TYPES_ALL(LambdaWire)
 
 #endif  // EMP_AG2PC_RUN_H__

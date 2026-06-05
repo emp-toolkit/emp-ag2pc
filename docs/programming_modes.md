@@ -61,7 +61,7 @@ bound to AG2PC by the umbrella.
 
 **How it works.** `AG2PCBackend` *records* your gates into a per-chunk gate log
 (over a refcounted 4-byte `AG2PCWire`). At every `reveal` / checkpoint it
-dead-code-eliminates the chunk, emits it as a `frontend::BooleanProgram`, and runs
+dead-code-eliminates the chunk, emits it as a `emp::circuit::BooleanProgram`, and runs
 that on the one engine. So object mode is a recording/chunking front-door — not a
 second protocol.
 
@@ -110,7 +110,7 @@ The engine replays a *source* per phase; four are available:
 |---|---|---|
 | live body | `run<Ins...>(inputs, body)` | a pure wire-generic body, replayed per phase; nothing materialized |
 | compiled circuit | `run_compiled<Ins...>(tc, inputs)` | replay a `frontend::compile`'d `TypedCircuit` (compile once, replay many) |
-| raw program | `run_program(prog, inputs, output_ids)` | replay a raw `frontend::BooleanProgram` (lowest-level) |
+| raw program | `run_program(prog, inputs)` | replay a raw `emp::circuit::BooleanProgram` (lowest-level; result is the program's declared outputs) |
 | flat lambda | `run_circuit(in_wires, n_out, lambda)` | legacy `(in_bits, out_bits)` lambda |
 
 ### Inputs — two ways
@@ -218,10 +218,10 @@ ids are still live. At each `reveal` / `checkpoint_ag2pc_keep_all()`,
 `run_chunk_()`:
 
 1. **DCE** — reachability from the still-live (pinned) wires; prune dead gates.
-2. **remap** to compact wire ids and emit a `frontend::BooleanProgram`.
+2. **remap** to compact wire ids and emit a `emp::circuit::BooleanProgram`.
 3. **gather** the carried authenticated state for inputs that survived from a prior
    chunk, plus `process_inputs` for freshly-fed secrets (batched per owner).
-4. **`AG2PCEngine::run_program(prog, input_bundle, output_ids)`** — i.e. the same
+4. **`AG2PCEngine::run_program(prog, input_bundle)`** — i.e. the same
    `run_engine_`, with a replay that walks the just-built `BooleanProgram`.
 5. **stash** every still-live wire's fresh state into `carried_`, so it flows into
    the next chunk; reclaim dead slots.

@@ -103,7 +103,7 @@ private:
   std::condition_variable cv_full_, cv_free_;
 };
 
-template <typename T> void joinNclean(vector<future<T>> &res) {
+template <typename T> void joinNclean(std::vector<future<T>> &res) {
   for (auto &v : res)
     v.get();
   res.clear();

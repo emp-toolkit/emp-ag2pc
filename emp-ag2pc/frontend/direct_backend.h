@@ -76,8 +76,8 @@ class AG2PCBackend : public Backend {
     int idx = b ? 1 : 0;
     if (const_wire_[idx] < 0) {
       int o = alloc_id_();
-      chunk_gates_.push_back({-1, -1, o,
-                              b ? frontend::Op::CONST1 : frontend::Op::CONST0});
+      chunk_gates_.push_back({0, 0, (uint32_t)o,
+                              b ? emp::circuit::Op::Const1 : emp::circuit::Op::Const0});
       const_wire_[idx] = o;
     }
     *static_cast<AG2PCWire *>(out) = AG2PCWire(const_wire_[idx]);
@@ -106,7 +106,7 @@ class AG2PCBackend : public Backend {
   void and_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, b, o, frontend::Op::AND});
+    chunk_gates_.push_back({(uint32_t)a, (uint32_t)b, (uint32_t)o, emp::circuit::Op::And});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
     ++ands_;
     ++chunk_real_gates_;
@@ -114,14 +114,14 @@ class AG2PCBackend : public Backend {
   void xor_gate(void *out, const void *l, const void *r) override {
     int a = id_of_(l), b = id_of_(r);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, b, o, frontend::Op::XOR});
+    chunk_gates_.push_back({(uint32_t)a, (uint32_t)b, (uint32_t)o, emp::circuit::Op::Xor});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
     ++chunk_real_gates_;
   }
   void not_gate(void *out, const void *in) override {
     int a = id_of_(in);
     int o = alloc_id_();
-    chunk_gates_.push_back({a, -1, o, frontend::Op::NOT});
+    chunk_gates_.push_back({(uint32_t)a, 0, (uint32_t)o, emp::circuit::Op::Not});
     *static_cast<AG2PCWire *>(out) = AG2PCWire(o);
     ++chunk_real_gates_;
   }
@@ -308,8 +308,13 @@ class AG2PCBackend : public Backend {
       if (gi < 0 || needed[gi]) continue;
       needed[gi] = 1;
       const frontend::Gate &gg = chunk_gates_[gi];
-      stack.push_back(gg.in0);
-      if (!gg.is_not()) stack.push_back(gg.in1);
+      // Const gates have no operands (in0/in1 are the IR's normalized-0
+      // dummies, NOT a reference to wire 0); skip them so DCE doesn't drag an
+      // unrelated wire 0 into the chunk.
+      if (!gg.is_const()) {
+        stack.push_back(gg.in0);
+        if (!gg.is_not()) stack.push_back(gg.in1);
+      }
     }
 
     // Non-local wires read by needed gates become program inputs.
@@ -322,16 +327,21 @@ class AG2PCBackend : public Backend {
     for (int gi = 0; gi < G; ++gi) {
       if (!needed[gi]) continue;
       const frontend::Gate &gg = chunk_gates_[gi];
-      note(gg.in0);
-      if (!gg.is_not()) note(gg.in1);
+      if (!gg.is_const()) {            // const operands are normalized-0 dummies
+        note(gg.in0);
+        if (!gg.is_not()) note(gg.in1);
+      }
     }
 
     // Compact-id remap by recorder id.
     std::vector<int> remap(N, -1);
     int cid = 0;
 
-    frontend::BooleanProgram prog;
-    // One flat input bundle matching compact ids [0, num_in).
+    emp::circuit::BooleanProgram prog;
+    // One flat input bundle matching compact ids [0, num_inputs). The core IR
+    // has no input ports — inputs are simply the leading wires — so ownership /
+    // party grouping lives only in the SecureWires bundle (process_inputs
+    // below), never in the program.
     SecureWires input_bundle;
 
     // 1. Carried inputs referenced by needed gates.
@@ -340,7 +350,6 @@ class AG2PCBackend : public Backend {
       if (input_needed[id] && !is_chunk_input[id]) carried_in.push_back(id);
     if (!carried_in.empty()) {
       append_bundle_(input_bundle, gather_carried_(carried_in));
-      prog.inputs.push_back({cid, (int)carried_in.size()});
       for (int id : carried_in) remap[id] = cid++;
     }
 
@@ -367,7 +376,7 @@ class AG2PCBackend : public Backend {
       }
       int cnt = cid - base;
       if (cnt == 0) continue;
-      prog.inputs.push_back({base, cnt});
+      (void)base;
       kept_owners.push_back(owner);
       kept_bits.push_back(std::move(bits));
     }
@@ -377,7 +386,9 @@ class AG2PCBackend : public Backend {
       ++process_input_calls;
     }
 
-    // CONST gates receive compact ids after the input range.
+    // Inputs occupy compact ids [0, num_inputs); CONST and compute gates get
+    // compact ids after the input range.
+    const uint32_t num_inputs = (uint32_t)cid;
 
     // 3. Compact needed gates in emission order.
     auto rm = [&](int v) -> int { return remap[v]; };
@@ -385,12 +396,14 @@ class AG2PCBackend : public Backend {
     int write_idx = 0;
     for (int gi = 0; gi < (int)prog.gates.size(); ++gi) {
       if (!needed[gi]) continue;
-      frontend::Gate gg = prog.gates[gi];
+      emp::circuit::Gate gg = prog.gates[gi];
       int compact_out = cid++;
       remap[gg.out] = compact_out;
-      int ni0 = gg.is_const() ? -1 : rm(gg.in0);
-      int ni1 = (gg.is_const() || gg.is_not()) ? -1 : rm(gg.in1);
-      prog.gates[write_idx++] = frontend::Gate{ni0, ni1, compact_out, gg.op};
+      // Unused operands (const: both; not: in1) are normalized to 0 — the IR
+      // convention; never read for those ops.
+      uint32_t ni0 = gg.is_const() ? 0u : (uint32_t)rm(gg.in0);
+      uint32_t ni1 = (gg.is_const() || gg.is_not()) ? 0u : (uint32_t)rm(gg.in1);
+      prog.gates[write_idx++] = emp::circuit::Gate{ni0, ni1, (uint32_t)compact_out, gg.op};
     }
     prog.gates.resize(write_idx);
 
@@ -400,18 +413,22 @@ class AG2PCBackend : public Backend {
       if (meta_[id].refcount > 0 && remap[id] >= 0)
         all_out_recorder.push_back(id);
 
-    prog.num_wire = cid;
+    prog.num_wires  = (uint32_t)cid;
+    prog.num_inputs = num_inputs;
     prog.outputs.reserve(all_out_recorder.size());
-    for (int id : all_out_recorder) prog.outputs.push_back(remap[id]);
+    for (int id : all_out_recorder) prog.outputs.push_back((uint32_t)remap[id]);
 
     // 5. Execute the compact program.
     AG2PCEngine runner(mpc);
-    SecureWires result = runner.run_program(prog, input_bundle, prog.outputs);
+    SecureWires result = runner.run_program(prog, input_bundle);
 
     // 6. Stash fresh carried state.
     stash_carried_(all_out_recorder, result);
 
-    // 7. Reset per-chunk state and reclaim dead ids.
+    // 7. Reset per-chunk state and reclaim dead ids. chunk_gates_ was moved
+    // from into prog.gates above; clear() restores a defined empty state for
+    // the next chunk (a moved-from vector is otherwise valid-but-unspecified).
+    chunk_gates_.clear();
     chunk_inputs_.clear();
     const_wire_[0] = const_wire_[1] = -1;
     chunk_real_gates_ = 0;

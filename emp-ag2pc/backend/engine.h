@@ -732,48 +732,38 @@ class AG2PCEngine {
     return run_engine_(in_wires, replay);
   }
 
-  // Replay a raw BooleanProgram. Inputs bind to wire ids [0, inputs.size()).
-  SecureWires run_program(const frontend::BooleanProgram &prog,
-                          const SecureWires &inputs,
-                          const std::vector<int> &output_ids) {
-    const int num_inputs = (int)inputs.size();
-    const int NW = prog.num_wire;
-    if (num_inputs != prog.total_input_bits())
-      error("run_program: input bundle width != program input-wire count");
-    // Inputs bind positionally to wire ids [0, num_inputs).
-    if (num_inputs > NW)
-      error("run_program: input count exceeds program wire count");
-    int expect = 0;
-    for (const frontend::InputPort &p : prog.inputs) {
-      if (p.n < 0 || p.base != expect)
-        error("run_program: input ports must be contiguous from wire 0");
-      expect += p.n;
-    }
-    auto chk = [&](int w) {
-      if (w < 0 || w >= NW) error("run_program: wire id out of range");
-    };
-    for (const frontend::Gate &g : prog.gates) {
-      chk(g.out);
-      if (!g.is_const())               chk(g.in0);
-      if (g.is_and() || g.is_xor())    chk(g.in1);
-    }
-    for (int o : output_ids) chk(o);
+  // Replay a raw BooleanProgram. Inputs bind to wire ids [0, num_inputs); the
+  // result bundle is exactly the program's declared outputs. The program is
+  // produced correct-by-construction (the direct backend's chunk compaction),
+  // so structure is trusted here and validated where programs are built/loaded.
+  SecureWires run_program(const emp::circuit::BooleanProgram &prog,
+                          const SecureWires &inputs) {
+    // run_program is a public stream-mode source, so the program may be
+    // externally supplied. Validate once (bounds / topological / dense) before
+    // the phase visitors index wire buffers directly across the 5 replays — an
+    // out-of-range gate would otherwise OOB. Cheap next to 5 garbling passes.
+    emp::circuit::validate_program(prog);
+    const uint32_t num_inputs = (uint32_t)inputs.size();
+    if (num_inputs != prog.num_inputs)
+      error("run_program: input bundle width != program num_inputs");
 
-    // Replay the program against the installed phase backend.
-    auto replay = [&prog, num_inputs, &output_ids]() -> std::vector<int> {
-      std::vector<LambdaWire> buf(prog.num_wire);
-      for (int i = 0; i < num_inputs; ++i) buf[i] = LambdaWire(i);
-      for (const frontend::Gate &g : prog.gates) {
-        switch (g.op) {
-          case frontend::Op::CONST0: backend->public_label(&buf[g.out], false); break;
-          case frontend::Op::CONST1: backend->public_label(&buf[g.out], true);  break;
-          case frontend::Op::AND: backend->and_gate(&buf[g.out], &buf[g.in0], &buf[g.in1]); break;
-          case frontend::Op::XOR: backend->xor_gate(&buf[g.out], &buf[g.in0], &buf[g.in1]); break;
-          case frontend::Op::NOT: backend->not_gate(&buf[g.out], &buf[g.in0]); break;
-        }
-      }
-      std::vector<int> ids(output_ids.size());
-      for (size_t i = 0; i < output_ids.size(); ++i) ids[i] = buf[output_ids[i]].id;
+    // Replay the SAME gate stream against each phase backend (run_engine_ calls
+    // this lambda once per phase, swapping the global backend). The gate
+    // dispatch is the shared for_each_gate primitive; only input seeding (wire
+    // ids, not values) and output-id extraction are AG2PC-specific.
+    auto replay = [&prog, num_inputs]() -> std::vector<int> {
+      std::vector<LambdaWire> buf(prog.num_wires);
+      for (uint32_t i = 0; i < num_inputs; ++i) buf[i] = LambdaWire(i);
+      struct PhaseVisitor {
+        std::vector<LambdaWire> &buf;
+        void and_gate(uint32_t o, uint32_t a, uint32_t b) { backend->and_gate(&buf[o], &buf[a], &buf[b]); }
+        void xor_gate(uint32_t o, uint32_t a, uint32_t b) { backend->xor_gate(&buf[o], &buf[a], &buf[b]); }
+        void not_gate(uint32_t o, uint32_t a)             { backend->not_gate(&buf[o], &buf[a]); }
+        void const_gate(uint32_t o, bool v)               { backend->public_label(&buf[o], v); }
+      };
+      emp::circuit::for_each_gate(prog, PhaseVisitor{buf});
+      std::vector<int> ids(prog.outputs.size());
+      for (size_t i = 0; i < prog.outputs.size(); ++i) ids[i] = buf[prog.outputs[i]].id;
       return ids;
     };
     return run_engine_(inputs, replay);

@@ -101,7 +101,7 @@ public:
   // different sockets, so serializing the pair deadlocks.
   template <typename F>
   void parallel_abit_(F per_abit) {
-    vector<future<void>> res;
+    std::vector<future<void>> res;
     res.push_back(pool->enqueue([this, per_abit]() { per_abit(abit1.get(), io_abit1); }));
     res.push_back(pool->enqueue([this, per_abit]() { per_abit(abit2.get(), io_abit2); }));
     joinNclean(res);
@@ -149,7 +149,7 @@ public:
     uint64_t _ct0 = tp_now_ns();
 #endif
     cots_minted_since_check_ = true;
-    vector<future<void>> res;
+    std::vector<future<void>> res;
     res.push_back(pool->enqueue([this, key, count]() {
       abit1->next_n(key, count);
       io_abit1->flush();
@@ -236,7 +236,7 @@ public:
   void leaky_and_halfgate(block *mac, block *key, int L,
                           MITCCRH<8> &gmitc, MITCCRH<8> &emitc, Hash &feq) {
     BlockVec Sout(L);
-    vector<future<void>> res;
+    std::vector<future<void>> res;
 #ifdef AG2PC_PROFILE
     uint64_t _hg0 = tp_now_ns();
 #endif
@@ -294,7 +294,7 @@ public:
     // region 2 (r -> c = r⊕d): P1 flips bit0(mac[2L+k]); the peer flips key by
     // (Δ⊕e_0) so bit0(key) stays pinned. The c-region share bit then reads back as
     // LSB(mac[2L+k]) with no separate mirror to maintain.
-    vector<unsigned char> s_me(L), s_peer(L);
+    std::vector<unsigned char> s_me(L), s_peer(L);
     for (int k = 0; k < L; ++k) s_me[k] = LSB1(Sout[k]);
     res.push_back(pool->enqueue([&, this]() {
       send_io->send_bool((const bool *)s_me.data(), L);
@@ -342,7 +342,7 @@ public:
 #ifdef AG2PC_PROFILE
     uint64_t _b0 = tp_now_ns();
 #endif
-    vector<unsigned char> d_me(L), d_peer(L);
+    std::vector<unsigned char> d_me(L), d_peer(L);
     const int cut = L - r;                       // r ∈ [0,L); src wraps at i==cut
     for (int i = 0; i < L; ++i) {
       int src = (i < cut) ? i + r : i + r - L;
@@ -352,7 +352,7 @@ public:
       ak[2 * L + i] = ak[2 * L + i] ^ lk[2 * L + src];
       d_me[i] = LSB(am[L + i]) ^ LSB(lm[L + src]);          // b-share diff (bit0 of b-region mac)
     }
-    vector<future<void>> res;
+    std::vector<future<void>> res;
     res.push_back(pool->enqueue([&, this]() {
       send_io->send_bool((const bool *)d_me.data(), L);
       send_io->flush();
@@ -471,7 +471,7 @@ public:
       yb_me[i] = (unsigned char)(LSB(rep_b[i].mac) ^ LSB(acc_mac[L + i]));
     }
     {
-      vector<future<void>> res;
+      std::vector<future<void>> res;
       res.push_back(pool->enqueue([&, this]() {
         send_io->send_bool((const bool *)xb_me.data(), L);
         send_io->send_bool((const bool *)yb_me.data(), L);

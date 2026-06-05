@@ -7,7 +7,7 @@
 #include "emp-tool/circuits/sha256_circuit.h"
 #include "emp-ag2pc/frontend/ag2pc.h"
 #include "emp-tool/frontend/frontend.h"
-EMP_USE_CIRCUIT_TYPES_ALL(block)
+EMP_CIRCUIT_TYPES_ALL(block)
 #include "net_setup.h"
 #include <chrono>
 #include <string>

@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
       UInt32 a = input_u32(party, ALICE, xa);
       UInt32 b = input_u32(party, BOB, yb);
       const SecureWires &in = inputs.process();
-      SecureWires ow = runner.run_program(prog, in, prog.outputs);
+      SecureWires ow = runner.run_program(prog, in);
       got = u32_of(mpc.decode(ow, 1));
     }
     if (party == 1) {
