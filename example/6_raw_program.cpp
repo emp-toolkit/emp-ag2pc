@@ -1,9 +1,9 @@
 // Advanced: run a stored BooleanProgram directly. This is useful for large
 // pre-recorded circuits such as AES or SHA, where the natural input/output type
-// is Bits_T rather than UInt_T.
+// is BitVec_T rather than UInt_T.
 
 #include "common.h"
-#include "emp-tool/circuits/builtin_circuit_files.h"
+#include "emp-tool/ir/builtins.h"
 
 using namespace emp;
 
@@ -17,8 +17,8 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCCtx ctx(io, &pool, party);
 
-  using Bits128 = Bits_T<AG2PCCtx, 128>;
-  using Bits256 = Bits_T<AG2PCCtx, 256>;
+  using Bits128 = BitVec_T<AG2PCCtx, 128>;
+  using Bits256 = BitVec_T<AG2PCCtx, 256>;
 
   const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
   std::array<bool, 128> alice_half{};

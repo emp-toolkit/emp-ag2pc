@@ -72,6 +72,6 @@ is a deferred feature.)
 
 `ctx.run_program<RetV>(program, args...)` replays a hand-authored or loaded
 `BooleanProgram` (e.g. an AES/SHA `.empbc` builtin) over materialized typed
-arguments, returning a value of type `RetV`. Use `Bits_T` (or the raw
+arguments, returning a value of type `RetV`. Use `BitVec_T` (or the raw
 `protocol()` / `executor()` bit path) for wide crypto I/O — never a `UInt_T` clear
 codec beyond 64 bits.

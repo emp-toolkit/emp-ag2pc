@@ -1,4 +1,4 @@
-// Use Bits_T when the value is a fixed-width string of bits rather than a number:
+// Use BitVec_T when the value is a fixed-width string of bits rather than a number:
 // keys, hashes, packets, or any layout where slice/concat matter.
 
 #include "common.h"
@@ -15,8 +15,8 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCCtx ctx(io, &pool, party);
 
-  using Bits16 = Bits_T<AG2PCCtx, 16>;
-  using Bits32 = Bits_T<AG2PCCtx, 32>;
+  using Bits16 = BitVec_T<AG2PCCtx, 16>;
+  using Bits32 = BitVec_T<AG2PCCtx, 32>;
 
   const uint16_t alice_tag = 0xbeef;
   const uint16_t bob_nonce = 0x1234;

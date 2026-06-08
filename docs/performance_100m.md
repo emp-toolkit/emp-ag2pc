@@ -1,7 +1,7 @@
 # Performance — 100M-AND SHA-256 Chain
 
 `bench_100m` is the current final-state AG2PC benchmark. It uses one
-`AG2PCCtx`, the `Bits_T` value layer, and the stored `sha256_256` BooleanProgram
+`AG2PCCtx`, the `BitVec_T` value layer, and the stored `sha256_256` BooleanProgram
 replayed through chunked live body sources.
 
 ## Workload

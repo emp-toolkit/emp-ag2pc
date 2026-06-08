@@ -34,6 +34,6 @@ Examples:
 | `1_basics.cpp` | Private inputs, ordinary operators, reveal. |
 | `2_reveal_and_continue.cpp` | Reveal a small decision, branch publicly, keep computing. |
 | `3_reusable_circuit.cpp` | Compile one pure circuit and run it more than once. |
-| `4_bit_strings.cpp` | Use `Bits_T` for fixed-width bit strings and packet-style layout. |
+| `4_bit_strings.cpp` | Use `BitVec_T` for fixed-width bit strings and packet-style layout. |
 | `5_chunking.cpp` | Use `checkpoint` so long computations keep only the state they need. |
-| `6_raw_program.cpp` | Advanced: run a stored AES/SHA-style `BooleanProgram` over `Bits_T`. |
+| `6_raw_program.cpp` | Advanced: run a stored AES/SHA-style `BooleanProgram` over `BitVec_T`. |

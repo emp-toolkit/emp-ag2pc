@@ -31,8 +31,9 @@
 // that is neither materialized nor pending is stale and every lookup errors loudly.
 
 #include "emp-tool/emp-tool.h"
-#include "emp-tool/circuits/context.h"            // BooleanContext, execute_program
-#include "emp-tool/circuits/boolean_program.h"    // circuit::Gate / Op / BooleanProgram
+#include "emp-tool/context/context.h"            // BooleanContext, execute_program
+#include "emp-tool/ir/program.h"      // circuit::Gate / Op / BooleanProgram
+#include "emp-tool/ir/visit.h"        // for_each_gate
 #include "emp-tool/circuits/value_traits.h"       // value_traits<T>
 #include "emp-tool/frontend/circuit_fn.h"         // Circuit, RecordValue, circuit_fn_traits
 #include "emp-ag2pc/backend/protocol.h"           // AG2PCProtocol
@@ -322,7 +323,7 @@ public:
 
   // ---- typed raw-program escape hatch: a loaded/hand-authored BooleanProgram
   // (e.g. an AES/SHA .empbc builtin) run over materialized typed args. RetV is a
-  // value type over AG2PCCtx, e.g. Bits_T<AG2PCCtx,128> — use Bits_T / raw bits
+  // value type over AG2PCCtx, e.g. BitVec_T<AG2PCCtx,128> — use BitVec_T / raw bits
   // for wide I/O, never a UInt_T clear codec beyond 64 bits.
   template <class RetV, class... Args>
   RetV run_program(const circuit::BooleanProgram& prog, const Args&... args) {

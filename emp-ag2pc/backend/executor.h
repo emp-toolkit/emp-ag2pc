@@ -15,7 +15,7 @@
 // AG2PCCtx, which owns the wire-id bookkeeping.
 
 #include "emp-tool/emp-tool.h"                 // RO, Hash, block, NetIO, ThreadPool
-#include "emp-tool/circuits/context.h"         // execute_program, ProgramWorkspace
+#include "emp-tool/context/context.h"         // execute_program, ProgramWorkspace
 #include "emp-tool/circuits/value_traits.h"    // value_traits<T>
 #include "emp-tool/frontend/circuit_fn.h"      // circuit_fn_traits / circuit_contract / RecordValue
 #include "emp-ag2pc/backend/passes.h"          // LambdaState + the 5 passes + canonical check

@@ -9,7 +9,7 @@ Maliciously-secure **two-party computation via authenticated garbling**, on top
 of [emp-tool](https://github.com/emp-toolkit/emp-tool) and
 [emp-ot](https://github.com/emp-toolkit/emp-ot). The whole API is one context,
 `AG2PCCtx`: you authenticate inputs, build circuits over the emp-tool value layer
-(`UInt_T` / `Int_T` / `Float_T` / `Bits_T` / `Bit_T`), and open results — exactly
+(`UInt_T` / `Int_T` / `Float_T` / `BitVec_T` / `Bit_T`), and open results — exactly
 like emp-sh2pc, but malicious-secure.
 
 ```cpp
@@ -37,7 +37,7 @@ recipient (or `PUBLIC`), `std::nullopt` at any other party.
 
 Circuit values are emp-tool's context-bound types parameterized on `AG2PCCtx`:
 `Bit_T<AG2PCCtx>`, `UInt_T<AG2PCCtx,N>`, `Int_T<AG2PCCtx,N>`,
-`Float_T<AG2PCCtx,W>`, and `Bits_T<AG2PCCtx,N>` (a fixed-width bit vector for
+`Float_T<AG2PCCtx,W>`, and `BitVec_T<AG2PCCtx,N>` (a fixed-width bit vector for
 crypto blocks). They support the usual operators (`+ - * / %`, comparisons,
 bit ops, shifts/rotates, slice/concat). A reusable circuit is written once as a
 pure body and compiled with the emp-tool frontend:
@@ -65,7 +65,7 @@ the same per-gate cost; see [docs/execution_strategies.md](docs/execution_strate
 `ctx.run` / `ctx.run_body` are standalone pass replays; their arguments must be
 materialized (from `input` / a prior run / a `checkpoint`). A typed raw-program
 escape hatch, `ctx.run_program<RetV>(program, args...)`, replays a hand-authored
-or loaded `BooleanProgram` (e.g. an AES/SHA builtin) over `Bits_T` I/O.
+or loaded `BooleanProgram` (e.g. an AES/SHA builtin) over `BitVec_T` I/O.
 
 ## Inputs, reveal, and explicit liveness
 
@@ -196,7 +196,7 @@ verdict, so its exit code is the test's exit code.
 | `test_direct_chunks` | multi-owner `input_batch`, `checkpoint` prune + carry, reveal keep-lists, no-arg `checkpoint` cleanup |
 | `test_program_replay` | compiled `run`, hand-authored `run_program`, the fp32 builtin |
 | `test_body_replay_equiv` | `run_body` vs compiled `run` produce a **byte-identical** transcript (the regression gate) |
-| `test_aes_sha_builtin` | `aes128` + `sha256_256` builtins replayed over `Bits_T` vs a `ClearCtx` oracle |
+| `test_aes_sha_builtin` | `aes128` + `sha256_256` builtins replayed over `BitVec_T` vs a `ClearCtx` oracle |
 
 Benchmarks are opt-in (`-DEMP_AG2PC_BUILD_BENCHES=ON`) and are not run by ctest.
 `bench_100m` runs a repeated SHA-256 chain over a 32-byte all-zero string: the low

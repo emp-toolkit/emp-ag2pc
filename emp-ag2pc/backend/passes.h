@@ -15,14 +15,15 @@
 // Wire = uint32_t is the logical wire id (== emission id == LambdaState index).
 // A pass holds a wire-id counter `wid` (next id, starting at num_inputs) that, on
 // a RecordContext-canonical program, equals the program's gate.out — so the slot
-// layout matches across passes and equals the legacy wid++ numbering exactly.
+// layout matches across passes and equals the canonical record-order numbering.
 //
 // public_bit DEDUPS the two constants (cache c0_/c1_), mirroring emp-tool's
 // RecordContext: a body using a constant repeatedly emits ONE const wire, so the
 // live (streaming) gate stream matches the compiled BooleanProgram's.
 
 #include "emp-tool/emp-tool.h"                  // block, MITCCRH, select_mask, LSB/LSB1, ThreadPool, RO, Hash
-#include "emp-tool/circuits/boolean_program.h"  // BooleanProgram, validate_program, Op (canonical check)
+#include "emp-tool/ir/program.h"     // BooleanProgram, Op
+#include "emp-tool/ir/validate.h"   // validate_program
 #include "emp-ag2pc/backend/secure_wires.h"     // AShareBundle / AShareBundleVec / SecureWires
 #include "emp-ag2pc/backend/triple_pool.h"      // TriplePool
 #include "emp-ag2pc/backend/helper.h"           // chunk_pipe, LSB, LSB1

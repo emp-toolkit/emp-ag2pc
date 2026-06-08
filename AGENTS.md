@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 A header-only C++20 implementation of WRK-style maliciously-secure two-party computation over authenticated garbled circuits, built on emp-tool's `BooleanContext` model. The entire API is one context, [emp-ag2pc/frontend/ag2pc_ctx.h](emp-ag2pc/frontend/ag2pc_ctx.h) `AG2PCCtx`, surfaced through the single public header [emp-ag2pc/emp-ag2pc.h](emp-ag2pc/emp-ag2pc.h).
 
-`AG2PCCtx` IS a `BooleanContext` (`Wire = uint32_t`, a bare recorder id) and owns the crypto protocol + executor and the typed I/O: `input` / `input_batch` / `reveal` / `checkpoint` / `run` / `run_body` / `run_program`. Circuit values are emp-tool's context-bound types over `AG2PCCtx` (`Bit_T` / `UInt_T<N>` / `Int_T<N>` / `Float_T<W>` / `Bits_T<N>`); reusable circuits are authored once with the emp-tool frontend (`frontend::compile<rec::…>`).
+`AG2PCCtx` IS a `BooleanContext` (`Wire = uint32_t`, a bare recorder id) and owns the crypto protocol + executor and the typed I/O: `input` / `input_batch` / `reveal` / `checkpoint` / `run` / `run_body` / `run_program`. Circuit values are emp-tool's context-bound types over `AG2PCCtx` (`Bit_T` / `UInt_T<N>` / `Int_T<N>` / `Float_T<W>` / `BitVec_T<N>`); reusable circuits are authored once with the emp-tool frontend (`frontend::compile<rec::…>`).
 
 **Three execution strategies, one pass executor** (see [docs/execution_strategies.md](docs/execution_strategies.md)):
 - **Direct / chunked** — operators (`a + b`) record gates into the current chunk, flushed at `reveal` / `checkpoint`. (emp-tool's generic `frontend::run` also emits direct gates into the chunk; prefer `ctx.run` for standalone replay.)

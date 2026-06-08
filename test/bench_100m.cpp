@@ -14,7 +14,7 @@
 //   BENCH_THREADS=<n> ThreadPool workers, default 4
 
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-tool/circuits/builtin_circuit_files.h"
+#include "emp-tool/ir/builtins.h"
 #include "net_setup.h"
 
 #include <openssl/sha.h>
@@ -33,8 +33,8 @@ using namespace emp;
 
 namespace {
 
-using B128 = Bits_T<AG2PCCtx, 128>;
-using B256 = Bits_T<AG2PCCtx, 256>;
+using B128 = BitVec_T<AG2PCCtx, 128>;
+using B256 = BitVec_T<AG2PCCtx, 256>;
 
 uint64_t env_u64(const char* name, uint64_t fallback) {
   const char* s = std::getenv(name);
@@ -106,15 +106,15 @@ uint64_t io_bytes(AG2PCCtx& ctx) {
 }
 
 template <class Ctx>
-Bits_T<Ctx, 256> replay_sha256_256(Ctx& c, const circuit::BooleanProgram& prog,
-                                   const Bits_T<Ctx, 256>& in,
+BitVec_T<Ctx, 256> replay_sha256_256(Ctx& c, const circuit::BooleanProgram& prog,
+                                   const BitVec_T<Ctx, 256>& in,
                                    ProgramWorkspace<typename Ctx::Wire>& ws) {
   using W = typename Ctx::Wire;
   std::array<W, 256> iw{};
   in.pack_wires(iw.data());
   const std::vector<W>& ow =
       execute_program(c, prog, std::span<const W>(iw.data(), iw.size()), ws);
-  return Bits_T<Ctx, 256>::from_wires(c, ow.data());
+  return BitVec_T<Ctx, 256>::from_wires(c, ow.data());
 }
 
 }  // namespace
