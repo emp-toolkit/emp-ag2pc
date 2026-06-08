@@ -1,0 +1,59 @@
+// Advanced: run a stored BooleanProgram directly. This is useful for large
+// pre-recorded circuits such as AES or SHA, where the natural input/output type
+// is Bits_T rather than UInt_T.
+
+#include "common.h"
+#include "emp-tool/circuits/builtin_circuit_files.h"
+
+using namespace emp;
+
+int main(int argc, char** argv) {
+  int party, port;
+  parse_party_and_port(argv, &party, &port);
+  if (party > BOB) return 0;
+
+  NetIO* io = nullptr;
+  ag2pc_example::make_io2pc(party, port, io);
+  ThreadPool pool(4);
+  AG2PCCtx ctx(io, &pool, party);
+
+  using Bits128 = Bits_T<AG2PCCtx, 128>;
+  using Bits256 = Bits_T<AG2PCCtx, 256>;
+
+  const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
+  std::array<bool, 128> alice_half{};
+  std::array<bool, 128> bob_half{};
+  for (int i = 0; i < 128; ++i) {
+    alice_half[(size_t)i] = (i % 11) == 0;
+    bob_half[(size_t)i] = (i % 7) == 3;
+  }
+
+  auto batch = ctx.input_batch();
+  auto low = batch.add<Bits128>(ALICE, party == ALICE ? alice_half : std::array<bool, 128>{});
+  auto high = batch.add<Bits128>(BOB, party == BOB ? bob_half : std::array<bool, 128>{});
+  batch.finish();
+
+  Bits256 message = low.concat(high);
+  auto digest = ctx.run_program<Bits256>(sha, message);
+  auto opened = ctx.reveal(digest, ALICE);
+
+  if (ag2pc_example::is_alice(party)) {
+    std::vector<bool> clear_input(256);
+    for (int i = 0; i < 128; ++i) {
+      clear_input[(size_t)i] = alice_half[(size_t)i];
+      clear_input[(size_t)128 + i] = bob_half[(size_t)i];
+    }
+    std::vector<bool> oracle = ag2pc_example::clear_eval(sha, clear_input);
+    bool ok = opened.has_value();
+    for (int i = 0; i < 256 && ok; ++i) ok = opened.value()[(size_t)i] == oracle[(size_t)i];
+
+    std::array<bool, 64> first_bits{};
+    if (opened.has_value())
+      for (int i = 0; i < 64; ++i) first_bits[(size_t)i] = opened.value()[(size_t)i];
+    uint64_t first_word = ag2pc_example::u64_from_bits(first_bits);
+    std::printf("6_raw_program: sha256_256 first 64 output bits=0x%016llx  %s\n",
+                (unsigned long long)first_word, ok ? "GOOD!" : "BAD!");
+    return ok ? 0 : 1;
+  }
+  return 0;
+}

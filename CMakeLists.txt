@@ -18,6 +18,7 @@ endif()
 # ---------------------------------------------------------------------
 option(EMP_AG2PC_BUILD_TESTS   "Build emp-ag2pc tests"                        ${PROJECT_IS_TOP_LEVEL})
 option(EMP_AG2PC_BUILD_BENCHES "Build emp-ag2pc benchmarks (opt-in; not run by ctest)" OFF)
+option(EMP_AG2PC_BUILD_EXAMPLES "Build emp-ag2pc tutorial examples"            ${PROJECT_IS_TOP_LEVEL})
 
 # ---------------------------------------------------------------------
 # Dependencies
@@ -31,12 +32,14 @@ find_package(emp-ot   1.0 REQUIRED)
 # ---------------------------------------------------------------------
 # Library target (header-only)
 # ---------------------------------------------------------------------
-# emp-ag2pc has no compiled units of its own — protocol logic lives in
-# headers, the Backend / circ_exec singletons live in upstream emp-tool.
+# emp-ag2pc has no compiled units of its own — the protocol lives entirely in
+# headers; the compiled OT / crypto bodies come from upstream emp-tool / emp-ot.
 add_library(emp-ag2pc INTERFACE)
 add_library(emp-ag2pc::emp-ag2pc ALIAS emp-ag2pc)
 
-target_compile_features(emp-ag2pc INTERFACE cxx_std_17)
+# C++20 floor: AG2PCCtx, the passes, and the value layer are BooleanContext
+# (concepts / requires).
+target_compile_features(emp-ag2pc INTERFACE cxx_std_20)
 
 target_include_directories(emp-ag2pc INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -52,4 +55,11 @@ target_link_libraries(emp-ag2pc INTERFACE
 if(EMP_AG2PC_BUILD_TESTS)
     include(CTest)
     add_subdirectory(test)
+endif()
+
+# ---------------------------------------------------------------------
+# Examples
+# ---------------------------------------------------------------------
+if(EMP_AG2PC_BUILD_EXAMPLES)
+    add_subdirectory(example)
 endif()

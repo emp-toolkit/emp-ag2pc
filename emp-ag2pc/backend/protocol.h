@@ -1,12 +1,32 @@
-#ifndef AG2PC_SESSION_H__
-#define AG2PC_SESSION_H__
+#ifndef EMP_AG2PC_PROTOCOL_H__
+#define EMP_AG2PC_PROTOCOL_H__
 #include "emp-ag2pc/backend/triple_pool.h"
 #include "emp-ag2pc/backend/profiling.h"
 #include "emp-tool/io/net_io_channel.h"
 #include "emp-ag2pc/backend/secure_wires.h"
-#include <array>
+#include <string>
 #include <vector>
 using namespace emp;
+
+namespace emp {
+// A SecureWires bundle is "n wires" iff Lambda has n entries; wire_bundle must
+// match, and exactly the local party's label array (label0 at the garbler P1,
+// eval_label at the evaluator P2) must match. An externally-supplied bundle that
+// violates this would read out of bounds during input load / decode, so check it
+// at the boundary (always on; O(1)).
+inline void check_secure_wires(const SecureWires &w, int party, const char *where) {
+  const size_t n = w.Lambda.size();
+  if (w.wire_bundle.size() != n)
+    error((std::string("AG2PC ") + where + ": SecureWires wire_bundle length != Lambda length").c_str());
+  if (party == 1) {
+    if (w.label0.size() != n)
+      error((std::string("AG2PC ") + where + ": garbler SecureWires label0 length != Lambda length").c_str());
+  } else {
+    if (w.eval_label.size() != n)
+      error((std::string("AG2PC ") + where + ": evaluator SecureWires eval_label length != Lambda length").c_str());
+  }
+}
+}  // namespace emp
 
 // Two-party authenticated garbling protocol Π_MPC of agc.tex
 // (Figures P:MPC-1, P:MPC-2, P:MPC-3) specialized to two parties. Role
@@ -25,10 +45,11 @@ using namespace emp;
 //   process_inputs(owners, bits_per_owner) → SecureWires[]  // KRRW Fig.3 inputs
 //   decode(wires, recipient)               → vector<bool>   // step 14
 //
-// AG2PCSession owns input authentication, output decode, the long-lived COT/Delta
-// session, and the half-gate primitives used by AG2PCEngine.
+// AG2PCProtocol owns input authentication, output decode, the long-lived
+// COT/Delta session, and the half-gate primitives the executor builds on. It is
+// the crypto core under AG2PCCtx — protocol math only, no typed-value layer.
 
-class AG2PCSession {
+class AG2PCProtocol {
 public:
   // Long-lived setup: TriplePool (COT mesh + Δ). Constructed once per session and
   // reused across all process_inputs / compute / decode calls; it holds the COT
@@ -46,9 +67,13 @@ public:
   block Delta;
   PRG prg;
 
+  // Number of batched input phases executed (one per process_inputs call) — the
+  // observable that proves input batching (surfaced via AG2PCCtx::process_input_calls).
+  int process_input_calls = 0;
+
   // Takes a single NetIO; spawns and owns the sibling channel. ssp is the
   // statistical security parameter forwarded to TriplePool (bucket sizing).
-  AG2PCSession(NetIO *io, ThreadPool *pool_, int party_, int ssp = 40)
+  AG2PCProtocol(NetIO *io, ThreadPool *pool_, int party_, int ssp = 40)
       : io(io), sib_owned(io->make_sibling()), sib(sib_owned.get()),
         send_io(party_ == 1 ? io : sib_owned.get()),
         recv_io(party_ == 1 ? sib_owned.get() : io),
@@ -56,7 +81,7 @@ public:
     fpre = new TriplePool(io, sib_owned.get(), pool_, party_, ssp);
     Delta = fpre->Delta;
   }
-  ~AG2PCSession() { delete fpre; }
+  ~AG2PCProtocol() { delete fpre; }
 
   // KRRW Fig.3 input phase, batched across both owners' input wires in a
   // single protocol call. owners[k] is the owner for bits_per_owner[k]
@@ -80,11 +105,28 @@ public:
   // `recipient`; empty vector at non-recipients.
   std::vector<bool> decode(const SecureWires &wires, int recipient);
 
-  // Alias for decode(): opens the output wires to `recipient`. Reads like the
-  // EMP-object `.reveal<T>()` — same operation, just the SH2PC-style spelling for
-  // the engine/expert path (e.g. `auto z = mpc.reveal(out, PUBLIC);`).
+  // Alias for decode(): opens the output wires to `recipient`.
   std::vector<bool> reveal(const SecureWires &wires, int recipient) {
     return decode(wires, recipient);
+  }
+
+  // Build the SecureWires for public constant wires (no OT, no communication).
+  // Exact party-local encoding: authenticated share = 0, Lambda = the public
+  // bit, garbler (P1) label0 = bit ? Delta : zero_block, evaluator (P2) eval
+  // label = zero_block. All parties MUST pass the same public bits.
+  SecureWires public_wires(const std::vector<bool> &bits) {
+    int n = (int)bits.size();
+    SecureWires sw;
+    sw.Lambda.resize(n);
+    sw.wire_bundle.assign(n, AShareBundle{});
+    if (party == 1) sw.label0.resize(n);
+    else            sw.eval_label.resize(n);
+    for (int i = 0; i < n; ++i) {
+      sw.Lambda[i] = bits[i] ? 1 : 0;
+      if (party == 1) sw.label0[i] = bits[i] ? Delta : zero_block;
+      else            sw.eval_label[i] = zero_block;
+    }
+    return sw;
   }
 };
 
@@ -92,10 +134,20 @@ public:
 // Implementation
 // ==========================================================================
 
-std::vector<SecureWires> AG2PCSession::process_inputs(
+std::vector<SecureWires> AG2PCProtocol::process_inputs(
     const std::vector<int> &owners,
     const std::vector<std::vector<bool>> &bits_per_owner) {
   AG2PC_PHASE_BEGIN();
+  ++process_input_calls;
+  // Validate the request before any communication: a count mismatch or an owner
+  // that is neither ALICE nor BOB would desync the two parties (each side waits
+  // for peer-owned bits nobody sends → hang). PUBLIC inputs do not go through the
+  // OT input phase — build them with public_wires() instead.
+  if (owners.size() != bits_per_owner.size())
+    error("process_inputs: owners.size() != bits_per_owner.size()");
+  for (int o : owners)
+    if (o != ALICE && o != BOB)
+      error("process_inputs: owner must be ALICE or BOB (use public_wires for PUBLIC)");
   const int K = (int)owners.size();
   int n_total = 0;
   std::vector<int> off_per_owner(K);
@@ -225,8 +277,9 @@ std::vector<SecureWires> AG2PCSession::process_inputs(
   return result;
 }
 
-std::vector<bool> AG2PCSession::decode(const SecureWires &wires,
-                                         int recipient) {
+std::vector<bool> AG2PCProtocol::decode(const SecureWires &wires,
+                                        int recipient) {
+  check_secure_wires(wires, party, "decode");   // reject malformed bundles before OOB access
   int n = (int)wires.size();
   AG2PC_PHASE_BEGIN();
   // Reveal to ALL parties: reconstruct at the evaluator (P2), then P2 broadcasts.
@@ -252,8 +305,8 @@ std::vector<bool> AG2PCSession::decode(const SecureWires &wires,
   // wire_bundle[i].key plus Delta — hashes those, and compares the digest to
   // the one shipped. A flipped bit forces a flipped MAC (by Δ_peer, which the
   // sender doesn't know), so the digest mismatch aborts here before the secret
-  // is consumed. The chunk-level c_γ and COT-correlation checks (run in
-  // run_chunk_) gate this in turn: any tampered MAC structure has aborted
+  // is consumed. The chunk-level c_γ and COT-correlation checks (run in the
+  // executor) gate this in turn: any tampered MAC structure has aborted
   // already, so the only thing the per-reveal hash needs to catch is a sender
   // flipping a bit at decode-time.
   std::vector<unsigned char> my_share(n);
@@ -290,6 +343,4 @@ std::vector<bool> AG2PCSession::decode(const SecureWires &wires,
   return result;
 }
 
-using C2PC = AG2PCSession;
-
-#endif // AG2PC_SESSION_H__
+#endif // EMP_AG2PC_PROTOCOL_H__

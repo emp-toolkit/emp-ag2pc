@@ -1,9 +1,11 @@
 #ifndef AG2PC_TEST_COMMON_H__
 #define AG2PC_TEST_COMMON_H__
-// Alias-neutral helpers shared by object-mode and stream-mode tests.
+// Shared helpers for the AG2PCCtx tests.
 #include "emp-tool/emp-tool.h"
+#include "emp-tool/circuits/context.h"   // ClearCtx, execute_program
 #include "net_setup.h"
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace ag2pc_test {
@@ -20,27 +22,18 @@ inline uint32_t u32_of(const std::vector<bool> &b) {
   return v;
 }
 
-// Deterministic AES-128 key and plaintext.
-inline void aes_test_bits(bool key_bits[128], bool pt_bits[128]) {
-  for (int i = 0; i < 128; ++i) {
-    key_bits[i] = ((i * 7 + 3) % 5) == 0;
-    pt_bits[i]  = ((i * 3 + 1) % 4) == 0;
-  }
-}
-
-// Plaintext AES-128 oracle on the clear backend.
-template <typename Wire>
-inline void aes_clear(const bool key_bits[128], const bool pt_bits[128], bool *ct_out) {
-  using BW = emp::Bit_T<Wire>;
-  BW key[128], pt[128], expanded[1408], ct[128];
-  for (int i = 0; i < 128; ++i) key[i] = BW(key_bits[i], emp::PUBLIC);
-  for (int i = 0; i < 128; ++i) pt[i]  = BW(pt_bits[i], emp::PUBLIC);
-  emp::AES_Calculator_T<Wire> aes;
-  aes.key_schedule(key, expanded);
-  aes.encrypt(pt, expanded, ct);
-  Wire buf[128];
-  for (int i = 0; i < 128; ++i) buf[i] = ct[i].bit;
-  emp::backend->reveal(ct_out, 1, buf, 128);
+// Cleartext oracle: evaluate a BooleanProgram on the plaintext ClearCtx over the
+// same input bits, returning the output bits. Used to check AG2PC replay results.
+inline std::vector<bool> clear_eval(const emp::circuit::BooleanProgram &p,
+                                    const std::vector<bool> &in) {
+  emp::ClearCtx cx;
+  std::vector<uint8_t> cin(in.size());
+  for (size_t i = 0; i < in.size(); ++i) cin[i] = in[i] ? 1 : 0;
+  std::vector<uint8_t> cow =
+      emp::execute_program(cx, p, std::span<const uint8_t>(cin.data(), cin.size()));
+  std::vector<bool> out(cow.size());
+  for (size_t i = 0; i < cow.size(); ++i) out[i] = (cow[i] & 1);
+  return out;
 }
 
 }  // namespace ag2pc_test

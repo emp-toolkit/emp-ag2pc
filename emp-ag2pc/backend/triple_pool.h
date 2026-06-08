@@ -78,7 +78,7 @@ public:
   bool cots_minted_since_check_ = false;
 
   // The caller owns both io and the paired sib channel and threads them in;
-  // AG2PCSession spawns the sib and passes it along (see backend/session.h).
+  // AG2PCProtocol spawns the sib and passes it along (see backend/protocol.h).
   TriplePool(NetIO *io, NetIO *sib, ThreadPool *pool, int party, int ssp = 40)
       : pool(pool), party(party), ssp(ssp), io(io), sib(sib),
         send_io(party == 1 ? io : sib), recv_io(party == 1 ? sib : io) {

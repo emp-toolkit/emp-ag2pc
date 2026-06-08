@@ -4,21 +4,28 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-A header-only C++ implementation of WRK-style maliciously-secure two-party computation over authenticated garbled circuits. User code chooses one of two mode headers: [emp-ag2pc/emp-ag2pc.h](emp-ag2pc/emp-ag2pc.h) for object mode, or [emp-ag2pc/stream.h](emp-ag2pc/stream.h) for the faster pure-body / compiled stream mode.
+A header-only C++20 implementation of WRK-style maliciously-secure two-party computation over authenticated garbled circuits, built on emp-tool's `BooleanContext` model. The entire API is one context, [emp-ag2pc/frontend/ag2pc_ctx.h](emp-ag2pc/frontend/ag2pc_ctx.h) `AG2PCCtx`, surfaced through the single public header [emp-ag2pc/emp-ag2pc.h](emp-ag2pc/emp-ag2pc.h).
 
-**Two programming modes, one engine.** **Object mode** ([emp-ag2pc/emp-ag2pc.h](emp-ag2pc/emp-ag2pc.h)) is ordinary imperative EMP code — `setup_ag2pc` + native objects (`Bit`/`UInt32`/`BitVec`) + operators + `.reveal<T>()` + `finalize_ag2pc`. **Stream mode** ([emp-ag2pc/stream.h](emp-ag2pc/stream.h)) is a pure body / compiled circuit on `AG2PCEngine` (`run`/`run_compiled`/`run_program`/`run_circuit`/`AG2PCInputs`), with `SecureWires` or an `Opened` run handle for I/O. Both compile to the one executor (`run_engine_`); they are disjoint only at the wire-binding + I/O layer (`AG2PCWire` vs `LambdaWire`, **one mode header per TU** — shared logic goes in wire-generic neutral headers). Do not present `AG2PCSession` / `AG2PCEngine` / `SecureWires` / `process_inputs` / `decode` as the object-mode surface. **Full guide (when to use which, examples, `AG2PCInputs`/`Opened`, the wire-binding rule): [docs/programming_modes.md](docs/programming_modes.md).**
+`AG2PCCtx` IS a `BooleanContext` (`Wire = uint32_t`, a bare recorder id) and owns the crypto protocol + executor and the typed I/O: `input` / `input_batch` / `reveal` / `checkpoint` / `run` / `run_body` / `run_program`. Circuit values are emp-tool's context-bound types over `AG2PCCtx` (`Bit_T` / `UInt_T<N>` / `Int_T<N>` / `Float_T<W>` / `Bits_T<N>`); reusable circuits are authored once with the emp-tool frontend (`frontend::compile<rec::…>`).
+
+**Three execution strategies, one pass executor** (see [docs/execution_strategies.md](docs/execution_strategies.md)):
+- **Direct / chunked** — operators (`a + b`) record gates into the current chunk, flushed at `reveal` / `checkpoint`. (emp-tool's generic `frontend::run` also emits direct gates into the chunk; prefer `ctx.run` for standalone replay.)
+- **Compiled replay** — `ctx.run(circuit, args...)` replays a stored `Circuit` standalone through all passes.
+- **Live body replay** — `ctx.run_body(body, args...)` replays a pure body live per pass; byte-identical transcript to compiled replay.
+
+`ctx.run` / `ctx.run_body` require **materialized** args (from `input` / a prior run / a `checkpoint`); a pending direct-chunk arg is a hard error (cross-mode mixing is deferred). Wire liveness is **explicit** — no refcount, no global singleton, no global `emp::Backend`. `checkpoint(keep...)` prunes carried state to the named values; `reveal(v, recipient, keep...)` flushes keeping `v` + `keep...`; stale wires error loudly.
 
 **Layout — `frontend/` over `backend/`:**
-- `emp-ag2pc.h` is the public object API; it includes `frontend/ag2pc.h` (setup/finalize/reveal/checkpoint), `frontend/direct_backend.h` (`AG2PCBackend` + `AG2PCWire`), and `frontend/circuit_types.h` (AG2PCWire `Bit`/`Integer`/… aliases). `stream.h` is the pure body / compiled API; it includes `frontend/run.h` (`run`/`run_compiled`/`run_program` + `LambdaWire` aliases). Never include both mode headers in one TU (alias collision).
-- `backend/engine.h` (`AG2PCEngine`), `backend/session.h` (`AG2PCSession`), `backend/secure_wires.h`, `backend/triple_pool.h`, `backend/profiling.h`, `backend/helper.h`.
+- `emp-ag2pc.h` → `emp-tool/emp-tool.h` + `emp-tool/frontend/frontend.h` (compile/run, `rec::`) + `frontend/ag2pc_ctx.h` (`AG2PCCtx`).
+- `backend/protocol.h` (`AG2PCProtocol`), `backend/executor.h` (`AG2PCExecutor` + `ag2pc_detail::body_replay`), `backend/passes.h` (the 5 passes + `LambdaState`), `backend/secure_wires.h`, `backend/triple_pool.h`, `backend/profiling.h`, `backend/helper.h`.
 
-**One protocol executor:** exactly one engine — `AG2PCEngine::run_engine_` ([emp-ag2pc/backend/engine.h](emp-ag2pc/backend/engine.h)). It runs a *circuit source* (replay callback) per phase; inputs/outputs are handled via `AG2PCSession::process_inputs` / `decode`. Sources: a pure frontend body (`run<Ins...>`), a compiled `frontend::TypedCircuit` (`run_compiled<Ins...>`), a raw `frontend::BooleanProgram` (`run_program`), or the flat lambda (`run_circuit`). The object backend `AG2PCBackend` ([emp-ag2pc/frontend/direct_backend.h](emp-ag2pc/frontend/direct_backend.h)) is **not** a separate path: it buffers each chunk into a `frontend::BooleanProgram` and replays it via `run_program` on the same engine — kept for what a pure body can't express (mid-stream reveal / checkpoint, reactive host branching, RAII liveness). `AG2PCSession` ([emp-ag2pc/backend/session.h](emp-ag2pc/backend/session.h)) is pure crypto: input authentication, output decode, the long-lived COT/Δ session — no circuit walk.
+emp-tool + emp-ot are external `find_package` dependencies (IKNP, NetIO, BlockVec, MITCCRH, the value layer all come from upstream). Local-dev pointer: `-Demp-tool_DIR=/path/to/emp-tool/build -Demp-ot_DIR=/path/to/emp-ot/build`.
 
-**Renames / compat:** `C2PC`→`AG2PCSession`, `LambdaRunner`→`AG2PCEngine` (old names kept as `using` aliases). Old header paths (`2pc.h`, `lambda_runner.h`, `ag2pc_backend.h`, `share_bundle.h`, `profiling.h`, `triple_pool.h`, `helper.h`, `ag2pc_circuit_types.h`, `lambda_circuit_types.h`) remain as thin forwarders. `WireGraph` and `C2PC::compute` no longer exist; do not reintroduce them. emp-tool + emp-ot are external `find_package` dependencies — IKNP, NetIO, BlockVec, default_init_allocator, MITCCRH all come from upstream via CMake `find_package`. Local-dev pointer: `-Demp-tool_DIR=/path/to/emp-tool/build -Demp-ot_DIR=/path/to/emp-ot/build`.
+**Do not reintroduce:** the public object/stream mode split, `Shape` / `SecureValue<Shape>`, `AG2PCSession` / `AG2PCEngine` / `AG2PCBackend` / `AG2PCWire` refcount carrier, `setup_ag2pc` / global `emp::Backend`, `EMP_CIRCUIT_TYPES_ALL` aliases, `LambdaWire` / `run_circuit` / `AG2PCInputs`. The value surface uses only `*_T<Ctx>` + `value_traits` + `rec::`/`compile`/`run`.
 
 ## Protocol
 
-Authenticated garbling (WRK17) with the [KRRW18](https://eprint.iacr.org/2018/578) optimizations: a function-dependent half-gate leaky-AND (KRRW §5.2) run in place on each AND gate's own input masks, a batched `F_eq` check, and cyclic-shift bucketing. Correlated OT is a single lifetime-open SoftSpoken⟨4⟩ session from emp-ot, whose consistency check runs before every reveal so it gates output. See the README **"How it works"** for the component map. (Party 1 is the garbler, party 2 the evaluator.)
+Authenticated garbling (WRK17) with the [KRRW18](https://eprint.iacr.org/2018/578) optimizations: a function-dependent half-gate leaky-AND (KRRW §5.2) run in place on each AND gate's own input masks, a batched `F_eq` check, and cyclic-shift bucketing. Correlated OT is a single lifetime-open SoftSpoken⟨4⟩ session from emp-ot, whose consistency check runs before every reveal so it gates output. Party 1 is the garbler, party 2 the evaluator. See the README **"How it works"** for the component map.
 
 ## Build / test
 
@@ -27,24 +34,22 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release      # out-of-source REQUIRED (in
 cmake --build build -j
 ctest --test-dir build --output-on-failure          # 2-party over localhost
 ```
-- Dependencies: emp-tool + emp-ot via `find_package` (point at build trees with `-Demp-tool_DIR=… -Demp-ot_DIR=…`).
-- Options: `EMP_AG2PC_BUILD_TESTS` (ON when top-level), `EMP_AG2PC_BUILD_BENCHES` (OFF; builds `bench_example` and `bench_100m`, **not** registered with ctest).
-- Profiling: configure with `-DCMAKE_CXX_FLAGS=-DAG2PC_PROFILE` to enable the per-phase `[ag2pc]` / `[ag2pc-tp]` markers ([backend/profiling.h](emp-ag2pc/backend/profiling.h)); zero-cost when off.
+- Dependencies: emp-tool + emp-ot via `find_package` (`-Demp-tool_DIR=… -Demp-ot_DIR=…`).
+- Options: `EMP_AG2PC_BUILD_TESTS` (ON when top-level), `EMP_AG2PC_BUILD_BENCHES` (OFF; SHA benches await the Stage-5 context-generic SHA kernel and are not built yet).
+- Profiling: configure with `-DCMAKE_CXX_FLAGS=-DAG2PC_PROFILE` for the per-phase `[ag2pc]` / `[ag2pc-tp]` markers ([backend/profiling.h](emp-ag2pc/backend/profiling.h)); zero-cost when off.
 
 ## Running a test
 
-Each binary takes `<party> <port>`; use the top-level [run](run) helper (2-party — party 3 returns immediately). Binaries are double-prefixed `test_test_<name>`:
+Each binary takes `<party> <port>`; use the top-level [run](run) helper (2-party over localhost, random port, ALICE's exit code is the verdict). Binary `test_<name>` is built from `test/test_<name>.cpp`:
 
 ```bash
-./run ./build/bin/test_test_object_api
+./run ./build/bin/test_context_api
 ```
-Transport: a primary `emp::NetIO` plus a sibling channel spawned via `NetIO::make_sibling()` (the `send_io`/`recv_io` duplex), built in [test/net_setup.h](test/net_setup.h) by `make_io2pc`. Tests are grouped by surface — `test_object_api` / `test_object_control` / `test_object_crypto` (object mode) and `test_stream_api` / `test_stream_equiv` (stream mode / internal). See README's test table.
+Transport: a primary `emp::NetIO` plus a sibling channel via `NetIO::make_sibling()` (the `send_io`/`recv_io` duplex), built in [test/net_setup.h](test/net_setup.h) by `make_io2pc`. Tests: `test_context_api`, `test_direct_chunks`, `test_program_replay`, `test_body_replay_equiv` (the byte-identical-transcript gate), `test_aes_sha_builtin`. See the README test table.
 
-## Architecture (bottom-up; one engine)
+## Architecture (bottom-up)
 
-1. **`TriplePool`** ([backend/triple_pool.h](emp-ag2pc/backend/triple_pool.h)) — the COT/Δ session over emp-ot SoftSpoken⟨4⟩ plus authenticated AND-share generation: aShares (`MAC = KEY ⊕ x·Δ`) minted from COT with a bit-0/bit-1 Δ pinning, then each AND gate's `σ = λ_α∧λ_β` built by the in-place function-dependent leaky-AND (KRRW §5.2), a batched `F_eq` check, and cyclic-shift bucketing. Opened once and held for the session; its check gates every reveal.
-2. **`AG2PCSession`** ([backend/session.h](emp-ag2pc/backend/session.h), was `C2PC`) — session crypto only: `process_inputs` (KRRW Fig.3 input authentication, batched across owners) and `decode`/`reveal` (output open). Owns the `TriplePool` (`fpre`) and the duplex `NetIO`. No circuit walk.
-3. **`AG2PCEngine`** ([backend/engine.h](emp-ag2pc/backend/engine.h), was `LambdaRunner`) — the ONE executor (`run_engine_`): replays a circuit source per phase (liveness → fused size/collect-masks → garble/evaluate → `c_γ` check → output) over a slot-reused per-wire layout, so memory is linear in #AND + live width, not #wires. Sources listed above; `AG2PCInputs` provides constructor-style batched inputs and `run` returns an `Opened` result handle.
-4. **`AG2PCBackend`** ([frontend/direct_backend.h](emp-ag2pc/frontend/direct_backend.h)) — the object-mode adapter over a refcounted 4-byte `AG2PCWire`: records native `Bit`/`Integer` code, dead-code-eliminates + chunks it into a `frontend::BooleanProgram`, and runs it on `AG2PCEngine` via `run_program`. A recording/chunking front-door, **not** a second garbler/evaluator; supports mid-stream reveal, reactive branching, and `checkpoint_ag2pc_keep_all()`.
-
-Gone — do not reintroduce: `WireGraph` / `C2PC::compute`, the `nP` / `NetIOMP` mesh, `AuthSharePool` / `cot.h` / `ot/`, BristolFormat circuits, and `doc/main.pdf`. (Earlier docs described that pre-rewrite `ref` stack; it is no longer this tree.)
+1. **`TriplePool`** ([backend/triple_pool.h](emp-ag2pc/backend/triple_pool.h)) — the COT/Δ session over emp-ot SoftSpoken⟨4⟩ plus authenticated AND-share generation: aShares (`MAC = KEY ⊕ x·Δ`) minted from COT with a bit-0/bit-1 Δ pinning, each AND gate's `σ = λ_α∧λ_β` built by the in-place function-dependent leaky-AND (KRRW §5.2), a batched `F_eq` check, and cyclic-shift bucketing. Opened once, held for the session; its check gates every reveal.
+2. **`AG2PCProtocol`** ([backend/protocol.h](emp-ag2pc/backend/protocol.h)) — session crypto only: `process_inputs` (KRRW Fig.3 input authentication, batched across owners) and `decode`/`reveal` (output open). Owns the `TriplePool` (`fpre`) and the duplex `NetIO`. No circuit walk.
+3. **`AG2PCExecutor`** ([backend/executor.h](emp-ag2pc/backend/executor.h)) — runs a `BooleanProgram` or a live body source through the five passes ([backend/passes.h](emp-ag2pc/backend/passes.h)): liveness → fused size/collect-masks → garble/evaluate → `c_γ` check → output, over a slot-reused per-wire layout (memory linear in #AND + live width, not #wires). Each pass is itself a `BooleanContext` over one shared `LambdaState`, so the same gate stream drives every phase — hence the byte-identical transcript across strategies.
+4. **`AG2PCCtx`** ([frontend/ag2pc_ctx.h](emp-ag2pc/frontend/ag2pc_ctx.h)) — the public context. Gate ops record `circuit::Gate`s into the current chunk; `flush_` does keep-list-driven DCE and compacts to a RecordCtx-canonical `BooleanProgram` for the executor. A value's ids are MATERIALIZED (authenticated state in `carried_`) or PENDING (in the open chunk); every lookup validates and errors on a stale id.
