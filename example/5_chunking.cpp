@@ -13,22 +13,22 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = UInt_T<AG2PCCtx, 32>;
+  using UInt32 = AG2PCSession::UInt<32>;
 
   const uint32_t seed = 1000;
-  auto state = ctx.input<UInt32>(ALICE, party == ALICE ? seed : 0);
+  auto state = sess.input<UInt32>(ALICE, party == ALICE ? seed : 0);
 
   uint32_t expected = seed;
   for (uint32_t round = 1; round <= 16; ++round) {
-    auto x = ctx.input<UInt32>(BOB, party == BOB ? round : 0);
+    auto x = sess.input<UInt32>(BOB, party == BOB ? round : 0);
     state = state + (x * x);
-    ctx.checkpoint(state);
+    sess.checkpoint(state);
     expected += round * round;
   }
 
-  uint32_t opened = (uint32_t)ctx.reveal(state, PUBLIC).value_or(0);
+  uint32_t opened = (uint32_t)sess.reveal(state, PUBLIC).value_or(0);
   if (ag2pc_example::is_alice(party)) {
     bool ok = opened == expected;
     std::printf("5_chunking: state after 16 rounds=%u  %s\n",

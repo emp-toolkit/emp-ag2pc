@@ -13,17 +13,17 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using Bits16 = BitVec_T<AG2PCCtx, 16>;
-  using Bits32 = BitVec_T<AG2PCCtx, 32>;
+  using Bits16 = AG2PCSession::BitVec<16>;
+  using Bits32 = AG2PCSession::BitVec<32>;
 
   const uint16_t alice_tag = 0xbeef;
   const uint16_t bob_nonce = 0x1234;
 
-  auto tag = ctx.input<Bits16>(ALICE,
+  auto tag = sess.input<Bits16>(ALICE,
       party == ALICE ? ag2pc_example::bits_from_u64<16>(alice_tag) : std::array<bool, 16>{});
-  auto nonce = ctx.input<Bits16>(BOB,
+  auto nonce = sess.input<Bits16>(BOB,
       party == BOB ? ag2pc_example::bits_from_u64<16>(bob_nonce) : std::array<bool, 16>{});
 
   Bits32 packet = tag.concat(nonce);       // bits [0,16) = tag, [16,32) = nonce
@@ -31,9 +31,9 @@ int main(int argc, char** argv) {
   auto recovered_nonce = packet.slice<16, 32>();
 
   uint64_t tag_out = ag2pc_example::u64_from_bits(
-      ctx.reveal(recovered_tag, PUBLIC, recovered_nonce).value_or(std::array<bool, 16>{}));
+      sess.reveal(recovered_tag, PUBLIC, recovered_nonce).value_or(std::array<bool, 16>{}));
   uint64_t nonce_out = ag2pc_example::u64_from_bits(
-      ctx.reveal(recovered_nonce, PUBLIC).value_or(std::array<bool, 16>{}));
+      sess.reveal(recovered_nonce, PUBLIC).value_or(std::array<bool, 16>{}));
 
   if (ag2pc_example::is_alice(party)) {
     bool ok = tag_out == alice_tag && nonce_out == bob_nonce;

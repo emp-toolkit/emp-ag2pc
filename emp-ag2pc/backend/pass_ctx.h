@@ -1,33 +1,22 @@
-#ifndef EMP_AG2PC_PASSES_H__
-#define EMP_AG2PC_PASSES_H__
+#ifndef EMP_AG2PC_PASS_CTX_H__
+#define EMP_AG2PC_PASS_CTX_H__
 
-// The AG2PC authenticated-garbling protocol as a sequence of PASSES, each a
-// C++20 emp::BooleanContext (circuits/context.h) over one shared LambdaState.
-// A pass declares only its per-gate behavior (public_bit / and_gate / xor_gate /
-// not_gate, value-return), plus optional begin()/end() for setup/teardown; the
-// executor (engine.h) sequences the passes and the inter-pass crypto.
+// The AG2PC authenticated-garbling protocol as a sequence of PASSES, each a C++20
+// emp::BooleanContext over one shared AG2PCRunState (run_state.h). A pass declares
+// only its per-gate behavior (public_bit/and_gate/xor_gate/not_gate, value-return)
+// plus optional begin()/end(); the engine (engine.h) sequences them and the
+// inter-pass crypto. Because a pass is a BooleanContext, the SAME pass drives any
+// source (stored BooleanProgram or a live-replayed body) and yields the identical
+// gate stream, hence identical transcripts.
 //
-// Because a pass is a BooleanContext, the SAME pass definition drives any circuit
-// source: a stored BooleanProgram (emp::execute_program / for_each_gate) or a
-// pure circuit body replayed live (streaming) — they produce the identical gate
-// stream, so identical transcripts.
-//
-// Wire = uint32_t is the logical wire id (== emission id == LambdaState index).
-// A pass holds a wire-id counter `wid` (next id, starting at num_inputs) that, on
-// a RecordContext-canonical program, equals the program's gate.out — so the slot
-// layout matches across passes and equals the canonical record-order numbering.
-//
-// public_bit DEDUPS the two constants (cache c0_/c1_), mirroring emp-tool's
-// RecordContext: a body using a constant repeatedly emits ONE const wire, so the
-// live (streaming) gate stream matches the compiled BooleanProgram's.
+// Party asymmetry: the garbler (party 1) runs Liveness -> SlotMask -> Garble ->
+// GammaCheck; the evaluator (party 2) runs Liveness -> SlotMask -> Evaluate.
 
-#include "emp-tool/emp-tool.h"                  // block, MITCCRH, select_mask, LSB/LSB1, ThreadPool, RO, Hash
-#include "emp-tool/ir/program.h"     // BooleanProgram, Op
-#include "emp-tool/ir/validate.h"   // validate_program
+#include "emp-tool/emp-tool.h"                  // block, MITCCRH, select_mask, ThreadPool, RO, Hash
 #include "emp-ag2pc/backend/secure_wires.h"     // AShareBundle / AShareBundleVec / SecureWires
 #include "emp-ag2pc/backend/triple_pool.h"      // TriplePool
 #include "emp-ag2pc/backend/helper.h"           // chunk_pipe, LSB, LSB1
-
+#include "emp-ag2pc/backend/run_state.h"        // AG2PCRunState, AG2PCStreamChunk
 #include <algorithm>
 #include <cstdint>
 #include <future>
@@ -36,86 +25,20 @@
 namespace emp {
 
 // ===========================================================================
-// Shared per-run state. Logical wire ids map to physical slots; XOR/NOT scratch
-// wires can reuse slots after their last read. Indexed by logical wire id.
-// ===========================================================================
-struct LambdaState {
-  int party = 0;
-  block Delta = zero_block;
-  int num_inputs = 0;
-  int num_ands = 0;
-  int num_wires = 0;     // logical wire ids (inputs + emitted), from liveness pass
-  int num_slots = 0;     // physical slots (size of the per-wire arrays)
-
-  // Slot map and liveness, indexed by logical wire id.
-  std::vector<int> phys;
-  std::vector<int> last_use;        // last gate index reading w (-1 if never)
-  std::vector<char> persist;        // 1 if w keeps its slot to the end
-
-  // Per-slot state. Access through phys[].
-  AShareBundleVec wire_slot;
-  std::vector<unsigned char> mask_input;
-  BlockVec label_slot;                 // garbler only
-  BlockVec eval_slot;                  // evaluator only
-  // Per-AND state.
-  AShareBundleVec rep_a, rep_b;
-  AShareBundleVec sigma;
-  // c_gamma check state.
-  BlockVec M1_t;
-  std::vector<unsigned char> Lambda_AND;
-
-  MITCCRH<8> mitc;
-
-  // Logical wire id -> physical slot.
-  AShareBundle&  wslot(int w) { return wire_slot[phys[w]]; }
-  unsigned char& minp(int w)  { return mask_input[phys[w]]; }
-  block&         lbl(int w)   { return label_slot[phys[w]]; }
-  block&         evl(int w)   { return eval_slot[phys[w]]; }
-};
-
-// Per-chunk staging shared by garble (producer) and evaluate (consumer):
-// 2 ciphertexts per AND + 1 b-bit per AND.
-struct LambdaStreamChunk {
-  BlockVec G;
-  std::vector<unsigned char> b;
-  int n = 0;
-};
-
-// AG2PC consumes only RecordContext-canonical programs (what its own producers —
-// frontend::compile and the direct-backend chunk compaction — emit). Beyond the
-// dense/topological invariants validate_program checks, require (1) gate.out ==
-// num_inputs + i, so the pass wire-id counter equals the program id, and (2) at
-// most one Const0 and one Const1 gate, because the pass contexts dedup public_bit
-// (two Const0 wires would both replay to the cached wire and corrupt the layout).
-// Non-canonical programs are rejected, not adapted.
-inline void ag2pc_require_record_canonical(const emp::circuit::BooleanProgram& p) {
-  emp::circuit::validate_program(p);   // bounds / single-def / read-before-define / dense
-  int n_c0 = 0, n_c1 = 0;
-  for (size_t i = 0; i < p.gates.size(); ++i) {
-    if (p.gates[i].out != p.num_inputs + (uint32_t)i)
-      error("ag2pc: program is not RecordContext-canonical (gate out != num_inputs + i)");
-    if (p.gates[i].op == emp::circuit::Op::Const0) ++n_c0;
-    if (p.gates[i].op == emp::circuit::Op::Const1) ++n_c1;
-  }
-  if (n_c0 > 1 || n_c1 > 1)
-    error("ag2pc: program has duplicate constant gates (pass contexts dedup public_bit)");
-}
-
-// ===========================================================================
 // Pass 0 — liveness. last_use / persist over the gate stream; AND outputs
 // persist, linear/const wires are recyclable; circuit outputs are pinned by
 // commit(). Pure analysis: no crypto, no IO.
 // ===========================================================================
-struct LivenessPass {
+struct AG2PCLivenessPass {
   using Wire = uint32_t;
-  LambdaState& s;
+  AG2PCRunState& s;
   uint32_t wid;
   int gi = 0;                       // gate index over AND/XOR/NOT
   std::vector<int> last_use;
   std::vector<char> persist;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
 
-  explicit LivenessPass(LambdaState& st) : s(st), wid((uint32_t)st.num_inputs) {
+  explicit AG2PCLivenessPass(AG2PCRunState& st) : s(st), wid((uint32_t)st.num_inputs) {
     last_use.assign(st.num_inputs, -1);
     persist.assign(st.num_inputs, 1);
   }
@@ -163,9 +86,9 @@ struct LivenessPass {
 // dead linear/const slots via a freelist), seeds wire shares, and for each AND
 // records operand shares (rep_a/rep_b) and draws the fresh λ_γ output mask.
 // ===========================================================================
-struct SizeMaskPass {
+struct AG2PCSlotMaskPass {
   using Wire = uint32_t;
-  LambdaState& s;
+  AG2PCRunState& s;
   TriplePool* fpre;
   uint32_t wid;
   int ai = 0;
@@ -176,7 +99,7 @@ struct SizeMaskPass {
   static constexpr int kLgBatch = 1 << 14;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
 
-  SizeMaskPass(LambdaState& st, TriplePool* f)
+  AG2PCSlotMaskPass(AG2PCRunState& st, TriplePool* f)
       : s(st), fpre(f), wid((uint32_t)st.num_inputs) {
     s.rep_a.clear();
     s.rep_b.clear();
@@ -284,22 +207,22 @@ struct SizeMaskPass {
 // labels. AND-output shares (λ_γ) and input shares live in permanent slots and
 // are read directly.
 // ===========================================================================
-struct GarblePass {
+struct AG2PCGarblePass {
   using Wire = uint32_t;
-  LambdaState& s;
+  AG2PCRunState& s;
   uint32_t wid;
   int ai = 0;
   static constexpr int kBatch = 1 << 16;
   ThreadPool* pool;
   NetIO* send_io;
-  chunk_pipe<LambdaStreamChunk> pipe;
+  chunk_pipe<AG2PCStreamChunk> pipe;
   std::future<void> sender_fut;
-  LambdaStreamChunk* cur = nullptr;
+  AG2PCStreamChunk* cur = nullptr;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
 
-  GarblePass(LambdaState& st, NetIO* sio, ThreadPool* p)
+  AG2PCGarblePass(AG2PCRunState& st, NetIO* sio, ThreadPool* p)
       : s(st), wid((uint32_t)st.num_inputs), pool(p), send_io(sio),
-        pipe(2, [&st](LambdaStreamChunk& c) {
+        pipe(2, [&st](AG2PCStreamChunk& c) {
           int cap = std::min(kBatch, std::max(1, st.num_ands));
           c.G.resize(2 * cap);
           c.b.resize(cap);
@@ -401,23 +324,23 @@ struct GarblePass {
 // Pass 2 (evaluator, party 2) — consume G chunks, derive output labels, and
 // build the c_gamma witness. begin() starts the receiver; end() releases + joins.
 // ===========================================================================
-struct EvaluatePass {
+struct AG2PCEvaluatePass {
   using Wire = uint32_t;
-  LambdaState& s;
+  AG2PCRunState& s;
   uint32_t wid;
   int ai = 0;
   static constexpr int kBatch = 1 << 16;
   ThreadPool* pool;
   NetIO* recv_io;
-  chunk_pipe<LambdaStreamChunk> pipe;
+  chunk_pipe<AG2PCStreamChunk> pipe;
   std::future<void> recv_fut;
-  LambdaStreamChunk* cur = nullptr;
+  AG2PCStreamChunk* cur = nullptr;
   int loc = 0;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
 
-  EvaluatePass(LambdaState& st, NetIO* rio, ThreadPool* p)
+  AG2PCEvaluatePass(AG2PCRunState& st, NetIO* rio, ThreadPool* p)
       : s(st), wid((uint32_t)st.num_inputs), pool(p), recv_io(rio),
-        pipe(2, [&st](LambdaStreamChunk& c) {
+        pipe(2, [&st](AG2PCStreamChunk& c) {
           int cap = std::min(kBatch, std::max(1, st.num_ands));
           c.G.resize(2 * cap);
           c.b.resize(cap);
@@ -427,7 +350,7 @@ struct EvaluatePass {
     recv_fut = pool->enqueue([this] {
       int recv_base = 0;
       while (recv_base < s.num_ands) {
-        LambdaStreamChunk& slot = pipe.producer_slot();
+        AG2PCStreamChunk& slot = pipe.producer_slot();
         slot.n = std::min(kBatch, s.num_ands - recv_base);
         recv_io->recv_data(slot.G.data(), (size_t)2 * slot.n * sizeof(block));
         recv_io->recv_data(slot.b.data(), (size_t)slot.n);
@@ -531,14 +454,14 @@ struct EvaluatePass {
 // Pass 3 (garbler, party 1 only) — after receiving Lambda_AND from the
 // evaluator, re-propagate masks and recompute M1_t for the c_gamma check.
 // ===========================================================================
-struct PostCheckPass {
+struct AG2PCGammaCheckPass {
   using Wire = uint32_t;
-  LambdaState& s;
+  AG2PCRunState& s;
   uint32_t wid;
   int ai = 0;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
 
-  explicit PostCheckPass(LambdaState& st) : s(st), wid((uint32_t)st.num_inputs) {}
+  explicit AG2PCGammaCheckPass(AG2PCRunState& st) : s(st), wid((uint32_t)st.num_inputs) {}
 
   Wire public_bit(bool v) {
     int64_t& c = v ? c1_ : c0_;
@@ -581,5 +504,6 @@ struct PostCheckPass {
   }
 };
 
+
 }  // namespace emp
-#endif  // EMP_AG2PC_PASSES_H__
+#endif  // EMP_AG2PC_PASS_CTX_H__

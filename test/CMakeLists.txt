@@ -31,14 +31,15 @@ function(add_unit_test _name)
     add_test(NAME ${_name} COMMAND test_${_name})
 endfunction()
 
-# Pure planner logic (no network).
+# Pure compile/planner logic (no network).
 add_unit_test(flush_plan)                   # direct-chunk DCE / compaction / stale-operand detection
+add_unit_test(session_concepts)             # AG2PCSession models CircuitSession/SessionIO/CheckpointingSession; run() well-formed
 
-# The AG2PCCtx surface and its three execution strategies.
+# The AG2PCSession surface and its three execution strategies.
 add_test_case_with_run(context_api)         # typed input/reveal, arithmetic, signed Int, PUBLIC const, reveal-to-one
 add_test_case_with_run(direct_chunks)       # input batching, checkpoint prune+carry, reveal keep-list, no-arg cleanup
-add_test_case_with_run(program_replay)      # compiled run, hand-authored run_program, fp32 builtin
-add_test_case_with_run(body_replay_equiv)   # run_body == compiled run, BYTE-identical transcript (the gate)
+add_test_case_with_run(program_replay)      # compiled run(circuit), hand-authored run_artifact, fp32 builtin, checkpoint->run
+add_test_case_with_run(body_replay_equiv)   # run(body) == run(circuit), BYTE-identical transcript (the gate)
 add_test_case_with_run(aes_sha_builtin)     # aes128 + sha256_256 .empbc replay vs ClearCtx oracle
 
 # ---- Manual benchmarks -------------------------------------------------------

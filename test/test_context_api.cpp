@@ -1,4 +1,4 @@
-// AG2PCCtx public surface: typed input/reveal over the value layer, arithmetic
+// AG2PCSession public surface: typed input/reveal over the value layer, arithmetic
 // and comparison, signed Int, a PUBLIC constant, and reveal to a single recipient.
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "net_setup.h"
@@ -14,32 +14,32 @@ int main(int argc, char **argv) {
 
   NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
   io->flush();
 
-  using UInt32 = UInt_T<AG2PCCtx, 32>;
-  using Int32  = Int_T<AG2PCCtx, 32>;
+  using UInt32 = AG2PCSession::UInt<32>;
+  using Int32  = AG2PCSession::Int<32>;
 
   const uint32_t X = 1234567u, Y = 7654321u, K = 333u;
   bool ok = true;
 
   // a + b ; reveal does not prune, so a/b stay materialized for later use.
-  auto a = ctx.input<UInt32>(ALICE, party == ALICE ? X : 0);
-  auto b = ctx.input<UInt32>(BOB,   party == BOB   ? Y : 0);
-  uint32_t got_sum = (uint32_t)ctx.reveal(a + b, PUBLIC).value_or(0);
+  auto a = sess.input<UInt32>(ALICE, party == ALICE ? X : 0);
+  auto b = sess.input<UInt32>(BOB,   party == BOB   ? Y : 0);
+  uint32_t got_sum = (uint32_t)sess.reveal(a + b, PUBLIC).value_or(0);
 
   // (a + b) * 3 + K, with K a PUBLIC constant input (no OT).
-  auto three = ctx.input<UInt32>(PUBLIC, 3);
-  auto kpub  = ctx.input<UInt32>(PUBLIC, K);
-  uint32_t got_expr = (uint32_t)ctx.reveal((a + b) * three + kpub, PUBLIC).value_or(0);
+  auto three = sess.input<UInt32>(PUBLIC, 3);
+  auto kpub  = sess.input<UInt32>(PUBLIC, K);
+  uint32_t got_expr = (uint32_t)sess.reveal((a + b) * three + kpub, PUBLIC).value_or(0);
 
   // a < b, revealed to ALICE only (BOB gets nullopt).
-  std::optional<bool> lt = ctx.reveal(a < b, ALICE);
+  std::optional<bool> lt = sess.reveal(a < b, ALICE);
 
   // Signed Int32: (-5) + 12 == 7.
-  auto ia = ctx.input<Int32>(ALICE, party == ALICE ? (int64_t)-5 : 0);
-  auto ib = ctx.input<Int32>(BOB,   party == BOB   ? (int64_t)12 : 0);
-  int32_t got_signed = (int32_t)ctx.reveal(ia + ib, PUBLIC).value_or(0);
+  auto ia = sess.input<Int32>(ALICE, party == ALICE ? (int64_t)-5 : 0);
+  auto ib = sess.input<Int32>(BOB,   party == BOB   ? (int64_t)12 : 0);
+  int32_t got_signed = (int32_t)sess.reveal(ia + ib, PUBLIC).value_or(0);
 
   if (party == BOB) ok &= !lt.has_value();   // BOB must NOT learn a<b
 

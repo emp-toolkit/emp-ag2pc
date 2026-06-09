@@ -1,4 +1,6 @@
 Testing/
+# Out-of-source build trees (build/, build_local/, build_prof/, build-*, …)
+build*/
 *CTestTestfile.cmake
 *CMakeCache.txt
 *CMakeFiles/

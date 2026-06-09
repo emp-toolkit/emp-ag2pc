@@ -13,16 +13,16 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = UInt_T<AG2PCCtx, 32>;
+  using UInt32 = AG2PCSession::UInt<32>;
   const uint32_t alice_budget = 100;
   const uint32_t bob_price = 73;
 
-  auto budget = ctx.input<UInt32>(ALICE, party == ALICE ? alice_budget : 0);
-  auto price = ctx.input<UInt32>(BOB, party == BOB ? bob_price : 0);
+  auto budget = sess.input<UInt32>(ALICE, party == ALICE ? alice_budget : 0);
+  auto price = sess.input<UInt32>(BOB, party == BOB ? bob_price : 0);
 
-  bool affordable = ctx.reveal(price <= budget, PUBLIC).value_or(false);
+  bool affordable = sess.reveal(price <= budget, PUBLIC).value_or(false);
   if (!affordable) {
     if (ag2pc_example::is_alice(party))
       std::printf("2_reveal_and_continue: item is not affordable  BAD!\n");
@@ -31,11 +31,11 @@ int main(int argc, char** argv) {
 
   const uint32_t alice_tax = 5;
   const uint32_t bob_shipping = 8;
-  auto tax = ctx.input<UInt32>(ALICE, party == ALICE ? alice_tax : 0);
-  auto shipping = ctx.input<UInt32>(BOB, party == BOB ? bob_shipping : 0);
+  auto tax = sess.input<UInt32>(ALICE, party == ALICE ? alice_tax : 0);
+  auto shipping = sess.input<UInt32>(BOB, party == BOB ? bob_shipping : 0);
   auto final_total = price + tax + shipping;
 
-  uint32_t opened = (uint32_t)ctx.reveal(final_total, PUBLIC).value_or(0);
+  uint32_t opened = (uint32_t)sess.reveal(final_total, PUBLIC).value_or(0);
   if (ag2pc_example::is_alice(party)) {
     uint32_t expected = bob_price + alice_tax + bob_shipping;
     bool ok = opened == expected;

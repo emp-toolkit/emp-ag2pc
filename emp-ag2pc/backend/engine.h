@@ -1,8 +1,8 @@
-#ifndef EMP_AG2PC_EXECUTOR_H__
-#define EMP_AG2PC_EXECUTOR_H__
+#ifndef EMP_AG2PC_ENGINE_H__
+#define EMP_AG2PC_ENGINE_H__
 
-// The AG2PC authenticated-garbling EXECUTOR. AG2PCExecutor drives the protocol
-// passes (backend/passes.h) over a single gate-stream SOURCE — the one place the
+// The AG2PC authenticated-garbling ENGINE. AG2PCEngine drives the protocol
+// passes (backend/pass_ctx.h) over a single gate-stream SOURCE — the one place the
 // 5-pass sequence + inter-pass crypto lives. Two SOURCE kinds feed it:
 //   * a stored BooleanProgram (run_program), replayed via emp::execute_program;
 //   * a pure circuit body replayed live (run_source + ag2pc_detail::body_replay),
@@ -10,15 +10,16 @@
 // Because every pass is the SAME definition driven over the SAME gate stream, the
 // transcript is identical across passes AND across the two source kinds.
 //
-// AG2PCExecutor holds an AG2PCProtocol* (the crypto core) and works purely on
+// AG2PCEngine holds an AG2PCProtocol* (the crypto core) and works purely on
 // SecureWires bundles; the typed-value <-> bundle gather/scatter lives in
-// AG2PCCtx, which owns the wire-id bookkeeping.
+// AG2PCSession, while AG2PCCtx owns the wire-id bookkeeping.
 
 #include "emp-tool/emp-tool.h"                 // RO, Hash, block, NetIO, ThreadPool
 #include "emp-tool/context/context.h"         // execute_program, ProgramWorkspace
 #include "emp-tool/circuits/value_traits.h"    // value_traits<T>
 #include "emp-tool/frontend/circuit_fn.h"      // circuit_fn_traits / circuit_contract / RecordValue
-#include "emp-ag2pc/backend/passes.h"          // LambdaState + the 5 passes + canonical check
+#include "emp-ag2pc/backend/pass_ctx.h"          // AG2PCRunState + the 5 passes
+#include "emp-ag2pc/backend/canonical.h"         // ag2pc_require_record_canonical
 #include "emp-ag2pc/backend/protocol.h"        // AG2PCProtocol
 #include "emp-ag2pc/backend/secure_wires.h"
 
@@ -106,10 +107,10 @@ inline std::vector<uint32_t> body_replay(Pass& pass, F& body) {
 }  // namespace ag2pc_detail
 
 // ===========================================================================
-// AG2PCExecutor — runs a BooleanProgram or a live body source through the five
+// AG2PCEngine — runs a BooleanProgram or a live body source through the five
 // authenticated-garbling passes over an AG2PCProtocol.
 // ===========================================================================
-struct AG2PCExecutor {
+struct AG2PCEngine {
   AG2PCProtocol* proto = nullptr;
   uint64_t total_ands = 0;   // garbled ANDs across every run (post-DCE), all strategies
 
@@ -121,7 +122,7 @@ struct AG2PCExecutor {
     AG2PCProtocol* mpc = proto;
     int num_in = (int)in_wires.size();
 
-    LambdaState st;
+    AG2PCRunState st;
     st.party = mpc->party;
     st.Delta = mpc->Delta;
     st.num_inputs = num_in;
@@ -136,7 +137,7 @@ struct AG2PCExecutor {
     // Pass 0: liveness.
     std::vector<uint32_t> out_ids;
     {
-      LivenessPass lp(st);
+      AG2PCLivenessPass lp(st);
       out_ids = ag2pc_detail::run_pass(lp, source);
       lp.commit(out_ids);
     }
@@ -160,7 +161,7 @@ struct AG2PCExecutor {
 
     // Pass 1: slot assignment and mask collection.
     {
-      SizeMaskPass sp(st, mpc->fpre);
+      AG2PCSlotMaskPass sp(st, mpc->fpre);
       ag2pc_detail::run_pass(sp, source);
       sp.commit_sizes();
     }
@@ -180,40 +181,14 @@ struct AG2PCExecutor {
                      .absorb(mpc->sib->get_digest())
                      .squeeze_block());
 
-    // Pass 2: garble or evaluate (begin/end run the threaded send/recv).
-    if (st.party == 1) {
-      GarblePass gp(st, mpc->send_io, mpc->pool);
-      ag2pc_detail::run_pass(gp, source);
-    } else {
-      EvaluatePass ep(st, mpc->recv_io, mpc->pool);
-      ag2pc_detail::run_pass(ep, source);
-    }
-    AG2PC_PHASE("garble_or_evaluate[step6-10]");
-
-    // c_gamma exchange.
-    if (st.num_ands > 0) {
-      if (st.party != 1) {
-        mpc->io->send_bool((const bool*)st.Lambda_AND.data(), st.num_ands);
-        mpc->io->flush();
-        char D1[Hash::DIGEST_SIZE], D2[Hash::DIGEST_SIZE];
-        Hash::hash_once(D1, st.M1_t.data(), (size_t)st.num_ands * sizeof(block));
-        mpc->io->recv_data(D2, Hash::DIGEST_SIZE);
-        if (memcmp(D1, D2, Hash::DIGEST_SIZE) != 0)
-          error("lambda c_gamma check failed");
-      } else {
-        mpc->io->recv_bool((bool*)st.Lambda_AND.data(), st.num_ands);
-        PostCheckPass pp(st);
-        ag2pc_detail::run_pass(pp, source);
-        char D2[Hash::DIGEST_SIZE];
-        Hash::hash_once(D2, st.M1_t.data(), (size_t)st.num_ands * sizeof(block));
-        mpc->io->send_data(D2, Hash::DIGEST_SIZE);
-        mpc->io->flush();
-      }
-    }
-    AG2PC_PHASE("check[c_gamma]");
+    // Pass 2 + c_gamma, party-asymmetric: each party runs its garble/evaluate
+    // pass and its half of the c_gamma exchange.
+    if (st.party == 1) garbler_path_(st, source, mpc);
+    else               evaluator_path_(st, source, mpc);
+    AG2PC_PHASE("garble_evaluate+c_gamma[step6-10]");
 
     // COT subspace-VOLE check.
-    mpc->fpre->maybe_flush_cot_check();
+    mpc->flush_cot_check();
     AG2PC_PHASE("cot_check");
 
     // Gather outputs.
@@ -250,7 +225,7 @@ struct AG2PCExecutor {
     // Drive each pass over the stored program via emp::execute_program (its
     // dispatcher is CtxReplayAdapter). Input wire VALUES are the ids [0,n): on a
     // canonical program the pass wire-id counter equals the program id, so the
-    // scratch is the identity and LambdaState indexes by id, exactly as a live
+    // scratch is the identity and AG2PCRunState indexes by id, exactly as a live
     // body replay does.
     auto source = [&prog, num_inputs](auto& pass) -> std::vector<uint32_t> {
       using Pass = std::decay_t<decltype(pass)>;
@@ -264,7 +239,40 @@ struct AG2PCExecutor {
     };
     return run_source(inputs, source);
   }
+
+ private:
+  // Garbler (party 1): produce the ciphertexts, then receive Lambda_AND, run the
+  // c_gamma re-check pass, and send back the M1_t digest.
+  template <class Source>
+  void garbler_path_(AG2PCRunState& st, Source& source, AG2PCProtocol* mpc) {
+    { AG2PCGarblePass gp(st, mpc->send_io, mpc->pool); ag2pc_detail::run_pass(gp, source); }
+    if (st.num_ands > 0) {
+      mpc->io->recv_bool((bool*)st.Lambda_AND.data(), st.num_ands);
+      AG2PCGammaCheckPass pp(st);
+      ag2pc_detail::run_pass(pp, source);
+      char D2[Hash::DIGEST_SIZE];
+      Hash::hash_once(D2, st.M1_t.data(), (size_t)st.num_ands * sizeof(block));
+      mpc->io->send_data(D2, Hash::DIGEST_SIZE);
+      mpc->io->flush();
+    }
+  }
+
+  // Evaluator (party 2): derive the labels, then send Lambda_AND and verify the
+  // garbler's c_gamma digest against our own M1_t.
+  template <class Source>
+  void evaluator_path_(AG2PCRunState& st, Source& source, AG2PCProtocol* mpc) {
+    { AG2PCEvaluatePass ep(st, mpc->recv_io, mpc->pool); ag2pc_detail::run_pass(ep, source); }
+    if (st.num_ands > 0) {
+      mpc->io->send_bool((const bool*)st.Lambda_AND.data(), st.num_ands);
+      mpc->io->flush();
+      char D1[Hash::DIGEST_SIZE], D2[Hash::DIGEST_SIZE];
+      Hash::hash_once(D1, st.M1_t.data(), (size_t)st.num_ands * sizeof(block));
+      mpc->io->recv_data(D2, Hash::DIGEST_SIZE);
+      if (memcmp(D1, D2, Hash::DIGEST_SIZE) != 0)
+        error("lambda c_gamma check failed");
+    }
+  }
 };
 
 }  // namespace emp
-#endif  // EMP_AG2PC_EXECUTOR_H__
+#endif  // EMP_AG2PC_ENGINE_H__

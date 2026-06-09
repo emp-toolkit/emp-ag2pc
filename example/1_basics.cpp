@@ -16,20 +16,20 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = UInt_T<AG2PCCtx, 32>;
+  using UInt32 = AG2PCSession::UInt<32>;
   const uint32_t alice_value = 123;
   const uint32_t bob_value = 456;
 
-  auto a = ctx.input<UInt32>(ALICE, party == ALICE ? alice_value : 0);
-  auto b = ctx.input<UInt32>(BOB, party == BOB ? bob_value : 0);
+  auto a = sess.input<UInt32>(ALICE, party == ALICE ? alice_value : 0);
+  auto b = sess.input<UInt32>(BOB, party == BOB ? bob_value : 0);
 
   auto sum = a + b;
   auto bigger_than_500 = sum > sum.constant(500);
 
-  uint32_t opened_sum = (uint32_t)ctx.reveal(sum, PUBLIC, bigger_than_500).value_or(0);
-  bool opened_cmp = ctx.reveal(bigger_than_500, PUBLIC).value_or(false);
+  uint32_t opened_sum = (uint32_t)sess.reveal(sum, PUBLIC, bigger_than_500).value_or(0);
+  bool opened_cmp = sess.reveal(bigger_than_500, PUBLIC).value_or(false);
 
   if (ag2pc_example::is_alice(party)) {
     bool ok = opened_sum == alice_value + bob_value && opened_cmp;

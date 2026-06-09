@@ -7,9 +7,9 @@
 
 Maliciously-secure **two-party computation via authenticated garbling**, on top
 of [emp-tool](https://github.com/emp-toolkit/emp-tool) and
-[emp-ot](https://github.com/emp-toolkit/emp-ot). The whole API is one context,
-`AG2PCCtx`: you authenticate inputs, build circuits over the emp-tool value layer
-(`UInt_T` / `Int_T` / `Float_T` / `BitVec_T` / `Bit_T`), and open results — exactly
+[emp-ot](https://github.com/emp-toolkit/emp-ot). The whole API is one session,
+`AG2PCSession`: you authenticate inputs, build circuits over the emp-tool value
+layer (`UInt` / `Int` / `Float` / `BitVec` / `Bit`), and open results — exactly
 like emp-sh2pc, but malicious-secure.
 
 ```cpp
@@ -18,37 +18,39 @@ using namespace emp;
 
 NetIO *io; make_io2pc(party, port, io);
 ThreadPool pool(4);
-AG2PCCtx ctx(io, &pool, party);
+AG2PCSession sess(io, &pool, party);
 
-using UInt32 = UInt_T<AG2PCCtx, 32>;
-auto a = ctx.input<UInt32>(ALICE, party == ALICE ? x : 0);  // each party owns its input
-auto b = ctx.input<UInt32>(BOB,   party == BOB   ? y : 0);
+using UInt32 = AG2PCSession::UInt<32>;
+auto a = sess.input<UInt32>(ALICE, party == ALICE ? x : 0);  // each party owns its input
+auto b = sess.input<UInt32>(BOB,   party == BOB   ? y : 0);
 auto c = a + b;
-uint32_t out = ctx.reveal(c, PUBLIC).value();               // std::optional<uint64_t>
+uint32_t out = sess.reveal(c, PUBLIC).value();               // std::optional<uint64_t>
 ```
 
-`ctx.reveal(v, recipient)` returns `std::optional<clear_t>` — the value at the
-recipient (or `PUBLIC`), `std::nullopt` at any other party.
+The session owns the I/O boundary (`input` / `reveal` / `checkpoint`), the crypto
+protocol, and the authenticated wire state; `sess.ctx()` is the gate context your
+values are built over. `sess.reveal(v, recipient)` returns `std::optional<clear_t>`
+— the value at the recipient (or `PUBLIC`), `std::nullopt` at any other party.
 
 > **Heads up — AI-assisted rewrite, not yet audited.** The development branch is
 > under active refactoring and review; do not deploy it without your own audit.
 
 ## Values and circuits
 
-Circuit values are emp-tool's context-bound types parameterized on `AG2PCCtx`:
-`Bit_T<AG2PCCtx>`, `UInt_T<AG2PCCtx,N>`, `Int_T<AG2PCCtx,N>`,
-`Float_T<AG2PCCtx,W>`, and `BitVec_T<AG2PCCtx,N>` (a fixed-width bit vector for
-crypto blocks). They support the usual operators (`+ - * / %`, comparisons,
-bit ops, shifts/rotates, slice/concat). A reusable circuit is written once as a
-pure body and compiled with the emp-tool frontend:
+Circuit values are emp-tool's context-bound types over the session's gate context
+(`AG2PCSession::Ctx`): `AG2PCSession::Bit`, `UInt<N>`, `Int<N>`, `Float<W>`, and
+`BitVec<N>` (a fixed-width bit vector for crypto blocks). They support the usual
+operators (`+ - * / %`, comparisons, bit ops, shifts/rotates, slice/concat). A
+reusable circuit is written once as a pure body and compiled with the emp-tool
+frontend:
 
 ```cpp
 auto adder = frontend::compile<rec::UInt<32>, rec::UInt<32>>(
     [](auto x, auto y) { return x + y; });   // record once, over RecordCtx
-auto c = ctx.run(adder, a, b);               // replay on AG2PCCtx
+auto c = sess.run(adder, a, b);              // replay on the session
 ```
 
-The same compiled circuit runs on any context (plaintext, this protocol, ZK, …).
+The same compiled circuit runs on any session (plaintext, this protocol, ZK, …).
 The context is always explicit — there is no global backend.
 
 ## Execution strategies
@@ -59,32 +61,35 @@ the same per-gate cost; see [docs/execution_strategies.md](docs/execution_strate
 | Strategy | How | When |
 |---|---|---|
 | **Direct / chunked** | operators (`a + b`) record gates into the current chunk; flushed at `reveal` / `checkpoint` | imperative, reactive programs; large chunked compositions |
-| **Compiled replay** | `ctx.run(circuit, args...)` replays a stored `Circuit` standalone through the passes | fixed circuits, compile-once / replay-many |
-| **Live body replay** | `ctx.run_body(body, args...)` replays a pure body live, once per pass, with no stored IR | one-off pure circuits; lowest memory |
+| **Compiled replay** | `sess.run(circuit, args...)` replays a stored `Circuit` standalone through the passes | fixed circuits, compile-once / replay-many |
+| **Live body replay** | `sess.run(body, args...)` replays a pure body live, once per pass, with no stored IR | one-off pure circuits; lowest memory |
 
-`ctx.run` / `ctx.run_body` are standalone pass replays; their arguments must be
-materialized (from `input` / a prior run / a `checkpoint`). A typed raw-program
-escape hatch, `ctx.run_program<RetV>(program, args...)`, replays a hand-authored
-or loaded `BooleanProgram` (e.g. an AES/SHA builtin) over `BitVec_T` I/O.
+`sess.run` is one overloaded call — pass a compiled `Circuit` or a pure body and it
+runs the right strategy. Both are standalone pass replays; their arguments must be
+materialized (from `input` / a prior run / a `checkpoint`). For the genuinely
+untyped case — a hand-authored or loaded `BooleanProgram` (e.g. an AES/SHA builtin)
+that carries no typed signature (no `RetV`/`ArgVs` value types), so it cannot be
+wrapped as a typed `frontend::Circuit` — the advanced escape hatch
+`sess.run_artifact<RetV>(program, args...)` runs it with the return type given explicitly.
 
 ## Inputs, reveal, and explicit liveness
 
-- **`ctx.input<T>(owner, x)`** authenticates one input immediately (`PUBLIC` builds
-  a public constant, no OT). **`ctx.input_batch()`** authenticates many inputs —
+- **`sess.input<T>(owner, x)`** authenticates one input immediately (`PUBLIC` builds
+  a public constant, no OT). **`sess.input_batch()`** authenticates many inputs —
   across both owners — in a single phase:
 
   ```cpp
-  auto batch = ctx.input_batch();
+  auto batch = sess.input_batch();
   auto a = batch.add<UInt32>(ALICE, x);
   auto b = batch.add<UInt32>(BOB, y);
   batch.finish();                          // one input phase for ALICE + BOB
   ```
 
 - Wire liveness is **explicit** — there is no refcount or hidden "keep all live
-  objects". `ctx.checkpoint(keep...)` runs the pending chunk and carries forward
+  objects". `sess.checkpoint(keep...)` runs the pending chunk and carries forward
   exactly the named values (bounding memory in long compositions);
-  `ctx.checkpoint()` with no args drops all pending work and all carried state.
-  `ctx.reveal(v, recipient, keep...)` flushes keeping `v` and the explicit
+  `sess.checkpoint()` with no args drops all pending work and all carried state.
+  `sess.reveal(v, recipient, keep...)` flushes keeping `v` and the explicit
   `keep...`; any other still-pending value is dropped at the flush. A wire used
   after it is dropped is a hard error.
 
@@ -194,9 +199,10 @@ verdict, so its exit code is the test's exit code.
 | `test_flush_plan` | single-process unit test of the direct-chunk planner: DCE, canonical compaction, stale-operand detection |
 | `test_context_api` | typed `input` / `reveal`, arithmetic, comparison, signed `Int`, a `PUBLIC` constant, reveal-to-one-recipient |
 | `test_direct_chunks` | multi-owner `input_batch`, `checkpoint` prune + carry, reveal keep-lists, no-arg `checkpoint` cleanup |
-| `test_program_replay` | compiled `run`, hand-authored `run_program`, the fp32 builtin |
-| `test_body_replay_equiv` | `run_body` vs compiled `run` produce a **byte-identical** transcript (the regression gate) |
-| `test_aes_sha_builtin` | `aes128` + `sha256_256` builtins replayed over `BitVec_T` vs a `ClearCtx` oracle |
+| `test_program_replay` | compiled `run(circuit, …)`, hand-authored `run_artifact`, the fp32 builtin |
+| `test_body_replay_equiv` | `run(body, …)` vs compiled `run(circuit, …)` produce a **byte-identical** transcript (the regression gate) |
+| `test_aes_sha_builtin` | `aes128` + `sha256_256` builtins replayed over `BitVec` vs a `ClearCtx` oracle |
+| `test_session_concepts` | compile-time check that `AG2PCSession` models `CircuitSession` / `SessionIO` / `CheckpointingSession`, and `run` accepts a checkpointed value |
 
 Benchmarks are opt-in (`-DEMP_AG2PC_BUILD_BENCHES=ON`) and are not run by ctest.
 `bench_100m` runs a repeated SHA-256 chain over a 32-byte all-zero string: the low
@@ -218,20 +224,27 @@ SHA_ITERS=1 SHA_CHUNK_ITERS=1 ./run ./build/bin/bench_100m
 
 ## How it works
 
-Three pieces; `AG2PCCtx` is the only public handle.
+`AG2PCSession` is the only public handle; under it sit the gate recorder, the
+engine, and the crypto protocol.
 
-- **`AG2PCCtx`** (`frontend/ag2pc_ctx.h`) — the public context. It is a
-  `BooleanContext` whose gate ops record into the current chunk, and it owns the
-  protocol + executor and the typed I/O (`input` / `input_batch` / `reveal` /
-  `checkpoint` / `run` / `run_body` / `run_program`). Wires are bare ids; liveness
-  is explicit (no refcount, no global singleton).
-- **`AG2PCExecutor`** (`backend/executor.h`) — runs a `BooleanProgram` or a live
-  body source through the five protocol passes. The pass framework (`backend/passes.h`)
-  expresses each garbling phase (liveness, slot/mask collection, garble/evaluate,
-  c_γ correction) as a `BooleanContext` over one shared `LambdaState`, so the same
-  gate stream drives every phase — hence the byte-identical transcript across
-  strategies. Per-wire state uses a slot-reuse map, so memory is linear in #AND
-  gates + live width, not #wires.
+- **`AG2PCSession`** (`session/ag2pc_session.h`) — the public session. It owns the
+  I/O boundary (`input` / `input_batch` / `reveal` / `checkpoint` / `run` /
+  `run_artifact`), the crypto protocol, the internal engine, and the authenticated
+  carried wire state — only the session can drive a crypto transition, so that
+  invariant is structural. (Every emp protocol exposes a Session this way; a
+  trivial one — `ClearSession` in emp-tool — is a thin wrapper over a pure context,
+  but the public surface is always the Session.)
+- **`AG2PCCtx`** (`session/ag2pc_ctx.h`) — the gate recorder, `AG2PCSession::Ctx`. It
+  is a `BooleanContext` whose gate ops record into the current chunk as bare ids;
+  it holds no crypto and no carried state. Liveness is explicit (no refcount, no
+  global singleton); operand stale-detection is deferred to the session's flush.
+- **`AG2PCEngine`** (`backend/engine.h`) — internal (not public). Runs a
+  `BooleanProgram` or a live body source through the five protocol passes. The pass
+  framework (`backend/pass_ctx.h`) expresses each garbling phase (liveness,
+  slot/mask collection, garble/evaluate, c_γ correction) as a `BooleanContext` over
+  one shared `AG2PCRunState`, so the same gate stream drives every phase — hence the
+  byte-identical transcript across strategies. Per-wire state uses a slot-reuse map,
+  so memory is linear in #AND gates + live width, not #wires.
 - **`AG2PCProtocol`** (`backend/protocol.h`) — the session crypto: `process_inputs`
   shares inputs (KRRW Fig. 3), `decode` opens outputs, and it owns the long-lived
   COT/Δ session. **`TriplePool`** (`backend/triple_pool.h`) is the correlated-OT

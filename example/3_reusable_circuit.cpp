@@ -14,9 +14,9 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = UInt_T<AG2PCCtx, 32>;
+  using UInt32 = AG2PCSession::UInt<32>;
 
   auto score_circuit = cf::compile<rec::UInt<32>, rec::UInt<32>>(
       [](auto x, auto y) {
@@ -27,13 +27,13 @@ int main(int argc, char** argv) {
   const uint32_t ax1 = 10, by1 = 20;
   const uint32_t ax2 = 7, by2 = 35;
 
-  auto a1 = ctx.input<UInt32>(ALICE, party == ALICE ? ax1 : 0);
-  auto b1 = ctx.input<UInt32>(BOB, party == BOB ? by1 : 0);
-  auto a2 = ctx.input<UInt32>(ALICE, party == ALICE ? ax2 : 0);
-  auto b2 = ctx.input<UInt32>(BOB, party == BOB ? by2 : 0);
+  auto a1 = sess.input<UInt32>(ALICE, party == ALICE ? ax1 : 0);
+  auto b1 = sess.input<UInt32>(BOB, party == BOB ? by1 : 0);
+  auto a2 = sess.input<UInt32>(ALICE, party == ALICE ? ax2 : 0);
+  auto b2 = sess.input<UInt32>(BOB, party == BOB ? by2 : 0);
 
-  uint32_t out1 = (uint32_t)ctx.reveal(ctx.run(score_circuit, a1, b1), PUBLIC).value_or(0);
-  uint32_t out2 = (uint32_t)ctx.reveal(ctx.run(score_circuit, a2, b2), PUBLIC).value_or(0);
+  uint32_t out1 = (uint32_t)sess.reveal(sess.run(score_circuit, a1, b1), PUBLIC).value_or(0);
+  uint32_t out2 = (uint32_t)sess.reveal(sess.run(score_circuit, a2, b2), PUBLIC).value_or(0);
 
   auto clear_score = [](uint32_t x, uint32_t y) {
     uint32_t mixed = (x + y) * (3 + 5);

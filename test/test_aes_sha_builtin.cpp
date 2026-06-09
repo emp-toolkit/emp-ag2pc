@@ -16,7 +16,7 @@ using namespace ag2pc_test;
 // Replay an N_in -> N_out builtin with BOB-owned inputs; compare to the ClearCtx
 // oracle at ALICE. Returns true on the non-checking party.
 template <int N_in, int N_out>
-static bool check_builtin(AG2PCCtx &ctx, int party, const char *name) {
+static bool check_builtin(AG2PCSession &sess, int party, const char *name) {
   const circuit::BooleanProgram &prog = circuit::builtin_circuit(name);
   if ((int)prog.num_inputs != N_in || (int)prog.outputs.size() != N_out)
     error("test_aes_sha_builtin: builtin dimensions != expected");
@@ -24,15 +24,15 @@ static bool check_builtin(AG2PCCtx &ctx, int party, const char *name) {
   std::array<bool, N_in> in_bits{};
   for (int i = 0; i < N_in; ++i) in_bits[i] = ((i * 7 + 3) % 5) == 0;
 
-  auto in = ctx.input<BitVec_T<AG2PCCtx, N_in>>(
+  auto in = sess.input<AG2PCSession::BitVec<N_in>>(
       BOB, party == BOB ? in_bits : std::array<bool, N_in>{});
-  auto out = ctx.reveal(ctx.run_program<BitVec_T<AG2PCCtx, N_out>>(prog, in), ALICE);
+  auto out = sess.reveal(sess.run_artifact<AG2PCSession::BitVec<N_out>>(prog, in), ALICE);
 
   if (party != ALICE) return true;
   std::vector<bool> oracle = clear_eval(prog, std::vector<bool>(in_bits.begin(), in_bits.end()));
   bool ok = out.has_value() && (int)oracle.size() == N_out;
   for (int i = 0; i < N_out && ok; ++i) ok = (out.value()[i] == oracle[i]);
-  printf("  builtin %-10s (run_program over BitVec_T) vs ClearCtx oracle  %s\n",
+  printf("  builtin %-10s (run_artifact over BitVec) vs ClearCtx oracle  %s\n",
          name, ok ? "GOOD!" : "BAD!");
   return ok;
 }
@@ -44,12 +44,12 @@ int main(int argc, char **argv) {
 
   NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
   io->flush();
 
   bool ok = true;
-  ok &= check_builtin<256, 128>(ctx, party, "aes128");
-  ok &= check_builtin<256, 256>(ctx, party, "sha256_256");
+  ok &= check_builtin<256, 128>(sess, party, "aes128");
+  ok &= check_builtin<256, 256>(sess, party, "sha256_256");
 
   if (party == ALICE)
     printf("test_aes_sha_builtin: %s\n", ok ? "GOOD!" : "BAD!");

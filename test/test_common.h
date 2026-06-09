@@ -1,6 +1,6 @@
 #ifndef AG2PC_TEST_COMMON_H__
 #define AG2PC_TEST_COMMON_H__
-// Shared helpers for the AG2PCCtx tests.
+// Shared helpers for the AG2PCSession tests.
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/context/context.h"   // ClearCtx, execute_program
 #include "net_setup.h"

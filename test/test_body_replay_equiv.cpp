@@ -1,6 +1,6 @@
-// Transcript equivalence: a circuit run as a LIVE body (ctx.run_body) must produce
+// Transcript equivalence: a circuit run as a LIVE body (sess.run) must produce
 // the BYTE-IDENTICAL protocol transcript as the SAME circuit compiled to a
-// BooleanProgram and run (ctx.run). Both drive the same passes over the same gate
+// BooleanProgram and run (sess.run). Both drive the same passes over the same gate
 // stream, so this is guaranteed by design — and is the regression gate for the pass
 // framework. Determinism comes from set_test_mode (single seed stream); the io
 // digest is the transcript fingerprint.
@@ -15,17 +15,17 @@
 using namespace std;
 using namespace emp;
 namespace cf = emp::frontend;
-using UInt32 = UInt_T<AG2PCCtx, 32>;
+using UInt32 = AG2PCSession::UInt<32>;
 
 struct Result { block digest; uint32_t out; bool have; };
 
 // Fingerprint BOTH channels: AG2PC uses io and sib (the MITCCRH seed absorbs both),
 // so a divergence on the sibling channel must not slip through. Captured after the
 // circuit (before reveal) so it fingerprints input + garbling.
-static block fingerprint(AG2PCCtx &ctx) {
+static block fingerprint(AG2PCSession &sess) {
   return RO("ag2pc-equiv", zero_block)
-      .absorb(ctx.protocol().io->get_digest())
-      .absorb(ctx.protocol().sib->get_digest())
+      .absorb(sess.protocol().io->get_digest())
+      .absorb(sess.protocol().sib->get_digest())
       .squeeze_block();
 }
 
@@ -35,13 +35,13 @@ static Result run_body(int party, int port, Body body, uint32_t av, uint32_t bv)
   reset_test_seed_counter();
   NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
   io->flush();
-  auto a = ctx.input<UInt32>(ALICE, party == ALICE ? av : 0);
-  auto b = ctx.input<UInt32>(BOB,   party == BOB   ? bv : 0);
-  auto z = ctx.run_body(body, a, b);
-  block d = fingerprint(ctx);
-  auto r = ctx.reveal(z, ALICE);
+  auto a = sess.input<UInt32>(ALICE, party == ALICE ? av : 0);
+  auto b = sess.input<UInt32>(BOB,   party == BOB   ? bv : 0);
+  auto z = sess.run(body, a, b);
+  block d = fingerprint(sess);
+  auto r = sess.reveal(z, ALICE);
   return Result{d, (uint32_t)(r.value_or(0u) & 0xffffffffu), r.has_value()};
 }
 
@@ -51,14 +51,14 @@ static Result run_comp(int party, int port, Body body, uint32_t av, uint32_t bv)
   reset_test_seed_counter();
   NetIO *io; make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
   io->flush();
   auto c = cf::compile<rec::UInt<32>, rec::UInt<32>>(body);
-  auto a = ctx.input<UInt32>(ALICE, party == ALICE ? av : 0);
-  auto b = ctx.input<UInt32>(BOB,   party == BOB   ? bv : 0);
-  auto z = ctx.run(c, a, b);
-  block d = fingerprint(ctx);
-  auto r = ctx.reveal(z, ALICE);
+  auto a = sess.input<UInt32>(ALICE, party == ALICE ? av : 0);
+  auto b = sess.input<UInt32>(BOB,   party == BOB   ? bv : 0);
+  auto z = sess.run(c, a, b);
+  block d = fingerprint(sess);
+  auto r = sess.reveal(z, ALICE);
   return Result{d, (uint32_t)(r.value_or(0u) & 0xffffffffu), r.has_value()};
 }
 

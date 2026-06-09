@@ -1,4 +1,4 @@
-// Final-state 100M-AND benchmark for AG2PCCtx.
+// Final-state 100M-AND benchmark for AG2PCSession.
 //
 // Workload: start from a 32-byte all-zero string, with the low 128 input bits
 // owned by ALICE and the high 128 input bits owned by BOB, then repeatedly apply
@@ -33,8 +33,8 @@ using namespace emp;
 
 namespace {
 
-using B128 = BitVec_T<AG2PCCtx, 128>;
-using B256 = BitVec_T<AG2PCCtx, 256>;
+using B128 = AG2PCSession::BitVec<128>;
+using B256 = AG2PCSession::BitVec<256>;
 
 uint64_t env_u64(const char* name, uint64_t fallback) {
   const char* s = std::getenv(name);
@@ -98,9 +98,9 @@ void print_hex(const char* label, const std::array<uint8_t, 32>& d) {
   std::printf("\n");
 }
 
-uint64_t io_bytes(AG2PCCtx& ctx) {
-  NetIO* io = ctx.protocol().io;
-  NetIO* sib = ctx.protocol().sib;
+uint64_t io_bytes(AG2PCSession& sess) {
+  NetIO* io = sess.protocol().io;
+  NetIO* sib = sess.protocol().sib;
   return io->send_counter + io->recv_counter +
          sib->send_counter + sib->recv_counter;
 }
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
   NetIO* io;
   make_io2pc(party, port, io);
   ThreadPool pool(threads);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
   io->flush();
 
   const uint64_t planned_ands = sha_ands * iters;
@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
   auto t0 = std::chrono::steady_clock::now();
 
   std::array<bool, 128> zero_half{};
-  auto batch = ctx.input_batch();
+  auto batch = sess.input_batch();
   B128 alice_half = batch.add<B128>(ALICE, zero_half);
   B128 bob_half = batch.add<B128>(BOB, zero_half);
   batch.finish();
@@ -180,15 +180,15 @@ int main(int argc, char** argv) {
         x = replay_sha256_256(pass, sha, x, ws);
       return x;
     };
-    state = ctx.run_body(body, state);
-    ctx.checkpoint(state);   // carry only the digest into the next chunk
+    state = sess.run(body, state);
+    sess.checkpoint(state);   // carry only the digest into the next chunk
     done += n;
     ++chunks;
   }
   B256 digest = state;
 
   auto t_run = std::chrono::steady_clock::now();
-  auto opened = ctx.reveal(digest, ALICE);
+  auto opened = sess.reveal(digest, ALICE);
   auto t_reveal = std::chrono::steady_clock::now();
 
   bool ok = true;
@@ -212,10 +212,10 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(t_reveal - t_run).count();
     const double total_s =
         std::chrono::duration<double>(t_reveal - t0).count();
-    const uint64_t actual_ands = ctx.num_and();
-    const uint64_t comm = io_bytes(ctx);
+    const uint64_t actual_ands = sess.num_and();
+    const uint64_t comm = io_bytes(sess);
 
-    std::printf("  input phases    %d\n", ctx.process_input_calls());
+    std::printf("  input phases    %d\n", sess.process_input_calls());
     std::printf("  protocol chunks %llu\n", (unsigned long long)chunks);
     std::printf("  actual ANDs     %llu\n", (unsigned long long)actual_ands);
     std::printf("  wall input      %.3f s\n", input_s);

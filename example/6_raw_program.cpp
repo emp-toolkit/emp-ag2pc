@@ -15,10 +15,10 @@ int main(int argc, char** argv) {
   NetIO* io = nullptr;
   ag2pc_example::make_io2pc(party, port, io);
   ThreadPool pool(4);
-  AG2PCCtx ctx(io, &pool, party);
+  AG2PCSession sess(io, &pool, party);
 
-  using Bits128 = BitVec_T<AG2PCCtx, 128>;
-  using Bits256 = BitVec_T<AG2PCCtx, 256>;
+  using Bits128 = AG2PCSession::BitVec<128>;
+  using Bits256 = AG2PCSession::BitVec<256>;
 
   const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
   std::array<bool, 128> alice_half{};
@@ -28,14 +28,14 @@ int main(int argc, char** argv) {
     bob_half[(size_t)i] = (i % 7) == 3;
   }
 
-  auto batch = ctx.input_batch();
+  auto batch = sess.input_batch();
   auto low = batch.add<Bits128>(ALICE, party == ALICE ? alice_half : std::array<bool, 128>{});
   auto high = batch.add<Bits128>(BOB, party == BOB ? bob_half : std::array<bool, 128>{});
   batch.finish();
 
   Bits256 message = low.concat(high);
-  auto digest = ctx.run_program<Bits256>(sha, message);
-  auto opened = ctx.reveal(digest, ALICE);
+  auto digest = sess.run_artifact<Bits256>(sha, message);
+  auto opened = sess.reveal(digest, ALICE);
 
   if (ag2pc_example::is_alice(party)) {
     std::vector<bool> clear_input(256);

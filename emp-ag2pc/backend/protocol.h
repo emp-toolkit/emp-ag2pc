@@ -46,8 +46,8 @@ inline void check_secure_wires(const SecureWires &w, int party, const char *wher
 //   decode(wires, recipient)               → vector<bool>   // step 14
 //
 // AG2PCProtocol owns input authentication, output decode, the long-lived
-// COT/Delta session, and the half-gate primitives the executor builds on. It is
-// the crypto core under AG2PCCtx — protocol math only, no typed-value layer.
+// COT/Delta session, and the half-gate primitives the engine builds on. It is
+// the crypto core under AG2PCSession — protocol math only, no typed-value layer.
 
 class AG2PCProtocol {
 public:
@@ -68,7 +68,7 @@ public:
   PRG prg;
 
   // Number of batched input phases executed (one per process_inputs call) — the
-  // observable that proves input batching (surfaced via AG2PCCtx::process_input_calls).
+  // observable that proves input batching (surfaced via AG2PCSession::process_input_calls()).
   int process_input_calls = 0;
 
   // Takes a single NetIO; spawns and owns the sibling channel. ssp is the
@@ -82,6 +82,9 @@ public:
     Delta = fpre->Delta;
   }
   ~AG2PCProtocol() { delete fpre; }
+
+  // Flush the deferred subspace-VOLE / COT consistency check (end of a run).
+  void flush_cot_check() { fpre->maybe_flush_cot_check(); }
 
   // KRRW Fig.3 input phase, batched across both owners' input wires in a
   // single protocol call. owners[k] is the owner for bits_per_owner[k]
@@ -306,7 +309,7 @@ std::vector<bool> AG2PCProtocol::decode(const SecureWires &wires,
   // the one shipped. A flipped bit forces a flipped MAC (by Δ_peer, which the
   // sender doesn't know), so the digest mismatch aborts here before the secret
   // is consumed. The chunk-level c_γ and COT-correlation checks (run in the
-  // executor) gate this in turn: any tampered MAC structure has aborted
+  // engine) gate this in turn: any tampered MAC structure has aborted
   // already, so the only thing the per-reveal hash needs to catch is a sender
   // flipping a bit at decode-time.
   std::vector<unsigned char> my_share(n);
