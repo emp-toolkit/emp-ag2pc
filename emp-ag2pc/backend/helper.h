@@ -1,8 +1,8 @@
 #ifndef __HELPER
 #define __HELPER
-#include "emp-tool/io/net_io_channel.h"
-#include "emp-tool/crypto/ro.h"
-#include "emp-tool/crypto/prg.h"
+#include "emp-tool/runtime/io/net_io_channel.h"
+#include "emp-tool/runtime/crypto/ro.h"
+#include "emp-tool/runtime/crypto/prg.h"
 #include <condition_variable>
 #include <future>
 #include <memory>
@@ -13,7 +13,7 @@
 using namespace emp;
 using std::future;
 
-// default_init_allocator + BlockVec live in emp-tool/core/block_vector.h
+// default_init_allocator + BlockVec live in emp-tool/runtime/core/block_vector.h
 // (re-included here via the project's emp-tool dependency).
 
 // Single-bit masks at positions 0 and 1. Used by protocols that pin the

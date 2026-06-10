@@ -14,10 +14,10 @@
 // SecureWires bundles; the typed-value <-> bundle gather/scatter lives in
 // AG2PCSession, while AG2PCCtx owns the wire-id bookkeeping.
 
-#include "emp-tool/emp-tool.h"                 // RO, Hash, block, NetIO, ThreadPool
-#include "emp-tool/context/context.h"         // execute_program, ProgramWorkspace
+#include "emp-tool/runtime/runtime.h"                 // RO, Hash, block, NetIO, ThreadPool
+#include "emp-tool/ir/context/context.h"         // execute_program, ProgramWorkspace
 #include "emp-tool/circuits/value_traits.h"    // value_traits<T>
-#include "emp-tool/frontend/circuit_fn.h"      // circuit_fn_traits / circuit_contract / RecordValue
+#include "emp-tool/circuits/frontend/circuit_fn.h"      // circuit_fn_traits / circuit_contract / RecordValue
 #include "emp-ag2pc/backend/pass_ctx.h"          // AG2PCRunState + the 5 passes
 #include "emp-ag2pc/backend/canonical.h"         // ag2pc_require_record_canonical
 #include "emp-ag2pc/backend/protocol.h"        // AG2PCProtocol

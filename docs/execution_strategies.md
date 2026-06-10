@@ -8,17 +8,26 @@ trade-offs.
 
 ```cpp
 AG2PCSession sess(io, &pool, party);
-using UInt32 = AG2PCSession::UInt<32>;
+using Ctx = AG2PCSession::DirectCtx;
+using UInt32 = UInt_T<Ctx, 32>;
 auto a = sess.input<UInt32>(ALICE, x);
 auto b = sess.input<UInt32>(BOB, y);
 ```
 
-The session owns the I/O boundary and the crypto; `sess.ctx()` is the gate context
-(`AG2PCSession::Ctx`) the values are built over.
+The session owns the I/O boundary and the crypto; `sess.direct_ctx()` is the gate context
+(`AG2PCSession::DirectCtx`) the values are built over.
+
+`DirectCtx` is **only** the direct/user operator-mode context — the recorder where
+`a + b` and `frontend::run(sess.direct_ctx(), …)` emit gates. A session is multipass:
+it owns several internal pass contexts that the engine drives, and a single canonical
+"session ctx" for all phases does not exist. In compiled replay the circuit is recorded
+over `RecordCtx` and replayed through those internal pass contexts; in live-body replay
+the body is re-instantiated over each pass context per pass. A materialized direct
+value is just wires/ids over `DirectCtx`; the pass contexts are not user-visible.
 
 ## 1. Direct / chunked
 
-`sess.ctx()` is a `BooleanContext`: operators on its values (`a + b`) record gates
+`sess.direct_ctx()` is a `BooleanContext`: operators on its values (`a + b`) record gates
 into the current **chunk**. The chunk runs through the engine when you `reveal` or
 `checkpoint`.
 
@@ -27,7 +36,7 @@ auto z = a + b;                    // recorded, pending
 auto out = sess.reveal(z, PUBLIC); // flush the chunk, then open z
 ```
 
-emp-tool's generic `frontend::run(sess.ctx(), circuit, args...)` and
+emp-tool's generic `frontend::run(sess.direct_ctx(), circuit, args...)` and
 `frontend::run(body, args...)` also drive the gate context's ops, so they too emit
 **direct** gates into the current chunk — convenient, but not a standalone pass
 replay. Prefer `sess.run(...)` (below) when you want a self-contained replay.

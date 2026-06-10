@@ -33,8 +33,8 @@ using namespace emp;
 
 namespace {
 
-using B128 = AG2PCSession::BitVec<128>;
-using B256 = AG2PCSession::BitVec<256>;
+using B128 = BitVec_T<AG2PCSession::DirectCtx, 128>;
+using B256 = BitVec_T<AG2PCSession::DirectCtx, 256>;
 
 uint64_t env_u64(const char* name, uint64_t fallback) {
   const char* s = std::getenv(name);

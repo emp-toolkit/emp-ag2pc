@@ -13,7 +13,7 @@
 #include <cstdio>
 using namespace std;
 using namespace emp;
-using UInt32 = AG2PCSession::UInt<32>;
+using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
 
 // ALICE + BOB inputs authenticated in ONE process_inputs phase.
 static bool batch_inputs(int party, int port) {

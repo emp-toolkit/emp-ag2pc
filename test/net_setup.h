@@ -1,6 +1,6 @@
 #ifndef AG2PC_TEST_NET_SETUP_H__
 #define AG2PC_TEST_NET_SETUP_H__
-#include "emp-tool/io/net_io_channel.h"
+#include "emp-tool/runtime/io/net_io_channel.h"
 #include <cstdlib>
 
 // Two-party test transport: one NetIO to the peer (party 1 server, party 2

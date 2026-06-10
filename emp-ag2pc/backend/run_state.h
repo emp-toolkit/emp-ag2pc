@@ -7,7 +7,7 @@
 // is constructed per run inside the engine; cross-call durable state lives in
 // AG2PCSession::carried_, not here.
 
-#include "emp-tool/emp-tool.h"                  // block, MITCCRH
+#include "emp-tool/runtime/runtime.h"                  // block, MITCCRH
 #include "emp-ag2pc/backend/secure_wires.h"     // AShareBundle / AShareBundleVec
 #include <cstdint>
 #include <vector>

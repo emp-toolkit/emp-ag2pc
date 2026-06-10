@@ -20,7 +20,8 @@ NetIO *io; make_io2pc(party, port, io);
 ThreadPool pool(4);
 AG2PCSession sess(io, &pool, party);
 
-using UInt32 = AG2PCSession::UInt<32>;
+using Ctx = AG2PCSession::DirectCtx;
+using UInt32 = UInt_T<Ctx, 32>;
 auto a = sess.input<UInt32>(ALICE, party == ALICE ? x : 0);  // each party owns its input
 auto b = sess.input<UInt32>(BOB,   party == BOB   ? y : 0);
 auto c = a + b;
@@ -28,7 +29,7 @@ uint32_t out = sess.reveal(c, PUBLIC).value();               // std::optional<ui
 ```
 
 The session owns the I/O boundary (`input` / `reveal` / `checkpoint`), the crypto
-protocol, and the authenticated wire state; `sess.ctx()` is the gate context your
+protocol, and the authenticated wire state; `sess.direct_ctx()` is the gate context your
 values are built over. `sess.reveal(v, recipient)` returns `std::optional<clear_t>`
 — the value at the recipient (or `PUBLIC`), `std::nullopt` at any other party.
 
@@ -38,8 +39,9 @@ values are built over. `sess.reveal(v, recipient)` returns `std::optional<clear_
 ## Values and circuits
 
 Circuit values are emp-tool's context-bound types over the session's gate context
-(`AG2PCSession::Ctx`): `AG2PCSession::Bit`, `UInt<N>`, `Int<N>`, `Float<W>`, and
-`BitVec<N>` (a fixed-width bit vector for crypto blocks). They support the usual
+(`AG2PCSession::DirectCtx`): `Bit_T<DirectCtx>`, `UInt_T<DirectCtx,N>`,
+`Int_T<DirectCtx,N>`, `Float_T<DirectCtx,W>`, and `BitVec_T<DirectCtx,N>` (a
+fixed-width bit vector for crypto blocks). The session names no value family. They support the usual
 operators (`+ - * / %`, comparisons, bit ops, shifts/rotates, slice/concat). A
 reusable circuit is written once as a pure body and compiled with the emp-tool
 frontend:
@@ -202,7 +204,7 @@ verdict, so its exit code is the test's exit code.
 | `test_program_replay` | compiled `run(circuit, …)`, hand-authored `run_artifact`, the fp32 builtin |
 | `test_body_replay_equiv` | `run(body, …)` vs compiled `run(circuit, …)` produce a **byte-identical** transcript (the regression gate) |
 | `test_aes_sha_builtin` | `aes128` + `sha256_256` builtins replayed over `BitVec` vs a `ClearCtx` oracle |
-| `test_session_concepts` | compile-time check that `AG2PCSession` models `CircuitSession` / `SessionIO` / `CheckpointingSession`, and `run` accepts a checkpointed value |
+| `test_session_concepts` | compile-time check that `AG2PCSession` models `Session` / `DirectSession` / `SessionIO` / `CheckpointingSession`, and `run` accepts a checkpointed value |
 
 Benchmarks are opt-in (`-DEMP_AG2PC_BUILD_BENCHES=ON`) and are not run by ctest.
 `bench_100m` runs a repeated SHA-256 chain over a 32-byte all-zero string: the low
@@ -234,7 +236,7 @@ engine, and the crypto protocol.
   invariant is structural. (Every emp protocol exposes a Session this way; a
   trivial one — `ClearSession` in emp-tool — is a thin wrapper over a pure context,
   but the public surface is always the Session.)
-- **`AG2PCCtx`** (`session/ag2pc_ctx.h`) — the gate recorder, `AG2PCSession::Ctx`. It
+- **`AG2PCCtx`** (`session/ag2pc_ctx.h`) — the gate recorder, `AG2PCSession::DirectCtx`. It
   is a `BooleanContext` whose gate ops record into the current chunk as bare ids;
   it holds no crypto and no carried state. Liveness is explicit (no refcount, no
   global singleton); operand stale-detection is deferred to the session's flush.

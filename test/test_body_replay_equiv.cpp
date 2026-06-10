@@ -9,13 +9,13 @@
 // before and after an AND) are exactly where const-dedup / wire-id alignment bugs
 // would surface as a body-vs-compiled mismatch.
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-tool/core/test_mode.h"
+#include "emp-tool/runtime/core/test_mode.h"
 #include "net_setup.h"
 #include <cstdio>
 using namespace std;
 using namespace emp;
 namespace cf = emp::frontend;
-using UInt32 = AG2PCSession::UInt<32>;
+using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
 
 struct Result { block digest; uint32_t out; bool have; };
 

@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = AG2PCSession::UInt<32>;
+  using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
 
   auto score_circuit = cf::compile<rec::UInt<32>, rec::UInt<32>>(
       [](auto x, auto y) {

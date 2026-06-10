@@ -2,7 +2,7 @@
 #define EMP_AG2PC_PROTOCOL_H__
 #include "emp-ag2pc/backend/triple_pool.h"
 #include "emp-ag2pc/backend/profiling.h"
-#include "emp-tool/io/net_io_channel.h"
+#include "emp-tool/runtime/io/net_io_channel.h"
 #include "emp-ag2pc/backend/secure_wires.h"
 #include <string>
 #include <vector>

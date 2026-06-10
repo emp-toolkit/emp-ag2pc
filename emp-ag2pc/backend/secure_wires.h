@@ -1,6 +1,6 @@
 #ifndef SHARE_BUNDLE_H__
 #define SHARE_BUNDLE_H__
-#include "emp-tool/core/block.h"
+#include "emp-tool/runtime/core/block.h"
 #include <vector>
 
 namespace emp {

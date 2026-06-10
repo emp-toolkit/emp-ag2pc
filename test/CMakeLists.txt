@@ -33,7 +33,7 @@ endfunction()
 
 # Pure compile/planner logic (no network).
 add_unit_test(flush_plan)                   # direct-chunk DCE / compaction / stale-operand detection
-add_unit_test(session_concepts)             # AG2PCSession models CircuitSession/SessionIO/CheckpointingSession; run() well-formed
+add_unit_test(session_concepts)             # AG2PCSession models Session/DirectSession/SessionIO/CheckpointingSession; run() well-formed
 
 # The AG2PCSession surface and its three execution strategies.
 add_test_case_with_run(context_api)         # typed input/reveal, arithmetic, signed Int, PUBLIC const, reveal-to-one

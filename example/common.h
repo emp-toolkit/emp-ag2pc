@@ -2,7 +2,7 @@
 #define EMP_AG2PC_EXAMPLE_COMMON_H__
 
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "emp-tool/context/context.h"
+#include "emp-tool/ir/context/context.h"
 
 #include <array>
 #include <cstdint>

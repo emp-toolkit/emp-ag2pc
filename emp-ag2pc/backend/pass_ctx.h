@@ -12,7 +12,7 @@
 // Party asymmetry: the garbler (party 1) runs Liveness -> SlotMask -> Garble ->
 // GammaCheck; the evaluator (party 2) runs Liveness -> SlotMask -> Evaluate.
 
-#include "emp-tool/emp-tool.h"                  // block, MITCCRH, select_mask, ThreadPool, RO, Hash
+#include "emp-tool/runtime/runtime.h"                  // block, MITCCRH, select_mask, ThreadPool, RO, Hash
 #include "emp-ag2pc/backend/secure_wires.h"     // AShareBundle / AShareBundleVec / SecureWires
 #include "emp-ag2pc/backend/triple_pool.h"      // TriplePool
 #include "emp-ag2pc/backend/helper.h"           // chunk_pipe, LSB, LSB1
@@ -34,6 +34,7 @@ struct AG2PCLivenessPass {
   AG2PCRunState& s;
   uint32_t wid;
   int gi = 0;                       // gate index over AND/XOR/NOT
+  int ai = 0;                       // AND count (committed so SlotMask can reserve)
   std::vector<int> last_use;
   std::vector<char> persist;
   int64_t c0_ = -1, c1_ = -1;       // dedup the two constant wires
@@ -57,7 +58,7 @@ struct AG2PCLivenessPass {
   }
   Wire and_gate(Wire i0, Wire i1) {
     uint32_t id = emit_(/*persist=*/true);
-    last_use[i0] = gi; last_use[i1] = gi; ++gi;
+    last_use[i0] = gi; last_use[i1] = gi; ++gi; ++ai;
     return id;
   }
   Wire xor_gate(Wire i0, Wire i1) {
@@ -74,6 +75,7 @@ struct AG2PCLivenessPass {
   // Commit liveness to state and pin the circuit outputs (extracted at the end).
   void commit(const std::vector<uint32_t>& out_ids) {
     s.num_wires = (int)wid;
+    s.num_ands  = ai;   // exact; lets SlotMask reserve rep_a/rep_b up front
     for (uint32_t id : out_ids)
       if (id < wid) persist[id] = 1;
     s.last_use = std::move(last_use);
@@ -103,6 +105,11 @@ struct AG2PCSlotMaskPass {
       : s(st), fpre(f), wid((uint32_t)st.num_inputs) {
     s.rep_a.clear();
     s.rep_b.clear();
+    // num_ands is known from the liveness pass; reserving up front keeps the
+    // two operand-share streams (32 B per AND each) from realloc-copying as
+    // they grow across the chunk.
+    s.rep_a.reserve((size_t)st.num_ands);
+    s.rep_b.reserve((size_t)st.num_ands);
     // Input slots are already loaded at [0, num_inputs).
   }
 
