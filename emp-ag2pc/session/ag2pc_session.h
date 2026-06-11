@@ -33,9 +33,8 @@
 #include "emp-tool/ir/context/context.h"            // BooleanContext, RecordCtx, execute_program
 #include "emp-tool/ir/program.h"                 // circuit::Gate / Op / BooleanProgram
 #include "emp-tool/circuits/typed.h"             // UInt_T / Int_T / BitVec_T / Float_T / Bit_T
-#include "emp-tool/circuits/value_traits.h"      // value_traits<T>
 #include "emp-tool/circuits/frontend/circuit_fn.h"        // Circuit, RecordValue, circuit_fn_traits, is_circuit_v
-#include "emp-tool/ir/session/session_io.h"            // Session / DirectSession / SessionIO / CheckpointingSession
+#include "emp-tool/ir/session/session_io.h"            // Session / DirectSession / SessionIO / encode_value_bits
 #include "emp-ag2pc/session/ag2pc_ctx.h"         // AG2PCCtx (the gate recorder)
 #include "emp-ag2pc/backend/protocol.h"          // AG2PCProtocol
 #include "emp-ag2pc/backend/engine.h"            // AG2PCEngine, ag2pc_detail::{append_bundle,body_replay}
@@ -85,7 +84,7 @@ public:
   V input(int owner, const typename V::clear_t& clear) {
     static_assert(std::same_as<typename V::context_type, DirectCtx>,
         "AG2PCSession::input<V>: V must be a value over this session's DirectCtx");
-    std::vector<bool> bits = encode_<V>(clear);
+    std::vector<bool> bits = encode_value_bits<V>(clear, "AG2PCSession::input");
     SecureWires bundle = authenticate_(owner, bits);
     std::vector<uint32_t> ids = materialize_(bundle);
     return V::from_wires(ctx_, ids.data());
@@ -106,7 +105,7 @@ public:
       if (finished_) error("AG2PCSession::input_batch: add() after finish()");
       static_assert(std::same_as<typename V::context_type, DirectCtx>,
           "AG2PCSession::input_batch add<V>: V must be a value over this session's DirectCtx");
-      std::vector<bool> bits = sess_->encode_<V>(clear);
+      std::vector<bool> bits = encode_value_bits<V>(clear, "AG2PCSession::input_batch");
       std::vector<uint32_t> ids = sess_->ctx_.reserve_ids(bits.size());  // reserved, unmaterialized until finish()
       owners_.push_back(owner);
       bits_.push_back(std::move(bits));
@@ -151,11 +150,11 @@ public:
     flush_(keep_ids);
     SecureWires bundle = gather_carried_(value_ids_(v));
     std::vector<bool> bits = proto_.decode(bundle, recipient);
-    const int W = value_traits<V>::width();
+    const int W = V::width();
     if ((int)bits.size() != W) return std::nullopt;   // non-recipient
     auto bb = std::make_unique<bool[]>((size_t)W);
     for (int i = 0; i < W; ++i) bb[i] = (bool)bits[i];
-    return value_traits<V>::decode(bb.get());
+    return V::decode(bb.get());
   }
 
   // ---- checkpoint(keep...): flush + prune carried state to exactly keep...
@@ -247,15 +246,6 @@ private:
   AG2PCEngine engine_;                               // internal multipass runner
   std::unordered_map<uint32_t, CarriedState> carried_;  // materialized id -> state
 
-  template <class V, class Clear>
-  std::vector<bool> encode_(Clear clear) const {
-    const int W = value_traits<V>::width();
-    std::vector<bool> bits = value_traits<V>::encode(clear);
-    // Always enforced: a short/long encoding is a codec bug; never silently pad.
-    if ((int)bits.size() != W) error("AG2PCSession::input: V::encode width != V::width()");
-    return bits;
-  }
-
   SecureWires authenticate_(int owner, const std::vector<bool>& bits) {
     if (owner == PUBLIC) return proto_.public_wires(bits);
     if (owner != ALICE && owner != BOB)
@@ -339,7 +329,7 @@ private:
 
   template <class V>
   std::vector<uint32_t> value_ids_(const V& v) const {
-    std::vector<uint32_t> ids((size_t)value_traits<V>::width());
+    std::vector<uint32_t> ids((size_t)V::width());
     v.pack_wires(ids.data());
     return ids;
   }
