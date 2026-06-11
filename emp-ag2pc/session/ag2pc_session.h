@@ -132,10 +132,17 @@ public:
   // ---- reveal: flush keeping v (and the explicit keep...), then decode v.
   // keep... carries pending values forward only; it does not prune materialized
   // state. Any pending value NOT in {v, keep...} is dropped at the flush.
+  // Settlement (session contract, ir/session/session.h): AG2PC settles AT
+  // REVEAL — the flush runs the deferred authenticated-AND / COT consistency
+  // checks before decode produces a cleartext, so a returned value is final,
+  // never provisional. Recipient domain: PUBLIC, ALICE, or BOB only; the
+  // XOR-share sentinel has no meaning in this protocol and is rejected.
   template <WireValue V, class... Keep>
   reveal_t<V> reveal(const V& v, int recipient, const Keep&... keep) {
     static_assert(std::same_as<typename V::context_type, DirectCtx>,
         "AG2PCSession::reveal<V>: V must be a value over this session's DirectCtx");
+    if (recipient != PUBLIC && recipient != ALICE && recipient != BOB)
+      error("AG2PCSession::reveal: recipient must be PUBLIC, ALICE, or BOB (XOR-share reveal is not supported)");
 #if EMP_CONTEXT_CHECKS
     if (v.context() != &ctx_) error("AG2PCSession::reveal: value is bound to a different context");
 #endif
