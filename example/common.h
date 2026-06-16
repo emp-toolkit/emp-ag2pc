@@ -41,14 +41,14 @@ uint64_t u64_from_bits(const std::array<bool, N>& bits) {
   return v;
 }
 
-inline std::vector<bool> clear_eval(const emp::circuit::BooleanProgram& program,
-                                    const std::vector<bool>& input) {
+inline std::vector<uint8_t> clear_eval(const emp::circuit::BooleanProgram& program,
+                                    const std::vector<uint8_t>& input) {
   emp::ClearCtx clear;
   std::vector<uint8_t> in(input.size());
   for (size_t i = 0; i < input.size(); ++i) in[i] = input[i] ? 1 : 0;
   std::vector<uint8_t> out =
       emp::execute_program(clear, program, std::span<const uint8_t>(in.data(), in.size()));
-  std::vector<bool> result(out.size());
+  std::vector<uint8_t> result(out.size());
   for (size_t i = 0; i < out.size(); ++i) result[i] = (out[i] & 1) != 0;
   return result;
 }

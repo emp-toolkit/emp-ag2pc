@@ -43,7 +43,7 @@ inline void check_secure_wires(const SecureWires &w, int party, const char *wher
 //
 // API:
 //   process_inputs(owners, bits_per_owner) → SecureWires[]  // KRRW Fig.3 inputs
-//   decode(wires, recipient)               → vector<bool>   // step 14
+//   decode(wires, recipient)               → vector<uint8_t>  // step 14
 //
 // AG2PCProtocol owns input authentication, output decode, the long-lived
 // COT/Delta session, and the half-gate primitives the engine builds on. It is
@@ -101,15 +101,15 @@ public:
   // owner count.
   std::vector<SecureWires> process_inputs(
       const std::vector<int> &owners,
-      const std::vector<std::vector<bool>> &bits_per_owner);
+      const std::vector<std::vector<uint8_t>> &bits_per_owner);
 
   // Step 14 (output decode): all Pi ≠ recipient send λ_w^p to recipient;
   // recipient computes y_w = Λ_w ⊕ λ_w. Returns the n cleartext bits at
   // `recipient`; empty vector at non-recipients.
-  std::vector<bool> decode(const SecureWires &wires, int recipient);
+  std::vector<uint8_t> decode(const SecureWires &wires, int recipient);
 
   // Alias for decode(): opens the output wires to `recipient`.
-  std::vector<bool> reveal(const SecureWires &wires, int recipient) {
+  std::vector<uint8_t> reveal(const SecureWires &wires, int recipient) {
     return decode(wires, recipient);
   }
 
@@ -117,7 +117,7 @@ public:
   // Exact party-local encoding: authenticated share = 0, Lambda = the public
   // bit, garbler (P1) label0 = bit ? Delta : zero_block, evaluator (P2) eval
   // label = zero_block. All parties MUST pass the same public bits.
-  SecureWires public_wires(const std::vector<bool> &bits) {
+  SecureWires public_wires(const std::vector<uint8_t> &bits) {
     int n = (int)bits.size();
     SecureWires sw;
     sw.Lambda.resize(n);
@@ -139,7 +139,7 @@ public:
 
 std::vector<SecureWires> AG2PCProtocol::process_inputs(
     const std::vector<int> &owners,
-    const std::vector<std::vector<bool>> &bits_per_owner) {
+    const std::vector<std::vector<uint8_t>> &bits_per_owner) {
   AG2PC_PHASE_BEGIN();
   ++process_input_calls;
   // Validate the request before any communication: a count mismatch or an owner
@@ -280,7 +280,7 @@ std::vector<SecureWires> AG2PCProtocol::process_inputs(
   return result;
 }
 
-std::vector<bool> AG2PCProtocol::decode(const SecureWires &wires,
+std::vector<uint8_t> AG2PCProtocol::decode(const SecureWires &wires,
                                         int recipient) {
   check_secure_wires(wires, party, "decode");   // reject malformed bundles before OOB access
   int n = (int)wires.size();
@@ -288,7 +288,7 @@ std::vector<bool> AG2PCProtocol::decode(const SecureWires &wires,
   // Reveal to ALL parties: reconstruct at the evaluator (P2), then P2 broadcasts.
   // Needed for reactive host branching — every party must learn the same value.
   if (recipient == PUBLIC) {
-    std::vector<bool> v = decode(wires, 2);  // only P2 holds it after this
+    std::vector<uint8_t> v = decode(wires, 2);  // only P2 holds it after this
     std::vector<unsigned char> buf(n);
     if (party != 1) {
       for (int i = 0; i < n; ++i) buf[i] = v[i];
@@ -297,11 +297,11 @@ std::vector<bool> AG2PCProtocol::decode(const SecureWires &wires,
       return v;
     }
     io->recv_data(buf.data(), n);
-    std::vector<bool> out(n);
+    std::vector<uint8_t> out(n);
     for (int i = 0; i < n; ++i) out[i] = (buf[i] & 1);
     return out;
   }
-  std::vector<bool> result;
+  std::vector<uint8_t> result;
   // Authenticated open of each party's λ-share to the recipient (KRRW Fig.3
   // open). The non-recipient ships (n share bits, Hash(n MACs)); the recipient
   // recomputes the expected MAC for each bit as KEY ⊕ bit·Δ — using its own

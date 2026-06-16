@@ -38,12 +38,12 @@ int main(int argc, char** argv) {
   auto opened = sess.reveal(digest, ALICE);
 
   if (ag2pc_example::is_alice(party)) {
-    std::vector<bool> clear_input(256);
+    std::vector<uint8_t> clear_input(256);
     for (int i = 0; i < 128; ++i) {
       clear_input[(size_t)i] = alice_half[(size_t)i];
       clear_input[(size_t)128 + i] = bob_half[(size_t)i];
     }
-    std::vector<bool> oracle = ag2pc_example::clear_eval(sha, clear_input);
+    std::vector<uint8_t> oracle = ag2pc_example::clear_eval(sha, clear_input);
     bool ok = opened.has_value();
     for (int i = 0; i < 256 && ok; ++i) ok = opened.value()[(size_t)i] == oracle[(size_t)i];
 

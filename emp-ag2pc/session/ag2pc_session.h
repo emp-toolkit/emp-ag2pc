@@ -34,13 +34,14 @@
 #include "emp-tool/ir/program.h"                 // circuit::Gate / Op / BooleanProgram
 #include "emp-tool/circuits/typed.h"             // UInt_T / Int_T / BitVec_T / Float_T / Bit_T
 #include "emp-tool/circuits/frontend/circuit_fn.h"        // Circuit, RecordValue, circuit_fn_traits, is_circuit_v
-#include "emp-tool/ir/session/session_io.h"            // Session / DirectSession / SessionIO / encode_value_bits
+#include "emp-tool/ir/session/session_io.h"            // Session / DirectSession / SessionIO
 #include "emp-ag2pc/session/ag2pc_ctx.h"         // AG2PCCtx (the gate recorder)
 #include "emp-ag2pc/backend/protocol.h"          // AG2PCProtocol
 #include "emp-ag2pc/backend/engine.h"            // AG2PCEngine, ag2pc_detail::{append_bundle,body_replay}
 #include "emp-ag2pc/backend/secure_wires.h"      // SecureWires / AShareBundle
 #include "emp-ag2pc/backend/flush_plan.h"        // ag2pc_detail::plan_flush / FlushPlan
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -84,7 +85,8 @@ public:
   V input(int owner, const typename V::clear_t& clear) {
     static_assert(std::same_as<typename V::context_type, DirectCtx>,
         "AG2PCSession::input<V>: V must be a value over this session's DirectCtx");
-    std::vector<bool> bits = encode_value_bits<V>(clear, "AG2PCSession::input");
+    const auto eb = V::encode(clear);                    // std::array<bool, V::width()>
+    std::vector<uint8_t> bits(eb.begin(), eb.end());     // batch protocol storage is runtime-sized
     SecureWires bundle = authenticate_(owner, bits);
     std::vector<uint32_t> ids = materialize_(bundle);
     return V::from_wires(ctx_, ids.data());
@@ -105,7 +107,8 @@ public:
       if (finished_) error("AG2PCSession::input_batch: add() after finish()");
       static_assert(std::same_as<typename V::context_type, DirectCtx>,
           "AG2PCSession::input_batch add<V>: V must be a value over this session's DirectCtx");
-      std::vector<bool> bits = encode_value_bits<V>(clear, "AG2PCSession::input_batch");
+      const auto eb = V::encode(clear);                  // std::array<bool, V::width()>
+      std::vector<uint8_t> bits(eb.begin(), eb.end());   // batch protocol storage is runtime-sized
       std::vector<uint32_t> ids = sess_->ctx_.reserve_ids(bits.size());  // reserved, unmaterialized until finish()
       owners_.push_back(owner);
       bits_.push_back(std::move(bits));
@@ -122,7 +125,7 @@ public:
     explicit InputBatch(AG2PCSession* s) : sess_(s) {}
     AG2PCSession* sess_;
     std::vector<int> owners_;
-    std::vector<std::vector<bool>> bits_;
+    std::vector<std::vector<uint8_t>> bits_;
     std::vector<std::vector<uint32_t>> ids_;
     bool finished_ = false;
   };
@@ -149,12 +152,12 @@ public:
     (append_ids_(keep_ids, keep), ...);
     flush_(keep_ids);
     SecureWires bundle = gather_carried_(value_ids_(v));
-    std::vector<bool> bits = proto_.decode(bundle, recipient);
-    const int W = V::width();
+    std::vector<uint8_t> bits = proto_.decode(bundle, recipient);
+    constexpr int W = V::width();
     if ((int)bits.size() != W) return std::nullopt;   // non-recipient
-    auto bb = std::make_unique<bool[]>((size_t)W);
-    for (int i = 0; i < W; ++i) bb[i] = (bool)bits[i];
-    return V::decode(bb.get());
+    std::array<bool, (std::size_t)W> bb{};
+    for (int i = 0; i < W; ++i) bb[(std::size_t)i] = (bool)bits[(std::size_t)i];
+    return V::decode(bb.data());
   }
 
   // ---- checkpoint(keep...): flush + prune carried state to exactly keep...
@@ -246,23 +249,23 @@ private:
   AG2PCEngine engine_;                               // internal multipass runner
   std::unordered_map<uint32_t, CarriedState> carried_;  // materialized id -> state
 
-  SecureWires authenticate_(int owner, const std::vector<bool>& bits) {
+  SecureWires authenticate_(int owner, const std::vector<uint8_t>& bits) {
     if (owner == PUBLIC) return proto_.public_wires(bits);
     if (owner != ALICE && owner != BOB)
       error("AG2PCSession::input: owner must be ALICE, BOB, or PUBLIC");
     std::vector<SecureWires> subs =
         proto_.process_inputs(std::vector<int>{owner},
-                              std::vector<std::vector<bool>>{bits});
+                              std::vector<std::vector<uint8_t>>{bits});
     return std::move(subs[0]);
   }
 
   // batch finish: PUBLIC adds via public_wires (no OT); ALICE/BOB adds in ONE
   // process_inputs call; then materialize every reserved id.
   void batch_finish_(const std::vector<int>& owners,
-                     const std::vector<std::vector<bool>>& bits,
+                     const std::vector<std::vector<uint8_t>>& bits,
                      const std::vector<std::vector<uint32_t>>& ids) {
     std::vector<int> sec_owners;
-    std::vector<std::vector<bool>> sec_bits;
+    std::vector<std::vector<uint8_t>> sec_bits;
     std::vector<int> sec_add;
     for (size_t a = 0; a < owners.size(); ++a) {
       if (owners[a] == PUBLIC) {

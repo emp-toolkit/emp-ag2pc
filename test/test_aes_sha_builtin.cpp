@@ -29,7 +29,7 @@ static bool check_builtin(AG2PCSession &sess, int party, const char *name) {
   auto out = sess.reveal(sess.run_artifact<BitVec_T<AG2PCSession::DirectCtx, N_out>>(prog, in), ALICE);
 
   if (party != ALICE) return true;
-  std::vector<bool> oracle = clear_eval(prog, std::vector<bool>(in_bits.begin(), in_bits.end()));
+  std::vector<uint8_t> oracle = clear_eval(prog, std::vector<uint8_t>(in_bits.begin(), in_bits.end()));
   bool ok = out.has_value() && (int)oracle.size() == N_out;
   for (int i = 0; i < N_out && ok; ++i) ok = (out.value()[i] == oracle[i]);
   printf("  builtin %-10s (run_artifact over BitVec) vs ClearCtx oracle  %s\n",
