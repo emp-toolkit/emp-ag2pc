@@ -8,7 +8,7 @@
 // its gate context three ways:
 //
 //   AG2PCSession sess(io, &pool, party);
-//   using Ctx = AG2PCSession::DirectCtx; using UInt32 = UInt_T<Ctx,32>;
+//   using Ctx = AG2PCSession::ctx_t; using UInt32 = UInt_T<Ctx,32>;
 //   auto a  = sess.input<UInt32>(ALICE, x);              // eager, authenticated now
 //   auto z1 = a + b;                                     // DIRECT: record into a chunk
 //   auto z2 = sess.run([](auto p, auto q){ return p+q; }, a, b);  // LIVE BODY replay
@@ -54,7 +54,7 @@ namespace emp {
 
 class AG2PCSession {
 public:
-  using DirectCtx = AG2PCCtx;
+  using ctx_t = AG2PCCtx;
   // AG2PC reveal is recipient-only: the non-recipient party learns nothing, so
   // reveal returns std::nullopt there (vs ClearSession, where everyone learns it).
   template <class V> using reveal_t = std::optional<typename V::clear_t>;
@@ -65,8 +65,8 @@ public:
   AG2PCSession& operator=(const AG2PCSession&) = delete;
 
   // The gate context, for value construction that is not I/O — e.g. public
-  // constants UInt_T<DirectCtx,32>::constant(sess.direct_ctx(), 7), operators, or frontend::run.
-  DirectCtx& direct_ctx() { return ctx_; }
+  // constants UInt_T<ctx_t,32>::constant(sess.ctx(), 7), operators, or frontend::run.
+  ctx_t& ctx() { return ctx_; }
 
   int party() const { return proto_.party; }
   // Total ANDs actually garbled across every flush / run (post-DCE), all strategies.
@@ -78,13 +78,13 @@ public:
   AG2PCProtocol& protocol() { return proto_; }
 
   // ---- typed input (eager: authenticated immediately → materialized) ----
-  // input<V>(owner, clear): V is a value type over THIS session's DirectCtx, e.g.
-  // UInt_T<DirectCtx,32>. Called by both parties; only `owner`'s clear is used.
+  // input<V>(owner, clear): V is a value type over THIS session's ctx_t, e.g.
+  // UInt_T<ctx_t,32>. Called by both parties; only `owner`'s clear is used.
   // PUBLIC builds a public constant (no OT).
   template <WireValue V>
   V input(int owner, const typename V::clear_t& clear) {
-    static_assert(std::same_as<typename V::context_type, DirectCtx>,
-        "AG2PCSession::input<V>: V must be a value over this session's DirectCtx");
+    static_assert(std::same_as<typename V::context_type, ctx_t>,
+        "AG2PCSession::input<V>: V must be a value over this session's ctx_t");
     const auto eb = V::encode(clear);                    // std::array<bool, V::width()>
     std::vector<uint8_t> bits(eb.begin(), eb.end());     // batch protocol storage is runtime-sized
     SecureWires bundle = authenticate_(owner, bits);
@@ -105,8 +105,8 @@ public:
     template <WireValue V>
     V add(int owner, const typename V::clear_t& clear) {
       if (finished_) error("AG2PCSession::input_batch: add() after finish()");
-      static_assert(std::same_as<typename V::context_type, DirectCtx>,
-          "AG2PCSession::input_batch add<V>: V must be a value over this session's DirectCtx");
+      static_assert(std::same_as<typename V::context_type, ctx_t>,
+          "AG2PCSession::input_batch add<V>: V must be a value over this session's ctx_t");
       const auto eb = V::encode(clear);                  // std::array<bool, V::width()>
       std::vector<uint8_t> bits(eb.begin(), eb.end());   // batch protocol storage is runtime-sized
       std::vector<uint32_t> ids = sess_->ctx_.reserve_ids(bits.size());  // reserved, unmaterialized until finish()
@@ -141,8 +141,8 @@ public:
   // XOR-share sentinel has no meaning in this protocol and is rejected.
   template <WireValue V, class... Keep>
   reveal_t<V> reveal(const V& v, int recipient, const Keep&... keep) {
-    static_assert(std::same_as<typename V::context_type, DirectCtx>,
-        "AG2PCSession::reveal<V>: V must be a value over this session's DirectCtx");
+    static_assert(std::same_as<typename V::context_type, ctx_t>,
+        "AG2PCSession::reveal<V>: V must be a value over this session's ctx_t");
     if (recipient != PUBLIC && recipient != ALICE && recipient != BOB)
       error("AG2PCSession::reveal: recipient must be PUBLIC, ALICE, or BOB (XOR-share reveal is not supported)");
 #if EMP_CONTEXT_CHECKS
@@ -177,15 +177,15 @@ public:
   // ---- COMPILED replay: a stored typed Circuit replayed standalone through the
   // passes. Prefer this for any .empbc / hand-built circuit.
   template <frontend::RecordValue RetV, frontend::RecordValue... ArgVs>
-  typename RetV::template rebind<DirectCtx>
+  typename RetV::template rebind<ctx_t>
   run(const frontend::Circuit<RetV, ArgVs...>& c,
-      const typename ArgVs::template rebind<DirectCtx>&... args) {
+      const typename ArgVs::template rebind<ctx_t>&... args) {
     SecureWires bundle;
     (append_arg_(bundle, args), ...);
     if ((uint32_t)bundle.size() != c.program().num_inputs)
       error("AG2PCSession::run: total argument width != circuit input count");
     SecureWires out = engine_.run_program(c.program(), bundle);
-    return wrap_output_<typename RetV::template rebind<DirectCtx>>(out);
+    return wrap_output_<typename RetV::template rebind<ctx_t>>(out);
   }
 
   // ---- LIVE BODY replay: a pure body replayed live, once per pass (no stored IR).
@@ -210,7 +210,7 @@ public:
       };
       SecureWires out = engine_.run_source(bundle, source);
       using RetV = typename Tr::value_return;   // value type over RecordCtx
-      return wrap_output_<typename RetV::template rebind<DirectCtx>>(out);
+      return wrap_output_<typename RetV::template rebind<ctx_t>>(out);
     } else {
       return frontend::invalid_circuit_fn{};   // unreachable after the contract asserts
     }
@@ -218,13 +218,13 @@ public:
 
   // ---- typed raw-program escape hatch (advanced): a loaded/hand-authored
   // BooleanProgram run over materialized typed args, with an explicit RetV value
-  // type over DirectCtx (e.g. BitVec<128>). Prefer run(circuit, ...) — wrap the program
+  // type over ctx_t (e.g. BitVec<128>). Prefer run(circuit, ...) — wrap the program
   // into a typed frontend::Circuit at load time — and reach for this only for the
   // genuinely-untyped raw case.
   template <WireValue RetV, class... Args>
   RetV run_artifact(const circuit::BooleanProgram& prog, const Args&... args) {
-    static_assert(std::same_as<typename RetV::context_type, DirectCtx>,
-        "AG2PCSession::run_artifact<RetV>: RetV must be a value over this session's DirectCtx");
+    static_assert(std::same_as<typename RetV::context_type, ctx_t>,
+        "AG2PCSession::run_artifact<RetV>: RetV must be a value over this session's ctx_t");
     SecureWires bundle;
     (append_arg_(bundle, args), ...);
     if ((uint32_t)bundle.size() != prog.num_inputs)
@@ -351,8 +351,8 @@ private:
   // non-materialized arg is a loud error here, before any network op).
   template <class A>
   void append_arg_(SecureWires& bundle, const A& a) {
-    static_assert(std::is_same_v<typename A::context_type, DirectCtx>,
-        "AG2PCSession::run: argument must be a value over AG2PCSession::DirectCtx");
+    static_assert(std::is_same_v<typename A::context_type, ctx_t>,
+        "AG2PCSession::run: argument must be a value over AG2PCSession::ctx_t");
 #if EMP_CONTEXT_CHECKS
     if (a.context() != &ctx_) error("AG2PCSession::run: argument belongs to a different context");
 #endif
@@ -403,7 +403,7 @@ private:
 
 static_assert(Session<AG2PCSession>);
 static_assert(DirectSession<AG2PCSession>);
-static_assert(SessionIO<AG2PCSession, UInt_T<AG2PCSession::DirectCtx, 32>>);
+static_assert(SessionIO<AG2PCSession, UInt_T<AG2PCSession::ctx_t, 32>>);
 static_assert(CheckpointingSession<AG2PCSession>);
 
 }  // namespace emp

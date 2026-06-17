@@ -24,9 +24,9 @@ static bool check_builtin(AG2PCSession &sess, int party, const char *name) {
   std::array<bool, N_in> in_bits{};
   for (int i = 0; i < N_in; ++i) in_bits[i] = ((i * 7 + 3) % 5) == 0;
 
-  auto in = sess.input<BitVec_T<AG2PCSession::DirectCtx, N_in>>(
+  auto in = sess.input<BitVec_T<AG2PCSession::ctx_t, N_in>>(
       BOB, party == BOB ? in_bits : std::array<bool, N_in>{});
-  auto out = sess.reveal(sess.run_artifact<BitVec_T<AG2PCSession::DirectCtx, N_out>>(prog, in), ALICE);
+  auto out = sess.reveal(sess.run_artifact<BitVec_T<AG2PCSession::ctx_t, N_out>>(prog, in), ALICE);
 
   if (party != ALICE) return true;
   std::vector<uint8_t> oracle = clear_eval(prog, std::vector<uint8_t>(in_bits.begin(), in_bits.end()));

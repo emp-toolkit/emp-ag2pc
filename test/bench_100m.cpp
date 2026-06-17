@@ -33,8 +33,8 @@ using namespace emp;
 
 namespace {
 
-using B128 = BitVec_T<AG2PCSession::DirectCtx, 128>;
-using B256 = BitVec_T<AG2PCSession::DirectCtx, 256>;
+using B128 = BitVec_T<AG2PCSession::ctx_t, 128>;
+using B256 = BitVec_T<AG2PCSession::ctx_t, 256>;
 
 uint64_t env_u64(const char* name, uint64_t fallback) {
   const char* s = std::getenv(name);
@@ -75,12 +75,6 @@ long peak_rss_kib() {
 #endif
 }
 
-std::array<uint8_t, 32> bytes_from_bits(const std::array<bool, 256>& bits) {
-  std::array<uint8_t, 32> out{};
-  for (int i = 0; i < 256; ++i)
-    if (bits[(size_t)i]) out[(size_t)i / 8] |= (uint8_t)(1u << (i % 8));
-  return out;
-}
 
 std::array<uint8_t, 32> openssl_sha_chain(uint64_t iters) {
   std::array<uint8_t, 32> cur{};
@@ -197,7 +191,8 @@ int main(int argc, char** argv) {
       std::printf("  result          missing reveal at ALICE\n");
       ok = false;
     } else {
-      std::array<uint8_t, 32> got = bytes_from_bits(opened.value());
+      std::array<uint8_t, 32> got{};
+      bools_to_bits(got.data(), opened.value().data(), 256);  // pack 256 bools -> 32 bytes
       std::array<uint8_t, 32> ref = openssl_sha_chain(iters);
       ok = std::memcmp(got.data(), ref.data(), got.size()) == 0;
       print_hex("  got             ", got);

@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCSession sess(io, &pool, party);
 
-  using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
+  using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
   const uint32_t alice_budget = 100;
   const uint32_t bob_price = 73;
 

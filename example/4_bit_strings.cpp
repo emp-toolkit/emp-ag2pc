@@ -15,8 +15,8 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCSession sess(io, &pool, party);
 
-  using Bits16 = BitVec_T<AG2PCSession::DirectCtx, 16>;
-  using Bits32 = BitVec_T<AG2PCSession::DirectCtx, 32>;
+  using Bits16 = BitVec_T<AG2PCSession::ctx_t, 16>;
+  using Bits32 = BitVec_T<AG2PCSession::ctx_t, 32>;
 
   const uint16_t alice_tag = 0xbeef;
   const uint16_t bob_nonce = 0x1234;

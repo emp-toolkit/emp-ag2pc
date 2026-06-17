@@ -13,25 +13,25 @@ using namespace emp;
 // header; restated here so this TU is the standalone concept gate).
 static_assert(Session<AG2PCSession>);
 static_assert(DirectSession<AG2PCSession>);
-static_assert(SessionIO<AG2PCSession, UInt_T<AG2PCSession::DirectCtx, 32>>);
-static_assert(SessionIO<AG2PCSession, Int_T<AG2PCSession::DirectCtx, 32>>);
-static_assert(SessionIO<AG2PCSession, BitVec_T<AG2PCSession::DirectCtx, 128>>);
+static_assert(SessionIO<AG2PCSession, UInt_T<AG2PCSession::ctx_t, 32>>);
+static_assert(SessionIO<AG2PCSession, Int_T<AG2PCSession::ctx_t, 32>>);
+static_assert(SessionIO<AG2PCSession, BitVec_T<AG2PCSession::ctx_t, 128>>);
 static_assert(CheckpointingSession<AG2PCSession>);
 
 // Ctx is the pure gate recorder; the value layer is built over it.
-static_assert(std::is_same_v<AG2PCSession::DirectCtx, AG2PCCtx>);
+static_assert(std::is_same_v<AG2PCSession::ctx_t, AG2PCCtx>);
 static_assert(BooleanContext<AG2PCCtx>);
-static_assert(std::is_same_v<UInt_T<AG2PCSession::DirectCtx, 32>, UInt_T<AG2PCCtx, 32>>);
+static_assert(std::is_same_v<UInt_T<AG2PCSession::ctx_t, 32>, UInt_T<AG2PCCtx, 32>>);
 
 // AG2PC reveal is recipient-only: reveal_t<V> is std::optional<V::clear_t>.
 static_assert(std::is_same_v<
-    AG2PCSession::reveal_t<UInt_T<AG2PCSession::DirectCtx, 32>>,
-    std::optional<UInt_T<AG2PCSession::DirectCtx, 32>::clear_t>>);
+    AG2PCSession::reveal_t<UInt_T<AG2PCSession::ctx_t, 32>>,
+    std::optional<UInt_T<AG2PCSession::ctx_t, 32>::clear_t>>);
 
 // run() is well-formed over a compiled Circuit and over a live body, and a
 // checkpointed (materialized) value is an acceptable run() argument. These are
 // decltype-only probes — nothing is evaluated, so no session/network is built.
-using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
+using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
 using Adder  = frontend::Circuit<rec::UInt<32>, rec::UInt<32>, rec::UInt<32>>;
 
 template <class S>

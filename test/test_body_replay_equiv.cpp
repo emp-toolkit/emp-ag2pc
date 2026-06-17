@@ -15,7 +15,7 @@
 using namespace std;
 using namespace emp;
 namespace cf = emp::frontend;
-using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
+using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
 
 struct Result { block digest; uint32_t out; bool have; };
 

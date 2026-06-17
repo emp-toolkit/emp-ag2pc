@@ -23,8 +23,8 @@ int main(int argc, char **argv) {
   AG2PCSession sess(io, &pool, party);
   io->flush();
 
-  using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
-  using Float32 = Float_T<AG2PCSession::DirectCtx, 32>;
+  using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
+  using Float32 = Float_T<AG2PCSession::ctx_t, 32>;
   bool ok = true;
 
   // 1) compiled UInt32 adder, replayed standalone.

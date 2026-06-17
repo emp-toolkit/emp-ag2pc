@@ -17,8 +17,8 @@ int main(int argc, char** argv) {
   ThreadPool pool(4);
   AG2PCSession sess(io, &pool, party);
 
-  using Bits128 = BitVec_T<AG2PCSession::DirectCtx, 128>;
-  using Bits256 = BitVec_T<AG2PCSession::DirectCtx, 256>;
+  using Bits128 = BitVec_T<AG2PCSession::ctx_t, 128>;
+  using Bits256 = BitVec_T<AG2PCSession::ctx_t, 256>;
 
   const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
   std::array<bool, 128> alice_half{};

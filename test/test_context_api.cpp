@@ -17,8 +17,8 @@ int main(int argc, char **argv) {
   AG2PCSession sess(io, &pool, party);
   io->flush();
 
-  using UInt32 = UInt_T<AG2PCSession::DirectCtx, 32>;
-  using Int32  = Int_T<AG2PCSession::DirectCtx, 32>;
+  using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
+  using Int32  = Int_T<AG2PCSession::ctx_t, 32>;
 
   const uint32_t X = 1234567u, Y = 7654321u, K = 333u;
   bool ok = true;

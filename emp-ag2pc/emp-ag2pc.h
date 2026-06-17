@@ -5,7 +5,7 @@
 // emp-tool BooleanContext model. The whole API is one session, AG2PCSession:
 //
 //   AG2PCSession sess(io, &pool, party);
-//   using Ctx = AG2PCSession::DirectCtx;  // the direct gate context
+//   using Ctx = AG2PCSession::ctx_t;  // the direct gate context
 //   using UInt32 = UInt_T<Ctx, 32>;
 //   auto a = sess.input<UInt32>(ALICE, x);
 //   auto b = sess.input<UInt32>(BOB, y);
@@ -13,7 +13,7 @@
 //   auto out = sess.reveal(z, PUBLIC);    // std::optional<uint64_t>
 //
 // The session owns the I/O boundary (input / reveal / checkpoint), the crypto
-// protocol, and the authenticated carried state; sess.direct_ctx() is the gate
+// protocol, and the authenticated carried state; sess.ctx() is the gate
 // context values are built over (the session names no value family). Circuits run three ways: direct/chunked (operators),
 // compiled replay (sess.run(circuit, ...)), and live body replay
 // (sess.run(body, ...)). Circuits are authored once with the emp-tool frontend

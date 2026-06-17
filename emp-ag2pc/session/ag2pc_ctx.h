@@ -1,7 +1,7 @@
 #ifndef EMP_AG2PC_SESSION_CTX_H__
 #define EMP_AG2PC_SESSION_CTX_H__
 
-// AG2PCCtx — the AG2PC gate recorder (AG2PCSession::DirectCtx). It is a C++20
+// AG2PCCtx — the AG2PC gate recorder (AG2PCSession::ctx_t). It is a C++20
 // BooleanContext: gate ops record into the current chunk as bare recorder ids. It
 // owns ONLY the pending-recording substrate — no crypto, no carried/authenticated
 // state, no I/O. The Session (ag2pc_session.h) owns the carried materialized state
