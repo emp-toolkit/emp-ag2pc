@@ -10,7 +10,6 @@
 // would surface as a body-vs-compiled mismatch.
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "emp-tool/runtime/core/test_mode.h"
-#include "net_setup.h"
 #include <cstdio>
 using namespace std;
 using namespace emp;
@@ -33,9 +32,9 @@ static block fingerprint(AG2PCSession &sess) {
 template <class Body>
 static Result run_body(int party, int port, Body body, uint32_t av, uint32_t bv) {
   reset_test_seed_counter();
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
   auto a = sess.input<UInt32>(ALICE, party == ALICE ? av : 0);
   auto b = sess.input<UInt32>(BOB,   party == BOB   ? bv : 0);
@@ -49,9 +48,9 @@ static Result run_body(int party, int port, Body body, uint32_t av, uint32_t bv)
 template <class Body>
 static Result run_comp(int party, int port, Body body, uint32_t av, uint32_t bv) {
   reset_test_seed_counter();
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
   auto c = cf::compile<rec::UInt<32>, rec::UInt<32>>(body);
   auto a = sess.input<UInt32>(ALICE, party == ALICE ? av : 0);
@@ -63,8 +62,8 @@ static Result run_comp(int party, int port, Body body, uint32_t av, uint32_t bv)
 }
 
 int main(int argc, char **argv) {
-  int port, party;
-  parse_party_and_port(argv, &party, &port);
+  int party = parse_party(argv);
+  int port = peer_port();
   if (party > 2) return 0;
   set_test_mode(true);   // deterministic randomness (single-threaded seed stream)
 

@@ -38,13 +38,13 @@ static bool check_builtin(AG2PCSession &sess, int party, const char *name) {
 }
 
 int main(int argc, char **argv) {
-  int port, party;
-  parse_party_and_port(argv, &party, &port);
+  int party;
+  party = parse_party(argv);
   if (party > 2) return 0;
 
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(peer_port()) : NetIO::connect(peer_ip(), peer_port());
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   bool ok = true;

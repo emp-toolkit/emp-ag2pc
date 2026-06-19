@@ -5,7 +5,6 @@
 //   4) the pending-arg rule: a direct-chunk value is rejected by run() until a
 //      checkpoint materializes it, after which run() accepts it.
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "net_setup.h"
 #include <cstdint>
 #include <cstdio>
 #include <span>
@@ -14,13 +13,13 @@ using namespace emp;
 namespace cf = emp::frontend;
 
 int main(int argc, char **argv) {
-  int port, party;
-  parse_party_and_port(argv, &party, &port);
+  int party;
+  party = parse_party(argv);
   if (party > 2) return 0;
 
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(peer_port()) : NetIO::connect(peer_ip(), peer_port());
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;

@@ -3,7 +3,6 @@
 // Shared helpers for the AG2PCSession tests.
 #include "emp-tool/emp-tool.h"
 #include "emp-tool/ir/context/context.h"   // ClearCtx, execute_program
-#include "net_setup.h"
 #include <cstdint>
 #include <span>
 #include <vector>

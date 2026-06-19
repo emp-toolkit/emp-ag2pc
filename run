@@ -1,11 +1,12 @@
 #!/bin/bash
 # Run a two-party AG2PC test on localhost. ALICE (party 1) is the server and the
 # party that reports pass/fail, so its exit code is the test's exit code. A random
-# per-invocation port avoids collisions between back-to-back runs.
-PORT=$(( (RANDOM % 30000) + 20000 ))
-"$1" 2 "$PORT" "${@:2}" &
+# per-invocation port avoids collisions between back-to-back runs. Port travels
+# via EMP_PORT (read by peer_port()); only the party id is a positional arg.
+export EMP_PORT=$(( (RANDOM % 30000) + 20000 ))
+"$1" 2 "${@:2}" &
 BOB=$!
-"$1" 1 "$PORT" "${@:2}"
+"$1" 1 "${@:2}"
 RC=$?
 wait "$BOB"
 exit "$RC"

@@ -15,7 +15,6 @@
 
 #include "emp-ag2pc/emp-ag2pc.h"
 #include "emp-tool/ir/builtins.h"
-#include "net_setup.h"
 
 #include <openssl/sha.h>
 #include <algorithm>
@@ -114,8 +113,8 @@ BitVec_T<Ctx, 256> replay_sha256_256(Ctx& c, const circuit::BooleanProgram& prog
 }  // namespace
 
 int main(int argc, char** argv) {
-  int port, party;
-  parse_party_and_port(argv, &party, &port);
+  int party;
+  party = parse_party(argv);
   if (party > 2) return 0;
 
   const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
@@ -134,10 +133,9 @@ int main(int argc, char** argv) {
   }
   const int threads = env_int("BENCH_THREADS", 4);
 
-  NetIO* io;
-  make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(peer_port()) : NetIO::connect(peer_ip(), peer_port());
   ThreadPool pool(threads);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   const uint64_t planned_ands = sha_ands * iters;

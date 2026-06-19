@@ -9,7 +9,6 @@
 // reachable from a reveal/keep.) Such an abort would desync a live two-party run, so
 // these are validated by construction here rather than death-tested.
 #include "emp-ag2pc/emp-ag2pc.h"
-#include "net_setup.h"
 #include <cstdio>
 using namespace std;
 using namespace emp;
@@ -17,9 +16,9 @@ using UInt32 = UInt_T<AG2PCSession::ctx_t, 32>;
 
 // ALICE + BOB inputs authenticated in ONE process_inputs phase.
 static bool batch_inputs(int party, int port) {
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   const uint32_t X = 11111u, Y = 22222u;
@@ -39,9 +38,9 @@ static bool batch_inputs(int party, int port) {
 // Long accumulator chain, checkpoint(acc) after each step: prunes the dropped
 // per-step inputs, carries acc forward.
 static bool checkpoint_chain(int party, int port) {
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   const int N = 8;
@@ -68,9 +67,9 @@ static bool checkpoint_chain(int party, int port) {
 // reveal(p, ..., keep q): q is pending and must survive the flush so a later
 // reveal(q) still finds it.
 static bool reveal_keep_list(int party, int port) {
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   const uint32_t X = 40u, Y = 15u;
@@ -92,9 +91,9 @@ static bool reveal_keep_list(int party, int port) {
 // checkpoint() with no args drops all pending work and prunes all carried state;
 // the context stays usable with fresh inputs afterward.
 static bool checkpoint_cleanup(int party, int port) {
-  NetIO *io; make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(port) : NetIO::connect(peer_ip(), port);
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
   io->flush();
 
   auto a = sess.input<UInt32>(ALICE, party == ALICE ? 5 : 0);
@@ -113,8 +112,8 @@ static bool checkpoint_cleanup(int party, int port) {
 }
 
 int main(int argc, char **argv) {
-  int port, party;
-  parse_party_and_port(argv, &party, &port);
+  int party = parse_party(argv);
+  int port = peer_port();
   if (party > 2) return 0;
 
   bool ok = true;

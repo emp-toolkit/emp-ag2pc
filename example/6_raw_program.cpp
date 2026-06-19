@@ -8,14 +8,13 @@
 using namespace emp;
 
 int main(int argc, char** argv) {
-  int party, port;
-  parse_party_and_port(argv, &party, &port);
+  int party;
+  party = parse_party(argv);
   if (party > BOB) return 0;
 
-  NetIO* io = nullptr;
-  ag2pc_example::make_io2pc(party, port, io);
+  auto io = (party == ALICE) ? NetIO::listen(peer_port()) : NetIO::connect(peer_ip(), peer_port());
   ThreadPool pool(4);
-  AG2PCSession sess(io, &pool, party);
+  AG2PCSession sess(io.get(), &pool, party);
 
   using Bits128 = BitVec_T<AG2PCSession::ctx_t, 128>;
   using Bits256 = BitVec_T<AG2PCSession::ctx_t, 256>;

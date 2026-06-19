@@ -17,14 +17,15 @@ Run one example locally:
 ```
 
 Run across two machines by starting party 1 on the server and setting
-`AG2PC_PEER=<party-1-ip>` for party 2:
+`EMP_PEER_IP=<party-1-ip>` for party 2 (the shared port is `EMP_PORT`,
+default 12345):
 
 ```bash
 # party 1
-./build/bin/example_1_basics 1 12345
+./build/bin/example_1_basics 1
 
 # party 2
-AG2PC_PEER=10.0.0.5 ./build/bin/example_1_basics 2 12345
+EMP_PEER_IP=10.0.0.5 ./build/bin/example_1_basics 2
 ```
 
 Examples:

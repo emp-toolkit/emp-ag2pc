@@ -13,13 +13,6 @@
 
 namespace ag2pc_example {
 
-inline void make_io2pc(int party, int port, emp::NetIO*& io) {
-  const char* peer = std::getenv("AG2PC_PEER");
-  io = (party == emp::ALICE)
-      ? new emp::NetIO(nullptr, port)
-      : new emp::NetIO(peer ? peer : "127.0.0.1", port);
-}
-
 inline bool is_alice(int party) {
   return party == emp::ALICE;
 }
