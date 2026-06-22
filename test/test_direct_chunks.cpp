@@ -114,7 +114,7 @@ static bool checkpoint_cleanup(int party, int port) {
 int main(int argc, char **argv) {
   int party = parse_party(argv);
   int port = peer_port();
-  if (party > 2) return 0;
+  if (party > BOB) return 0;
 
   bool ok = true;
   ok &= batch_inputs(party,      port + 0);

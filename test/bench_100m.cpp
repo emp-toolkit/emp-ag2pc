@@ -115,7 +115,7 @@ BitVec_T<Ctx, 256> replay_sha256_256(Ctx& c, const circuit::BooleanProgram& prog
 int main(int argc, char** argv) {
   int party;
   party = parse_party(argv);
-  if (party > 2) return 0;
+  if (party > BOB) return 0;
 
   const circuit::BooleanProgram& sha = circuit::builtin_circuit("sha256_256");
   const uint64_t sha_ands = count_ands(sha);

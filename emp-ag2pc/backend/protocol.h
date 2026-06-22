@@ -55,7 +55,7 @@ public:
   // reused across all process_inputs / compute / decode calls; it holds the COT
   // session open across compute() calls and runs the COT consistency check before
   // each reveal (decode) so the check gates output release.
-  TriplePool *fpre = nullptr;
+  std::unique_ptr<TriplePool> fpre;
   // io = primary channel (sequential comm); sib = a second channel spawned from
   // it, owned here. send_io/recv_io alias (io, sib) by party for the duplex
   // beaver pass; everything sequential uses io directly.
@@ -75,13 +75,19 @@ public:
   // statistical security parameter forwarded to TriplePool (bucket sizing).
   AG2PCProtocol(NetIO *io, ThreadPool *pool_, int party_, int ssp = 40)
       : io(io), sib_owned(io->make_sibling()), sib(sib_owned.get()),
-        send_io(party_ == 1 ? io : sib_owned.get()),
-        recv_io(party_ == 1 ? sib_owned.get() : io),
+        send_io(party_ == ALICE ? io : sib_owned.get()),
+        recv_io(party_ == ALICE ? sib_owned.get() : io),
         pool(pool_), party(party_) {
-    fpre = new TriplePool(io, sib_owned.get(), pool_, party_, ssp);
+    fpre = std::make_unique<TriplePool>(io, sib_owned.get(), pool_, party_, ssp);
     Delta = fpre->Delta;
   }
-  ~AG2PCProtocol() { delete fpre; }
+  // TriplePool borrows io / sib_owned; release it here (dtor body runs before
+  // the member destructors) so it is gone before those channels are torn down.
+  ~AG2PCProtocol() { fpre.reset(); }
+
+  // Garbler = party 1 (ALICE); evaluator = party 2 (BOB).
+  bool is_garbler()   const { return party == ALICE; }
+  bool is_evaluator() const { return party != ALICE; }
 
   // Flush the deferred subspace-VOLE / COT consistency check (end of a run).
   void flush_cot_check() { fpre->maybe_flush_cot_check(); }

@@ -16,11 +16,13 @@ like emp-sh2pc, but malicious-secure.
 #include <emp-ag2pc/emp-ag2pc.h>
 using namespace emp;
 
-NetIO *io; make_io2pc(party, port, io);
+int party = parse_party(argv);   // argv[1]; port/IP from $EMP_PORT / $EMP_PEER_IP
+auto io = (party == ALICE) ? NetIO::listen(peer_port())
+                           : NetIO::connect(peer_ip(), peer_port());
 ThreadPool pool(4);
-AG2PCSession sess(io, &pool, party);
+AG2PCSession sess(io.get(), &pool, party);
 
-using Ctx = AG2PCSession::DirectCtx;
+using Ctx = AG2PCSession::ctx_t;
 using UInt32 = UInt_T<Ctx, 32>;
 auto a = sess.input<UInt32>(ALICE, party == ALICE ? x : 0);  // each party owns its input
 auto b = sess.input<UInt32>(BOB,   party == BOB   ? y : 0);
@@ -29,7 +31,7 @@ uint32_t out = sess.reveal(c, PUBLIC).value();               // std::optional<ui
 ```
 
 The session owns the I/O boundary (`input` / `reveal` / `checkpoint`), the crypto
-protocol, and the authenticated wire state; `sess.direct_ctx()` is the gate context your
+protocol, and the authenticated wire state; `sess.ctx()` is the gate context your
 values are built over. `sess.reveal(v, recipient)` returns `std::optional<clear_t>`
 — the value at the recipient (or `PUBLIC`), `std::nullopt` at any other party.
 
@@ -39,8 +41,8 @@ values are built over. `sess.reveal(v, recipient)` returns `std::optional<clear_
 ## Values and circuits
 
 Circuit values are emp-tool's context-bound types over the session's gate context
-(`AG2PCSession::DirectCtx`): `Bit_T<DirectCtx>`, `UInt_T<DirectCtx,N>`,
-`Int_T<DirectCtx,N>`, `Float_T<DirectCtx,W>`, and `BitVec_T<DirectCtx,N>` (a
+(`AG2PCSession::ctx_t`): `Bit_T<ctx_t>`, `UInt_T<ctx_t,N>`,
+`Int_T<ctx_t,N>`, `Float_T<ctx_t,W>`, and `BitVec_T<ctx_t,N>` (a
 fixed-width bit vector for crypto blocks). The session names no value family. They support the usual
 operators (`+ - * / %`, comparisons, bit ops, shifts/rotates, slice/concat). A
 reusable circuit is written once as a pure body and compiled with the emp-tool
@@ -236,7 +238,7 @@ engine, and the crypto protocol.
   invariant is structural. (Every emp protocol exposes a Session this way; a
   trivial one — `ClearSession` in emp-tool — is a thin wrapper over a pure context,
   but the public surface is always the Session.)
-- **`AG2PCCtx`** (`session/ag2pc_ctx.h`) — the gate recorder, `AG2PCSession::DirectCtx`. It
+- **`AG2PCCtx`** (`session/ag2pc_ctx.h`) — the gate recorder, `AG2PCSession::ctx_t`. It
   is a `BooleanContext` whose gate ops record into the current chunk as bare ids;
   it holds no crypto and no carried state. Liveness is explicit (no refcount, no
   global singleton); operand stale-detection is deferred to the session's flush.

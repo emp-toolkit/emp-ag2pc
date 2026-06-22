@@ -161,7 +161,7 @@ struct AG2PCEngine {
 
     // Pass 1: slot assignment and mask collection.
     {
-      AG2PCSlotMaskPass sp(st, mpc->fpre);
+      AG2PCSlotMaskPass sp(st, mpc->fpre.get());
       ag2pc_detail::run_pass(sp, source);
       sp.commit_sizes();
     }

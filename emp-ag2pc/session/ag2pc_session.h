@@ -301,7 +301,7 @@ private:
 
   // Store an n-wire bundle into the given (already reserved) ids → materialized.
   void materialize_into_(const std::vector<uint32_t>& ids, const SecureWires& bundle) {
-    const bool is_eval = (proto_.party != 1);
+    const bool is_eval = proto_.is_evaluator();
     if (bundle.size() != ids.size()) error("AG2PCSession: materialize width mismatch");
     for (size_t i = 0; i < ids.size(); ++i)
       carry_load_(carried_[ids[i]], bundle, i, is_eval);
@@ -316,7 +316,7 @@ private:
   // Gather materialized wires (caller order) into a SecureWires bundle.
   SecureWires gather_carried_(const std::vector<uint32_t>& ids) const {
     SecureWires s;
-    const bool is_eval = (proto_.party != 1);
+    const bool is_eval = proto_.is_evaluator();
     s.Lambda.resize(ids.size());
     s.wire_bundle.resize(ids.size());
     if (is_eval) s.eval_label.resize(ids.size());
@@ -393,7 +393,7 @@ private:
     SecureWires input_bundle = gather_carried_(plan.input_ids);
     SecureWires result = engine_.run_program(plan.prog, input_bundle);
 
-    const bool is_eval = (proto_.party != 1);
+    const bool is_eval = proto_.is_evaluator();
     for (size_t i = 0; i < plan.output_ids.size(); ++i)
       carry_load_(carried_[plan.output_ids[i]], result, i, is_eval);
 

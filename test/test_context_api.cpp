@@ -9,7 +9,7 @@ using namespace emp;
 int main(int argc, char **argv) {
   int party;
   party = parse_party(argv);
-  if (party > 2) return 0;
+  if (party > BOB) return 0;
 
   auto io = (party == ALICE) ? NetIO::listen(peer_port()) : NetIO::connect(peer_ip(), peer_port());
   ThreadPool pool(4);

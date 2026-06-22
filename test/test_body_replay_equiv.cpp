@@ -64,7 +64,7 @@ static Result run_comp(int party, int port, Body body, uint32_t av, uint32_t bv)
 int main(int argc, char **argv) {
   int party = parse_party(argv);
   int port = peer_port();
-  if (party > 2) return 0;
+  if (party > BOB) return 0;
   set_test_mode(true);   // deterministic randomness (single-threaded seed stream)
 
   const uint32_t A = 1234567u, B = 7654321u;
