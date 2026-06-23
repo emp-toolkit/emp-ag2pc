@@ -399,7 +399,7 @@ public:
       block S = RO("AG2PC RO", zero_block)
                     .absorb(io->get_digest()).absorb(sib->get_digest()).squeeze_block();
       uint32_t raw;
-      { PRG prg2(&S); prg2.random_data(&raw, sizeof(uint32_t)); }
+      { PRG prg2(&S); prg2.random_data_unaligned(&raw, sizeof(uint32_t)); }
       int r_k = (int)(raw % (uint32_t)L);
       bucket_one_layer(am, ak, sac_mac.data(), sac_key.data(), L, r_k);
     }
