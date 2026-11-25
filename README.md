@@ -1,5 +1,10 @@
 # emp-ag2pc
 
+> **Archived.** This repository is no longer maintained and receives no fixes,
+> including security fixes. Use **[emp-ag](https://github.com/emp-toolkit/emp-ag)**,
+> which runs authenticated garbling for any n ≥ 2 parties; two-party computation is
+> `AGMPCSession<2>`.
+
 ![build](https://github.com/emp-toolkit/emp-ag2pc/workflows/build/badge.svg)
 [![CodeQL](https://github.com/emp-toolkit/emp-ag2pc/actions/workflows/codeql.yml/badge.svg)](https://github.com/emp-toolkit/emp-ag2pc/actions/workflows/codeql.yml)
 
